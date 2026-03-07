@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="no">
+<head>
+<meta charset="UTF-8">
+<title>Melosys Knowledge Graph</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a1a; color: #e0e0e0; overflow: hidden; }
+#graph { width: 100vw; height: 100vh; }
+#info { position: fixed; top: 16px; right: 16px; background: rgba(20,20,40,0.95); border: 1px solid #333; border-radius: 8px; padding: 16px; max-width: 350px; font-size: 13px; display: none; z-index: 10; }
+#info h3 { color: #7ec8e3; margin-bottom: 8px; }
+#info .type { color: #999; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
+#info .props { margin-top: 8px; }
+#info .props div { margin: 4px 0; }
+#info .props span { color: #888; }
+#legend { position: fixed; bottom: 16px; left: 16px; background: rgba(20,20,40,0.95); border: 1px solid #333; border-radius: 8px; padding: 12px 16px; font-size: 12px; z-index: 10; }
+#legend div { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+#legend .dot { width: 12px; height: 12px; border-radius: 50%; }
+#stats { position: fixed; top: 16px; left: 16px; background: rgba(20,20,40,0.95); border: 1px solid #333; border-radius: 8px; padding: 12px 16px; font-size: 12px; z-index: 10; }
+#stats h3 { color: #7ec8e3; margin-bottom: 6px; font-size: 14px; }
+</style>
+<script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+</head>
+<body>
+<div id="graph"></div>
+<div id="stats"><h3>Melosys Knowledge Graph</h3><div id="stats-content">Loading...</div></div>
+<div id="legend">
+  <div><span class="dot" style="background:#e74c3c"></span> BUC</div>
+  <div><span class="dot" style="background:#3498db"></span> SED</div>
+  <div><span class="dot" style="background:#2ecc71"></span> Artikkel</div>
+  <div><span class="dot" style="background:#9b59b6"></span> Forordning</div>
+  <div><span class="dot" style="background:#e67e22"></span> H_BUC</div>
+  <div><span class="dot" style="background:#f39c12"></span> AD_BUC</div>
+</div>
+<div id="info"></div>
+<script>
+const COLORS = {
+  BUC: '#e74c3c', SED: '#3498db', Artikkel: '#2ecc71',
+  Forordning: '#9b59b6', H_BUC: '#e67e22', AD_BUC: '#f39c12'
+};
+const SIZES = {
+  BUC: 30, SED: 20, Artikkel: 18, Forordning: 35, H_BUC: 14, AD_BUC: 12
+};
+const EDGE_COLORS = {
+  inneholder_sed: '#e74c3c', hjemlet_i: '#2ecc71', refererer_til: '#95a5a6',
+  del_av: '#9b59b6', underprosess: '#e67e22', implementerer: '#1abc9c'
+};
+
+const data = __GRAPH_DATA__;
+(function() {
+  const nodes = new vis.DataSet(data.nodes.map(n => ({
+    id: n.id,
+    label: n.label,
+    color: { background: COLORS[n.type] || '#666', border: '#fff', highlight: { background: '#fff', border: COLORS[n.type] || '#666' } },
+    size: SIZES[n.type] || 15,
+    font: { color: '#ddd', size: n.type === 'AD_BUC' || n.type === 'H_BUC' ? 10 : 12 },
+    shape: n.type === 'Forordning' ? 'diamond' : n.type === 'BUC' ? 'box' : 'dot',
+    title: `${n.type}: ${n.label}`,
+    _data: n
+  })));
+
+  const edges = new vis.DataSet(data.edges.map((e, i) => ({
+    id: i,
+    from: e.source,
+    to: e.target,
+    label: e.type.replace(/_/g, ' '),
+    color: { color: EDGE_COLORS[e.type] || '#555', opacity: 0.6 },
+    font: { color: '#666', size: 9, strokeWidth: 0 },
+    arrows: 'to',
+    smooth: { type: 'curvedCW', roundness: 0.15 },
+    width: e.type === 'inneholder_sed' || e.type === 'hjemlet_i' ? 2 : 1,
+    _data: e
+  })));
+
+  const container = document.getElementById('graph');
+  const network = new vis.Network(container, { nodes, edges }, {
+    physics: {
+      solver: 'forceAtlas2Based',
+      forceAtlas2Based: { gravitationalConstant: -100, centralGravity: 0.01, springLength: 150, springConstant: 0.04 },
+      stabilization: { iterations: 500, fit: true }
+    },
+    interaction: { hover: true, tooltipDelay: 200, zoomView: true },
+    layout: { improvedLayout: true }
+  });
+
+  // Stop physics after stabilization so the graph stays still
+  network.on('stabilized', () => { network.setOptions({ physics: false }); });
+
+  // Stats
+  document.getElementById('stats-content').innerHTML =
+    `Nodes: ${data.stats.total_nodes} | Edges: ${data.stats.total_edges}<br>` +
+    Object.entries(data.stats.by_type).map(([t,c]) => `<span style="color:${COLORS[t]||'#666'}">${t}: ${c}</span>`).join(' | ');
+
+  // Click info panel
+  network.on('click', params => {
+    const info = document.getElementById('info');
+    if (params.nodes.length) {
+      const n = nodes.get(params.nodes[0])._data;
+      const props = Object.entries(n.properties || {}).map(([k,v]) => `<div><span>${k}:</span> ${v}</div>`).join('');
+      info.innerHTML = `<div class="type">${n.type}</div><h3>${n.label}</h3>${props ? '<div class="props">' + props + '</div>' : ''}`;
+      info.style.display = 'block';
+    } else {
+      info.style.display = 'none';
+    }
+  });
+})();
+</script>
+</body>
+</html>

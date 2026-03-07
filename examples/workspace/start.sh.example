@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Start Knowledge API with your collections.
+# Copy this to your workspace root and customize.
+set -euo pipefail
+cd "$(dirname "$0")"
+WS="$(pwd)"
+
+# Optional: knowledge graph for entity-aware search
+# KNOWLEDGE_GRAPH_PATH="$WS/my-graph.json" \
+
+uv run --directory huginn knowledge_api_server.py \
+  --data-path "$WS/data/collections" \
+  --collections \
+    my-notion \
+    my-confluence \
+  --port 8321

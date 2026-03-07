@@ -1,0 +1,70 @@
+[
+  {
+    "pattern": "*/Arkiv - toppen/*",
+    "reason": "archived content (old architecture, status reports, sprint releases, retros)"
+  },
+  {
+    "pattern": "*/Arkiv - toppen.md",
+    "reason": "archive index page"
+  },
+  {
+    "pattern": "*/Kontinuerlig forbedring/*",
+    "reason": "process improvement discussions, not domain knowledge"
+  },
+  {
+    "pattern": "*/Kontinuerlig forbedring.md",
+    "reason": "process improvement index page"
+  },
+  {
+    "pattern": "*/UX/UX-møter*",
+    "reason": "UX meeting notes and agendas"
+  },
+  {
+    "pattern": "*/Fagmøter*",
+    "reason": "meeting notes and agendas"
+  },
+  {
+    "pattern": "*/Hvordan vi jobber*/Test/*",
+    "reason": "test procedures and regression checklists"
+  },
+  {
+    "pattern": "*/Hvordan vi jobber*/Test.md",
+    "reason": "test index page"
+  },
+  {
+    "pattern": "*/Planer/*",
+    "reason": "roadmaps and planning documents"
+  },
+  {
+    "pattern": "*/Planer.md",
+    "reason": "plans index page"
+  },
+  {
+    "pattern": "*/Tekniske møter/*",
+    "reason": "technical meeting notes"
+  },
+  {
+    "pattern": "*/Tekniske møter.md",
+    "reason": "technical meetings index page"
+  },
+  {
+    "pattern": "*/UX/UX 202*/*",
+    "reason": "UX meeting notes (yearly folders)"
+  },
+  {
+    "title_pattern": "møtereferat",
+    "reason": "meeting minutes by title"
+  },
+  {
+    "pattern": "*/SED mottak og behandling.md",
+    "reason": "image-only page, no searchable text content"
+  },
+  {
+    "pattern": "*/Mapping av lovvalgs SED til Melosys domenemodell.md",
+    "reason": "outdated 2019 doc with TPS references, replaced by PDL"
+  },
+  {
+    "pattern": "*/Mapping av lovvalgs SED til Melosys domenemodell/*",
+    "reason": "outdated 2019 SED mapping docs with TPS references"
+  }
+]

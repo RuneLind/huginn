@@ -1,0 +1,32 @@
+**/__pycache__/*
+tmp
+.idea
+.venv
+**/.DS_Store
+.vscode
+.dccache
+
+# Sensitive auth files
+.env
+**/*_auth.json
+**/auth/*.json
+
+# Data directories
+data/
+data
+
+# Log files
+logs/
+*.log
+
+# Generated
+uv.lock
+.pytest_cache/
+
+# Private domain repos (each has its own .git)
+huginn-nav/
+huginn-capra/
+huginn-jarvis/
+
+# Local start script (personal config)
+start.sh

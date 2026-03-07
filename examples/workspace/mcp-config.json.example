@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "huginn": {
+      "command": "uv",
+      "args": ["--directory", "/path/to/huginn", "run", "knowledge_api_mcp_adapter.py"],
+      "env": {
+        "KNOWLEDGE_API_URL": "http://localhost:8321",
+        "KNOWLEDGE_COLLECTIONS": "my-notion,my-confluence",
+        "KNOWLEDGE_DESCRIPTION": "Search my team's Notion workspace and Confluence documentation"
+      }
+    }
+  }
+}
