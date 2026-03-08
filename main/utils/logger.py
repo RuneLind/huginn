@@ -31,7 +31,12 @@ def setup_root_logger(level: int = logging.INFO) -> logging.Logger:
 def configure_third_party_loggers():
     library_configs = {
         'faiss': logging.INFO,
-        'sentence_transformers': logging.INFO,
+        'sentence_transformers': logging.WARNING,
+        'httpx': logging.WARNING,
+        'huggingface_hub': logging.WARNING,
+        'transformers': logging.ERROR,
+        'transformers.utils.loading_report': logging.ERROR,
+        'urllib3': logging.WARNING,
     }
     
     for lib_name, log_level in library_configs.items():

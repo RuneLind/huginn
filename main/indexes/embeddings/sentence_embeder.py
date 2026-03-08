@@ -1,4 +1,10 @@
+import os
 from sentence_transformers import SentenceTransformer
+
+# Use cached models only — skip HF Hub network requests for faster startup
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 class SentenceEmbedder:
     def __init__(self, model_name="sentence-transformers/all-MiniLM-L6-v2", query_prefix="", passage_prefix=""):
