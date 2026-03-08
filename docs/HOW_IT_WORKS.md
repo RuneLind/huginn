@@ -195,10 +195,10 @@ embedding_other = model.encode(chunk_other)
 ```mermaid
 graph TD
     subgraph "FAISS Index (In Memory)"
-        A[Chunk 0:<br/>Vector [0.23, -0.45, ...]]
-        B[Chunk 1:<br/>Vector [0.22, -0.46, ...]]
-        C[Chunk 2:<br/>Vector [-0.12, 0.89, ...]]
-        D[Chunk 3:<br/>Vector [0.34, 0.67, ...]]
+        A["Chunk 0:<br/>Vector (0.23, -0.45, ...)"]
+        B["Chunk 1:<br/>Vector (0.22, -0.46, ...)"]
+        C["Chunk 2:<br/>Vector (-0.12, 0.89, ...)"]
+        D["Chunk 3:<br/>Vector (0.34, 0.67, ...)"]
         E[... 2000 more chunks]
     end
     
@@ -267,7 +267,7 @@ query_embedding = model.encode(query)
 
 ```mermaid
 graph TD
-    A[🔢 Query Vector<br/>[0.21, -0.47, ...]] --> B{🔍 FAISS: Compare with<br/>ALL vectors}
+    A["🔢 Query Vector<br/>(0.21, -0.47, ...)"] --> B{🔍 FAISS: Compare with<br/>ALL vectors}
     A2[📝 Query Text] --> B2{🔍 BM25: Keyword<br/>matching}
 
     B --> C[FAISS Top 2x]
