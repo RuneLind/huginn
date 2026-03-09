@@ -1104,9 +1104,9 @@ def jira_ingest(req: JiraIngestRequest, background_tasks: BackgroundTasks):
                     "snippet": snippet,
                 })
 
-    # Trigger background reindex
-    if jira_collection and store.has_collection(jira_collection):
-        background_tasks.add_task(run_collection_update, jira_collection)
+    # Skip automatic reindex — the daily update script handles both
+    # collection reindexing and knowledge graph rebuild in one pass.
+    # Use POST /api/collections/{name}/update to trigger manually if needed.
 
     return {
         "status": "ingested",
