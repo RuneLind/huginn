@@ -291,7 +291,7 @@ class TestFrontmatterMetadata:
             content_texts=["---\ntitle: My Page\nwip: true\nurl: https://x.com\n---\nBody content."]
         )
         results = converter.convert(doc)
-        assert results[0].get("metadata") == {"title": "My Page", "wip": "true"}
+        assert results[0].get("metadata") == {"title": "My Page", "wip": "true", "url": "https://x.com"}
 
     def test_extracts_all_known_fields(self, converter, make_doc):
         doc = make_doc(
@@ -309,7 +309,7 @@ class TestFrontmatterMetadata:
 
     def test_no_metadata_when_no_known_fields(self, converter, make_doc):
         doc = make_doc(
-            content_texts=["---\nurl: https://x.com\nmodifiedTime: 2025-01-01\n---\nBody."]
+            content_texts=["---\nmodifiedTime: 2025-01-01\ncustomField: something\n---\nBody."]
         )
         results = converter.convert(doc)
         assert "metadata" not in results[0]
