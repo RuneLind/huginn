@@ -4,6 +4,7 @@ Tests the value contribution of each component:
   FAISS-only vs BM25-only vs Hybrid vs Hybrid+Reranker
 """
 
+import json
 import random
 import time
 
@@ -37,6 +38,12 @@ def bench_component_comparison(ctx: BenchmarkContext, collection_name: str, samp
         configs["faiss_only"] = {"hits_at_5": 0, "mrr_sum": 0}
         configs["bm25_only"] = {"hits_at_5": 0, "mrr_sum": 0}
 
+    # Load index mapping once for raw indexer scoring
+    mapping = None
+    if has_hybrid:
+        mapping_path = f"{collection_name}/indexes/index_document_mapping.json"
+        mapping = json.loads(ctx.persister.read_text_file(mapping_path))
+
     for doc, title in titled:
         doc_id = doc.get("id", "")
 
@@ -51,11 +58,11 @@ def bench_component_comparison(ctx: BenchmarkContext, collection_name: str, samp
         if has_hybrid:
             # FAISS only
             scores, indexes = indexer.faiss_indexer.search(title, 30)
-            _score_raw(configs["faiss_only"], scores, indexes, doc_id, searcher)
+            _score_raw(configs["faiss_only"], scores, indexes, doc_id, mapping)
 
             # BM25 only
             scores, indexes = indexer.bm25_indexer.search(title, 30)
-            _score_raw(configs["bm25_only"], scores, indexes, doc_id, searcher)
+            _score_raw(configs["bm25_only"], scores, indexes, doc_id, mapping)
 
     total_duration = (time.monotonic() - t_start) * 1000
     n = len(titled)
@@ -97,10 +104,8 @@ def _score_results(stats: dict, results: dict, doc_id: str):
     # Not found
 
 
-def _score_raw(stats: dict, scores, indexes, doc_id: str, searcher):
+def _score_raw(stats: dict, scores, indexes, doc_id: str, mapping: dict):
     """Score raw indexer results by mapping chunk IDs back to documents."""
-    import json
-    mapping = searcher._load_mapping()
     seen_docs = []
 
     for chunk_id in indexes[0]:

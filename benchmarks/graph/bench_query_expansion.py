@@ -1,5 +1,6 @@
 """Benchmark: knowledge graph query expansion effectiveness."""
 
+import random
 import time
 
 from benchmarks.context import BenchmarkContext
@@ -93,7 +94,6 @@ def bench_query_expansion(ctx: BenchmarkContext, collection_name: str) -> Benchm
 
 def _dynamic_expansion_queries(graph) -> list[str]:
     """Generate expansion queries from actual graph entities."""
-    import random
     rng = random.Random(42)
     queries = []
 

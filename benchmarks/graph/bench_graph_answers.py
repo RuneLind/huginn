@@ -1,5 +1,6 @@
 """Benchmark: graph query answering correctness."""
 
+import random
 import time
 
 from benchmarks.context import BenchmarkContext
@@ -129,7 +130,6 @@ def bench_graph_qa(ctx: BenchmarkContext) -> BenchmarkResult:
 
 def _dynamic_qa_cases(graph) -> list[dict]:
     """Generate Q&A test cases from actual graph nodes."""
-    import random
     rng = random.Random(42)
     cases = []
 

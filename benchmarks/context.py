@@ -145,6 +145,6 @@ def load_documents_for_collection(persister: DiskPersister, collection_name: str
                 doc = json.loads(persister.read_text_file(full_path))
                 doc["_relative_path"] = f"{collection_name}/documents/{f}"
                 documents.append(doc)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Skipping {f}: {e}")
     return documents

@@ -1,7 +1,6 @@
 """Benchmark result recording, persistence, and comparison."""
 
 import json
-import os
 import platform
 import subprocess
 from dataclasses import dataclass, field, asdict

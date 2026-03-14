@@ -1,6 +1,8 @@
 """Benchmark: knowledge graph entity detection accuracy."""
 
 import json
+import random
+import re
 import time
 
 from benchmarks.context import BenchmarkContext
@@ -79,7 +81,6 @@ def bench_entity_detection(ctx: BenchmarkContext) -> BenchmarkResult:
 
         if expected_pattern:
             # Pattern-based matching (for Jira keys that could be issue or epic)
-            import re
             pattern = re.compile(expected_pattern)
             matched = [d for d in detected if pattern.match(d)]
             if matched:
@@ -137,7 +138,6 @@ def bench_entity_detection(ctx: BenchmarkContext) -> BenchmarkResult:
 
 def _dynamic_cases_from_graph(graph) -> list[dict]:
     """Generate test cases from actual graph nodes to ensure coverage."""
-    import random
     rng = random.Random(42)
     cases = []
 
@@ -165,15 +165,12 @@ def _dynamic_cases_from_graph(graph) -> list[dict]:
 
     for buc_id in rng.sample(bucs, min(2, len(bucs))):
         label = graph.nodes[buc_id].get("label", buc_id)
-        # Extract the BUC code from label (e.g., "LA_BUC_01")
-        import re
         m = re.search(r'LA[_ ]?BUC[_ ]?\d{1,2}', label)
         if m:
             cases.append({"text": f"Hva inneholder {m.group(0)}?", "expected": [buc_id]})
 
     for sed_id in rng.sample(seds, min(2, len(seds))):
         label = graph.nodes[sed_id].get("label", sed_id)
-        import re
         m = re.search(r'[AX]\d{3}', label)
         if m:
             cases.append({"text": f"Detaljer om {m.group(0)}", "expected": [sed_id]})
