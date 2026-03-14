@@ -29,10 +29,10 @@ from typing import Optional
 class PiiFinding:
     """A single PII detection."""
     category: str          # "personnummer", "email", "password"
-    matched_text: str      # The original matched text
-    redacted_text: str     # What it was replaced with
+    matched_text: str      # Redacted form of the match (never contains raw PII)
+    redacted_text: str     # What it was replaced with (same as matched_text)
     line_number: int       # 1-based line number in the text
-    context: str           # Surrounding text for log readability
+    context: str           # Safe context string for log readability
 
 
 @dataclass
