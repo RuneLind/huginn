@@ -136,7 +136,7 @@ def print_report(stats: dict, apply: bool):
             print(f"    {entry['file']}")
             print(f"      [{cat_summary}]")
             for f in findings:
-                print(f"      L{f['line']:4d} {f['category']:15s} {f['matched'][:30]:30s} → {f['redacted']}")
+                print(f"      L{f['line']:4d} {f['category']:15s} → {f['redacted']}")
         print()
 
     print(f"{'=' * 70}")
@@ -160,7 +160,7 @@ def write_findings_log(stats: dict, log_path: Path, apply: bool):
             {
                 "file": e["file"],
                 "findings": [
-                    {"category": f["category"], "line": f["line"], "matched": f["matched"]}
+                    {"category": f["category"], "line": f["line"], "redacted": f["redacted"]}
                     for f in e["findings"]
                 ],
             }

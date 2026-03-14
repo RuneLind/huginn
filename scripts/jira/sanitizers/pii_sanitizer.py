@@ -11,7 +11,10 @@ Usage:
     from scripts.jira.sanitizers.pii_sanitizer import PiiSanitizer
 
     sanitizer = PiiSanitizer()
-    clean_text, findings = sanitizer.sanitize(text)
+    result = sanitizer.sanitize(text)
+    # result.sanitized_text  — the redacted text
+    # result.findings        — list of PiiFinding
+    # result.has_pii         — bool
 
     # Or just detect without modifying:
     findings = sanitizer.detect(text)
@@ -70,11 +73,13 @@ _PASSWORD_PATTERN = re.compile(
 def _is_plausible_fnr(digits: str) -> bool:
     """Check if 11 digits could be a Norwegian fødselsnummer or D-nummer.
 
-    Uses basic date validation (not full mod-11 checksum) to filter out
+    Uses date validation and mod-11 checksum to filter out
     obviously non-personnummer numbers like GitHub run IDs, timestamps, etc.
     """
     if len(digits) != 11:
         return False
+
+    d = [int(c) for c in digits]
 
     day = int(digits[0:2])
     month = int(digits[2:4])
@@ -86,6 +91,21 @@ def _is_plausible_fnr(digits: str) -> bool:
     if day < 1 or day > 31:
         return False
     if month < 1 or month > 12:
+        return False
+
+    # Mod-11 checksum validation (kontrollsiffer)
+    w1 = [3, 7, 6, 1, 8, 9, 4, 5, 2]
+    k1 = 11 - (sum(d[i] * w1[i] for i in range(9)) % 11)
+    if k1 == 11:
+        k1 = 0
+    if k1 == 10 or k1 != d[9]:
+        return False
+
+    w2 = [5, 4, 3, 2, 7, 6, 5, 4, 3, 2]
+    k2 = 11 - (sum(d[i] * w2[i] for i in range(10)) % 11)
+    if k2 == 11:
+        k2 = 0
+    if k2 == 10 or k2 != d[10]:
         return False
 
     return True
@@ -131,16 +151,11 @@ class PiiSanitizer:
 
     def sanitize(self, text: str) -> SanitizeResult:
         """Detect and redact PII from text. Returns SanitizeResult."""
-        findings = self._scan(text)
-        if not findings:
+        sanitized = self._apply_redactions(text)
+        if sanitized == text:
             return SanitizeResult(original_text=text, sanitized_text=text)
 
-        # Apply replacements from end to start to preserve offsets
-        sanitized = text
-        # Sort findings by position (we use line_number but need actual offsets)
-        # Re-apply replacements using patterns to avoid offset tracking
-        sanitized = self._apply_redactions(sanitized)
-
+        findings = self._scan(text)
         return SanitizeResult(
             original_text=text,
             sanitized_text=sanitized,

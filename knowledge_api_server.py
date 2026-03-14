@@ -41,6 +41,8 @@ from scripts.jira.sanitizers.pii_sanitizer import PiiSanitizer
 setup_root_logger()
 logger = logging.getLogger(__name__)
 
+_pii_sanitizer = PiiSanitizer()
+
 
 class KnowledgeStore:
     """Holds all server state: embedder, persister, searchers, and Notion ID lookup."""
@@ -1054,8 +1056,7 @@ def jira_ingest(req: JiraIngestRequest, background_tasks: BackgroundTasks):
     md_content = _jira_content_to_markdown(req, existing_metadata)
 
     # Sanitize PII before writing
-    _sanitizer = PiiSanitizer()
-    _sanitize_result = _sanitizer.sanitize(md_content)
+    _sanitize_result = _pii_sanitizer.sanitize(md_content)
     if _sanitize_result.has_pii:
         cats = {}
         for _f in _sanitize_result.findings:
