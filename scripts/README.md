@@ -12,6 +12,7 @@ scripts/
 │   └── auth/             # Authentication files
 ├── jira/
 │   ├── fetchers/          # Scripts for downloading Jira issues
+│   ├── sanitizers/        # PII detection and redaction
 │   └── auth/             # Authentication files
 └── daily_notion_update.sh # Daily automated Notion index update
 ```
@@ -45,6 +46,10 @@ scripts/
 - **jira_fetcher.py** - Main Jira issue fetcher
 - **jira_discover_fields.py** - Discover available Jira fields
 - **jira_collection_create_cmd_adapter.py** - Create vector collection
+
+### Sanitizers
+- **pii_sanitizer.py** - PII detection and redaction (personnummer, emails, passwords)
+- **sanitize_jira_files.py** - Batch scan/redact PII from Jira markdown files (`--dryRun` / `--apply`)
 
 ## Usage
 
