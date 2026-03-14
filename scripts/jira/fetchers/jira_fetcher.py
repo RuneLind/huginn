@@ -26,6 +26,7 @@ Usage:
 
 import asyncio
 import json
+import logging
 import os
 import re
 import argparse
@@ -35,6 +36,10 @@ from typing import Dict, List, Optional, Set
 
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
+
+from scripts.jira.sanitizers.pii_sanitizer import PiiSanitizer
+
+logger = logging.getLogger(__name__)
 
 
 class JiraFetcher:
@@ -302,12 +307,19 @@ class JiraFetcher:
     def save_issues_as_markdown(self, issues: List[Dict], save_md_path: str,
                                  epic_info: Dict[str, str],
                                  skip_keys: Optional[Set[str]] = None):
-        """Save issues as flat markdown files to curated directory."""
+        """Save issues as flat markdown files to curated directory.
+
+        PII (personnummer, emails, passwords) is automatically redacted
+        before writing to disk.
+        """
         md_base = Path(save_md_path)
         md_base.mkdir(parents=True, exist_ok=True)
 
+        sanitizer = PiiSanitizer()
         saved = 0
         skipped = 0
+        pii_files = 0
+        pii_total = 0
 
         for i, issue in enumerate(issues, 1):
             issue_key = issue['key']
@@ -326,6 +338,19 @@ class JiraFetcher:
             filename = f"{issue_key}_{safe_title}.md"
 
             md_content = self.issue_to_markdown(issue, epic_link or '', epic_summary)
+
+            # Sanitize PII before writing
+            result = sanitizer.sanitize(md_content)
+            if result.has_pii:
+                pii_files += 1
+                pii_total += len(result.findings)
+                cats = {}
+                for f in result.findings:
+                    cats[f.category] = cats.get(f.category, 0) + 1
+                cat_str = ", ".join(f"{c}:{n}" for c, n in cats.items())
+                logger.info(f"PII redacted in {issue_key}: {cat_str}")
+                md_content = result.sanitized_text
+
             md_file = md_base / filename
             md_file.write_text(md_content, encoding='utf-8')
             self._set_file_mtime(md_file, updated)
@@ -337,17 +362,25 @@ class JiraFetcher:
         print(f"\nSaved {saved} issues to {md_base}")
         if skipped:
             print(f"  Skipped {skipped} (already existing or excluded)")
+        if pii_total > 0:
+            print(f"  PII redacted: {pii_total} findings in {pii_files} files")
 
     def save_issues_structured(self, issues: List[Dict], output_dir: str,
                                 epic_info: Dict[str, str]):
-        """Save issues organized by Epic in json/ + markdown/ subdirs."""
+        """Save issues organized by Epic in json/ + markdown/ subdirs.
+
+        PII is redacted from markdown output. JSON files are saved as-is
+        (raw API responses are not published to the index).
+        """
         output = Path(output_dir)
         json_dir = output / "json"
         md_dir = output / "markdown"
         json_dir.mkdir(parents=True, exist_ok=True)
         md_dir.mkdir(parents=True, exist_ok=True)
 
+        sanitizer = PiiSanitizer()
         epic_stats = {}
+        pii_total = 0
 
         for i, issue in enumerate(issues, 1):
             issue_key = issue['key']
@@ -378,8 +411,14 @@ class JiraFetcher:
                 encoding='utf-8'
             )
 
-            # Save Markdown
+            # Save Markdown (sanitized)
             md_content = self.issue_to_markdown(issue, epic_link or '', epic_summary)
+            result = sanitizer.sanitize(md_content)
+            if result.has_pii:
+                pii_total += len(result.findings)
+                logger.info(f"PII redacted in {issue_key}: {len(result.findings)} findings")
+                md_content = result.sanitized_text
+
             md_path = epic_md / f"{filename}.md"
             md_path.write_text(md_content, encoding='utf-8')
             self._set_file_mtime(md_path, updated)
@@ -390,6 +429,8 @@ class JiraFetcher:
         print(f"\nSaved {len(issues)} issues")
         print(f"  JSON: {json_dir}")
         print(f"  Markdown: {md_dir}")
+        if pii_total > 0:
+            print(f"  PII redacted: {pii_total} findings")
 
         print("\nIssues per Epic:")
         for epic_name, count in sorted(epic_stats.items(), key=lambda x: x[1], reverse=True):
