@@ -109,3 +109,58 @@ The system has entity detection patterns for BUC, SED, Artikkel, and Forordning 
 | FAISS p50 | 10ms | — |
 | BM25 p50 | 5ms | — |
 | Embedding throughput | 1,453/s (batch 100) | — |
+
+
+## Finding 7: Trace replay reveals real search gaps
+
+**Status:** Open — highest priority for next improvement branch
+
+**Data (from real MCP session traces):**
+| Collection | Doc Recall | Query Hit Rate | MRR | Unique Queries |
+|------------|-----------|----------------|-----|----------------|
+| jira-issues | 61.5% | 78.9% | 0.47 | 38 |
+| melosys-confluence-v3 | 80.6% | 95.0% | 0.68 | 20 |
+
+Trace replay uses actual query-document pairs captured from Jira analysis sessions.
+These are the queries the MCP agent tried during real work, and the documents it
+actually used. This is the highest-fidelity quality signal we have.
+
+**Key gaps:**
+
+### 7a. 18 Jira queries returned zero results
+Queries like `MELOSYS-7714 manuell beregning årsavregning POPP` that searched
+`jira-issues` but got nothing back. These are queries that SHOULD find docs.
+Likely caused by confidence filtering (NOISE_THRESHOLD=-0.01) or reranker
+score collapse filtering out weak-but-relevant results.
+
+**Action:** Investigate whether lowering the noise threshold or adjusting
+confidence filtering recovers these results without introducing noise.
+
+### 7b. 8 Jira queries found results but missed expected docs
+The system returned results but not the specific documents that were useful
+in the real session. 61% doc recall means we're missing ~40% of relevant docs.
+
+Examples of missed queries:
+- `MELOSYS-7080 epic støtte endringer tidligere år` (expected 2 docs)
+- `MELOSYS-7546 annullering trygdeavgift krediter tidligere år` (expected 1 doc)
+- `MELOSYS-7588 utvid datamodell trygdeavgiftsperioder grunnlagsperioder` (expected 1 doc)
+
+**Action:** Check if these docs are in the index but ranked too low, or
+if the chunking splits them in a way that loses the query-relevant content.
+
+### 7c. 29 queries hit stale `jira` collection (not `jira-issues`)
+The trace data contains queries against a collection named `jira` which
+no longer exists — it was renamed to `jira-issues`. These are not real
+search failures but a naming mismatch in the trace data.
+
+**Action:** Can be ignored or cleaned up in the trace data.
+
+### 7d. Confluence is strong at 81% recall
+Only 1 missed query (`årsavregning differanse beregning innbetalt avgift felt frontend`).
+7 queries returned empty, mostly very specific domain queries about EØS pensionists.
+
+**Improvement priority:**
+1. Investigate confidence/noise threshold impact on zero-result queries (7a)
+2. Check ranking of expected docs for partial-miss queries (7b)
+3. Build EESSI knowledge graph for entity-rich queries (Finding 5)
+4. Expand trace dataset with more sessions for better coverage
