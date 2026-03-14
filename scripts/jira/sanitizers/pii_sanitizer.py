@@ -38,17 +38,13 @@ class PiiFinding:
 @dataclass
 class SanitizeResult:
     """Result of sanitizing a piece of text."""
-    original_text: str
     sanitized_text: str
     findings: list[PiiFinding] = field(default_factory=list)
+    changed: bool = False
 
     @property
     def has_pii(self) -> bool:
         return len(self.findings) > 0
-
-    @property
-    def changed(self) -> bool:
-        return self.original_text != self.sanitized_text
 
 
 # Norwegian personnummer (fnr/dnr) validation
@@ -116,14 +112,9 @@ def _redact_fnr(digits: str) -> str:
     return digits[:6] + "*****"
 
 
-def _make_context(text: str, start: int, end: int, max_ctx: int = 40) -> str:
-    """Extract surrounding context for a match, for logging."""
-    ctx_start = max(0, start - max_ctx)
-    ctx_end = min(len(text), end + max_ctx)
-    before = text[ctx_start:start].replace('\n', ' ')
-    after = text[end:ctx_end].replace('\n', ' ')
-    matched = text[start:end]
-    return f"...{before}[{matched}]{after}..."
+def _make_context(redacted: str, line_number: int) -> str:
+    """Create safe context string using only redacted values (no surrounding raw text)."""
+    return f"L{line_number}: {redacted}"
 
 
 class PiiSanitizer:
@@ -153,13 +144,13 @@ class PiiSanitizer:
         """Detect and redact PII from text. Returns SanitizeResult."""
         sanitized = self._apply_redactions(text)
         if sanitized == text:
-            return SanitizeResult(original_text=text, sanitized_text=text)
+            return SanitizeResult(sanitized_text=text)
 
         findings = self._scan(text)
         return SanitizeResult(
-            original_text=text,
             sanitized_text=sanitized,
             findings=findings,
+            changed=True,
         )
 
     def _scan(self, text: str) -> list[PiiFinding]:
@@ -187,12 +178,14 @@ class PiiSanitizer:
             for m in _FNR_PATTERN.finditer(text):
                 digits = m.group(1)
                 if _is_plausible_fnr(digits):
+                    redacted = _redact_fnr(digits)
+                    line_num = _line_of(m.start())
                     findings.append(PiiFinding(
                         category="personnummer",
-                        matched_text=digits,
-                        redacted_text=_redact_fnr(digits),
-                        line_number=_line_of(m.start()),
-                        context=_make_context(text, m.start(), m.end()),
+                        matched_text=redacted,
+                        redacted_text=redacted,
+                        line_number=line_num,
+                        context=_make_context(redacted, line_num),
                     ))
 
         if self.redact_emails:
@@ -203,23 +196,27 @@ class PiiSanitizer:
                     continue
                 if domain in self.email_domain_allowlist:
                     continue
+                redacted = "<redacted-email>"
+                line_num = _line_of(m.start())
                 findings.append(PiiFinding(
                     category="email",
-                    matched_text=email,
-                    redacted_text="<redacted-email>",
-                    line_number=_line_of(m.start()),
-                    context=_make_context(text, m.start(), m.end()),
+                    matched_text=redacted,
+                    redacted_text=redacted,
+                    line_number=line_num,
+                    context=_make_context(redacted, line_num),
                 ))
 
         if self.redact_passwords:
             for m in _PASSWORD_PATTERN.finditer(text):
                 password_value = m.group(1)
+                redacted = m.group(0).replace(password_value, "<redacted-password>")
+                line_num = _line_of(m.start())
                 findings.append(PiiFinding(
                     category="password",
-                    matched_text=m.group(0),
-                    redacted_text=m.group(0).replace(password_value, "<redacted-password>"),
-                    line_number=_line_of(m.start()),
-                    context=_make_context(text, m.start(), m.end()),
+                    matched_text=redacted,
+                    redacted_text=redacted,
+                    line_number=line_num,
+                    context=_make_context(redacted, line_num),
                 ))
 
         return findings

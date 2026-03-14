@@ -33,7 +33,7 @@ from pathlib import Path
 # Allow running from project root
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from scripts.jira.sanitizers.pii_sanitizer import PiiSanitizer, PiiFinding
+from scripts.jira.sanitizers.pii_sanitizer import PiiSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +86,6 @@ def scan_directory(
             stats["findings_by_category"][cat] = stats["findings_by_category"].get(cat, 0) + 1
             file_entry["findings"].append({
                 "category": f.category,
-                "matched": f.matched_text,
                 "redacted": f.redacted_text,
                 "line": f.line_number,
             })
