@@ -36,9 +36,12 @@ from main.sources.notion.notion_document_reader import NotionDocumentReader
 from main.utils.logger import setup_root_logger
 from main.utils.filename import sanitize_filename
 from main.fetchers.youtube.youtube_transcript_downloader import YouTubeTranscriptDownloader
+from scripts.jira.sanitizers.pii_sanitizer import PiiSanitizer
 
 setup_root_logger()
 logger = logging.getLogger(__name__)
+
+_pii_sanitizer = PiiSanitizer()
 
 
 class KnowledgeStore:
@@ -1051,6 +1054,16 @@ def jira_ingest(req: JiraIngestRequest, background_tasks: BackgroundTasks):
 
     # Convert to markdown, merging with existing metadata
     md_content = _jira_content_to_markdown(req, existing_metadata)
+
+    # Sanitize PII before writing
+    _sanitize_result = _pii_sanitizer.sanitize(md_content)
+    if _sanitize_result.has_pii:
+        cats = {}
+        for _f in _sanitize_result.findings:
+            cats[_f.category] = cats.get(_f.category, 0) + 1
+        logger.info(f"Jira ingest PII redacted in {req.issueKey}: "
+                    + ", ".join(f"{c}:{n}" for c, n in cats.items()))
+        md_content = _sanitize_result.sanitized_text
 
     # Use existing filename if found, otherwise create new one using underscore convention
     if existing_filepath:
