@@ -85,6 +85,7 @@ def run_quality_benchmarks(ctx, collections: list[str]) -> list[BenchmarkResult]
     from benchmarks.quality.bench_known_queries import bench_known_queries
     from benchmarks.quality.bench_search_components import bench_component_comparison
     from benchmarks.quality.bench_realistic_queries import bench_realistic_queries
+    from benchmarks.quality.bench_trace_replay import bench_trace_replay
 
     results = []
 
@@ -97,6 +98,9 @@ def run_quality_benchmarks(ctx, collections: list[str]) -> list[BenchmarkResult]
 
         print(f"  Quality: realistic queries ({name})")
         results.append(bench_realistic_queries(ctx, name))
+
+        print(f"  Quality: trace replay ({name})")
+        results.append(bench_trace_replay(ctx, name))
 
         print(f"  Quality: component comparison ({name})")
         results.append(bench_component_comparison(ctx, name))
