@@ -72,15 +72,21 @@ Jira issues are short and keyword-dense — embeddings already capture them well
 6 of 50 Jira documents are not the #1 result when searching for their own title. They almost always appear in top 3 (recall@3=0.98). This may be due to similar issues with overlapping titles or the title boost not being strong enough.
 
 
-## Finding 4: 75 documents are untagged
+## Finding 4: 75 documents were untagged — FIXED
 
-**Status:** Open
+**Status:** Fixed (2026-03-14)
 
-**Data:**
+**Before:**
 - jira-issues: 64/2,132 untagged (3.0%)
 - melosys-confluence-v3: 11/294 untagged (3.7%)
 
-These likely failed during the initial LLM tagging run. Can be fixed by re-running the tagger with --force on untagged docs.
+**After:**
+- jira-issues: 0/2,132 untagged (100% tagged)
+- melosys-confluence-v3: 1/294 untagged (99.7% tagged)
+
+Re-ran tag_documents.py on both sources, then collection_update_cmd_adapter.py to re-index.
+The 1 remaining untagged Confluence doc is "Godterirullering" (candy rotation schedule) —
+content too minimal for tagger excerpt extraction.
 
 
 ## Finding 5: No EESSI knowledge graph
