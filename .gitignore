@@ -12,8 +12,7 @@ tmp
 **/auth/*.json
 
 # Data directories
-data/
-data
+/data/
 
 # Log files
 logs/
@@ -22,6 +21,9 @@ logs/
 # Generated
 uv.lock
 .pytest_cache/
+
+# Benchmark results (timestamped JSON, machine-specific)
+benchmarks/results/
 
 # Private domain repos (each has its own .git)
 huginn-nav/
