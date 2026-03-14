@@ -134,7 +134,8 @@ def bench_retriever_breakdown(ctx: BenchmarkContext, collection_name: str) -> Be
 
 def _percentile(data: list[float], p: float) -> float:
     """Simple percentile calculation."""
+    if not data:
+        return 0.0
     sorted_data = sorted(data)
-    idx = int(len(sorted_data) * p)
-    idx = min(idx, len(sorted_data) - 1)
+    idx = min(int(len(sorted_data) * p), len(sorted_data) - 1)
     return sorted_data[idx]
