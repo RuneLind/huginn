@@ -230,8 +230,7 @@ def main():
     # Compare with baseline
     comparison = None
     if args.compare:
-        # Load previous latest (before we overwrote the symlink)
-        # We need to find the second-most-recent file
+        # Find the second-most-recent result file to use as baseline
         result_files = sorted(RESULTS_DIR.glob("*.json"), key=lambda f: f.name)
         result_files = [f for f in result_files if f.name != "latest.json"]
         if len(result_files) >= 2:

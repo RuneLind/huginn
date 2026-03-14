@@ -50,7 +50,7 @@ class BenchmarkRun:
     def save(self, results_dir: Path) -> Path:
         """Save run to timestamped JSON file and update latest symlink."""
         results_dir.mkdir(parents=True, exist_ok=True)
-        filename = self.timestamp.replace(":", "-").replace("T", "_") + ".json"
+        filename = self.timestamp.replace(":", "-").replace("T", "_").replace("+", "p") + ".json"
         filepath = results_dir / filename
         filepath.write_text(self.to_json())
 

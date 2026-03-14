@@ -64,7 +64,7 @@ def bench_known_queries(ctx: BenchmarkContext, collection_name: str) -> Benchmar
         for expected_id in expected_ids:
             for rank, rid in enumerate(result_ids, 1):
                 # Support partial matching (expected_id is a substring of rid)
-                if expected_id in rid or rid in expected_id:
+                if expected_id in rid:
                     if best_rank is None or rank < best_rank:
                         best_rank = rank
                     break
