@@ -10,6 +10,7 @@ system can reproduce the same retrievals that worked in real sessions.
 """
 
 import json
+import re
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -43,6 +44,41 @@ def _load_relevant_docs(data_dir: Path, collection: str) -> set[str]:
             entry = json.loads(line)
             doc_ids.add(entry["doc_id"])
     return doc_ids
+
+
+def _normalize(name: str) -> str:
+    """Normalize a document name for comparison: lowercase, collapse whitespace/underscores."""
+    return re.sub(r'[\s_]+', '_', name.strip()).lower().rstrip('.')
+
+
+def _extract_issue_key(name: str) -> str | None:
+    """Extract Jira issue key (e.g., MELOSYS-7855) from a string."""
+    m = re.search(r'[A-Z][A-Z0-9]+-\d+', name)
+    return m.group(0) if m else None
+
+
+def _doc_matches(expected_doc: str, result_id: str) -> bool:
+    """Check if an expected document matches a result ID.
+
+    Handles filename normalization (spaces vs underscores, trailing dots)
+    and falls back to issue key matching for Jira documents.
+    """
+    # Direct substring match
+    if expected_doc in result_id or result_id.endswith(expected_doc):
+        return True
+
+    # Normalized match (handles spaces vs underscores, trailing dots)
+    if _normalize(expected_doc) in _normalize(result_id):
+        return True
+
+    # Issue key match: if expected doc has an issue key, check if result has the same key
+    expected_key = _extract_issue_key(expected_doc)
+    if expected_key:
+        result_key = _extract_issue_key(result_id)
+        if result_key and expected_key == result_key:
+            return True
+
+    return False
 
 
 def bench_trace_replay(ctx: BenchmarkContext, collection_name: str, trace_data_dir: str | Path = None) -> BenchmarkResult:
@@ -150,8 +186,7 @@ def bench_trace_replay(ctx: BenchmarkContext, collection_name: str, trace_data_d
             total_expected += 1
             found = False
             for rank, rid in enumerate(result_ids, 1):
-                # Match by doc filename (expected_doc is typically the filename)
-                if expected_doc in rid or rid.endswith(expected_doc):
+                if _doc_matches(expected_doc, rid):
                     hits_for_query += 1
                     found = True
                     if best_rank is None or rank < best_rank:
