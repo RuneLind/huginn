@@ -7,20 +7,18 @@ reranker to quantify the reranker's real-world value.
 
 import json
 import time
-from pathlib import Path
 
 from benchmarks.context import BenchmarkContext
 from benchmarks.results import BenchmarkResult
 
-DATA_DIR = Path(__file__).parent.parent / "data"
 
-
-def _load_queries(collection_name: str) -> dict | None:
-    """Load realistic query file for a collection."""
-    for suffix in [collection_name, collection_name.rsplit("-v", 1)[0] if "-v" in collection_name else collection_name]:
-        path = DATA_DIR / f"realistic_queries_{suffix}.json"
-        if path.exists():
-            return json.loads(path.read_text())
+def _load_queries(ctx: BenchmarkContext, collection_name: str) -> dict | None:
+    """Load realistic query file for a collection from any data directory."""
+    for suffix in [collection_name, collection_name.rsplit("-v", 1)[0] if "-v" in collection_name else None]:
+        if suffix:
+            path = ctx.find_data_file(f"realistic_queries_{suffix}.json")
+            if path:
+                return json.loads(path.read_text())
     return None
 
 
@@ -83,7 +81,7 @@ def bench_realistic_queries(ctx: BenchmarkContext, collection_name: str) -> Benc
     This benchmark uses natural-language queries (the kind developers ask via MCP)
     rather than exact title lookups. It directly measures the reranker's value.
     """
-    data = _load_queries(collection_name)
+    data = _load_queries(ctx, collection_name)
     if not data:
         return BenchmarkResult(
             name=f"realistic_queries_{collection_name}",

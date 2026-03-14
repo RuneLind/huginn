@@ -6,26 +6,28 @@ These serve as regression tests for search quality.
 
 import json
 import time
-from pathlib import Path
 
 from benchmarks.context import BenchmarkContext
 from benchmarks.results import BenchmarkResult
 
-DATA_DIR = Path(__file__).parent.parent / "data"
+
+def _find_query_file(ctx: BenchmarkContext, prefix: str, collection_name: str):
+    """Search data dirs for a query file, trying collection name and base name."""
+    for name in [collection_name, collection_name.rsplit("-v", 1)[0] if "-v" in collection_name else None]:
+        if name:
+            path = ctx.find_data_file(f"{prefix}_{name}.json")
+            if path:
+                return path
+    return None
 
 
 def bench_known_queries(ctx: BenchmarkContext, collection_name: str) -> BenchmarkResult:
     """Run curated query set and check if expected docs appear in top-k.
 
-    Loads queries from benchmarks/data/known_queries_{collection}.json.
+    Searches all data directories for known_queries_{collection}.json.
     """
-    # Try collection-specific file, then generic
-    query_file = DATA_DIR / f"known_queries_{collection_name}.json"
-    if not query_file.exists():
-        # Try stripping version suffixes (e.g., melosys-confluence-v3 -> melosys-confluence)
-        base = collection_name.rsplit("-v", 1)[0] if "-v" in collection_name else collection_name
-        query_file = DATA_DIR / f"known_queries_{base}.json"
-    if not query_file.exists():
+    query_file = _find_query_file(ctx, "known_queries", collection_name)
+    if not query_file:
         return BenchmarkResult(
             name=f"known_queries_{collection_name}",
             category="quality",

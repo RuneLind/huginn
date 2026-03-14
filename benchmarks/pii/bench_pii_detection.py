@@ -2,13 +2,10 @@
 
 import json
 import time
-from pathlib import Path
 
 from benchmarks.context import BenchmarkContext, load_documents_for_collection
 from benchmarks.results import BenchmarkResult
 from scripts.jira.sanitizers.pii_sanitizer import PiiSanitizer
-
-DATA_DIR = Path(__file__).parent.parent / "data"
 
 # Test vectors for PII detection — true positives and true negatives
 # Valid Norwegian fødselsnummer must pass mod-11 checksum.
@@ -47,8 +44,8 @@ def bench_pii_detection(ctx: BenchmarkContext) -> BenchmarkResult:
     sanitizer = PiiSanitizer()
 
     # Load test cases from JSON if available
-    cases_file = DATA_DIR / "pii_test_cases.json"
-    if cases_file.exists():
+    cases_file = ctx.find_data_file("pii_test_cases.json")
+    if cases_file:
         cases = json.loads(cases_file.read_text())
     else:
         cases = DEFAULT_PII_CASES

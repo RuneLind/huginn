@@ -2,12 +2,9 @@
 
 import json
 import time
-from pathlib import Path
 
 from benchmarks.context import BenchmarkContext
 from benchmarks.results import BenchmarkResult
-
-DATA_DIR = Path(__file__).parent.parent / "data"
 
 # Inline test cases — also loadable from JSON
 DEFAULT_TEST_CASES = [
@@ -50,8 +47,8 @@ def bench_entity_detection(ctx: BenchmarkContext) -> BenchmarkResult:
         )
 
     # Load test cases from JSON if available, otherwise use defaults
-    cases_file = DATA_DIR / "entity_test_cases.json"
-    if cases_file.exists():
+    cases_file = ctx.find_data_file("entity_test_cases.json")
+    if cases_file:
         cases = json.loads(cases_file.read_text())["cases"]
     else:
         cases = list(DEFAULT_TEST_CASES)
