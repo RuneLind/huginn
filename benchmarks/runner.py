@@ -84,6 +84,7 @@ def run_quality_benchmarks(ctx, collections: list[str]) -> list[BenchmarkResult]
     from benchmarks.quality.bench_self_retrieval import bench_self_retrieval
     from benchmarks.quality.bench_known_queries import bench_known_queries
     from benchmarks.quality.bench_search_components import bench_component_comparison
+    from benchmarks.quality.bench_realistic_queries import bench_realistic_queries
 
     results = []
 
@@ -93,6 +94,9 @@ def run_quality_benchmarks(ctx, collections: list[str]) -> list[BenchmarkResult]
 
         print(f"  Quality: known queries ({name})")
         results.append(bench_known_queries(ctx, name))
+
+        print(f"  Quality: realistic queries ({name})")
+        results.append(bench_realistic_queries(ctx, name))
 
         print(f"  Quality: component comparison ({name})")
         results.append(bench_component_comparison(ctx, name))
