@@ -81,24 +81,34 @@ def _doc_matches(expected_doc: str, result_id: str) -> bool:
     return False
 
 
-def bench_trace_replay(ctx: BenchmarkContext, collection_name: str, trace_data_dir: str | Path = None) -> BenchmarkResult:
+def _find_trace_data_dir(ctx: BenchmarkContext, trace_data_dir: str | Path | None) -> Path | None:
+    """Find the directory containing query-doc-pairs.jsonl."""
+    if trace_data_dir:
+        return Path(trace_data_dir)
+    for d in ctx.data_dirs:
+        if (d / "query-doc-pairs.jsonl").exists():
+            return d
+    return None
+
+
+def _collection_variants(collection_name: str) -> set[str]:
+    """Generate collection name variants for matching (e.g. jira-issues -> jira)."""
+    variants = {collection_name}
+    if "-" in collection_name:
+        variants.add(collection_name.split("-")[0])
+    if collection_name.count("-") >= 2:
+        variants.add(collection_name.rsplit("-v", 1)[0])
+    return variants
+
+
+def bench_trace_replay(ctx: BenchmarkContext, collection_name: str, trace_data_dir: str | Path | None = None) -> BenchmarkResult:
     """Replay real MCP traces and measure retrieval quality.
 
     For each query that was used in a real session, runs it through
     the current search pipeline and checks if the same documents
     that were fetched in the session appear in the results.
     """
-    # Find trace data
-    if trace_data_dir:
-        data_dir = Path(trace_data_dir)
-    else:
-        # Search context data dirs for query-doc-pairs.jsonl
-        data_dir = None
-        for d in ctx.data_dirs:
-            if (d / "query-doc-pairs.jsonl").exists():
-                data_dir = d
-                break
-
+    data_dir = _find_trace_data_dir(ctx, trace_data_dir)
     if not data_dir:
         return BenchmarkResult(
             name=f"trace_replay_{collection_name}",
@@ -118,18 +128,12 @@ def bench_trace_replay(ctx: BenchmarkContext, collection_name: str, trace_data_d
             metadata={"reason": "Empty trace data"},
         )
 
-    # Normalize collection name matching (handle jira-issues vs jira)
-    collection_variants = {collection_name}
-    if "-" in collection_name:
-        collection_variants.add(collection_name.split("-")[0])  # jira-issues -> jira
-    if collection_name.count("-") >= 2:
-        # melosys-confluence-v3 -> melosys-confluence-v3, melosys-confluence
-        collection_variants.add(collection_name.rsplit("-v", 1)[0])
+    variants = _collection_variants(collection_name)
 
     # Filter pairs for this collection
     collection_pairs = [
         p for p in pairs
-        if p.get("collection") in collection_variants or p.get("collection") == collection_name
+        if p.get("collection") in variants
     ]
 
     # Only keep pairs that actually fetched documents (non-empty results)
@@ -239,27 +243,7 @@ def bench_trace_replay(ctx: BenchmarkContext, collection_name: str, trace_data_d
     )
 
 
-def _find_trace_data_dir(ctx: BenchmarkContext, trace_data_dir: str | Path | None) -> Path | None:
-    """Find the directory containing query-doc-pairs.jsonl."""
-    if trace_data_dir:
-        return Path(trace_data_dir)
-    for d in ctx.data_dirs:
-        if (d / "query-doc-pairs.jsonl").exists():
-            return d
-    return None
-
-
-def _collection_variants(collection_name: str) -> set[str]:
-    """Generate collection name variants for matching (e.g. jira-issues -> jira)."""
-    variants = {collection_name}
-    if "-" in collection_name:
-        variants.add(collection_name.split("-")[0])
-    if collection_name.count("-") >= 2:
-        variants.add(collection_name.rsplit("-v", 1)[0])
-    return variants
-
-
-def bench_session_replay(ctx: BenchmarkContext, collection_name: str, trace_data_dir: str | Path = None) -> BenchmarkResult:
+def bench_session_replay(ctx: BenchmarkContext, collection_name: str, trace_data_dir: str | Path | None = None) -> BenchmarkResult:
     """Replay traces at session level — group queries by trace_id.
 
     This is a fairer benchmark than per-query replay because it mirrors
@@ -295,8 +279,9 @@ def bench_session_replay(ctx: BenchmarkContext, collection_name: str, trace_data
     # Group pairs by trace_id (session)
     sessions: dict[str, list[dict]] = defaultdict(list)
     for p in pairs:
-        if p.get("collection") in variants:
-            sessions[p["trace_id"]].append(p)
+        trace_id = p.get("trace_id")
+        if trace_id and p.get("collection") in variants:
+            sessions[trace_id].append(p)
 
     # Only keep sessions that have at least one pair with fetched docs
     active_sessions = {
