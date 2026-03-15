@@ -53,8 +53,8 @@ def _normalize(name: str) -> str:
 
 def _extract_issue_key(name: str) -> str | None:
     """Extract Jira issue key (e.g., MELOSYS-7855) from a string."""
-    m = re.search(r'[A-Z][A-Z0-9]+-\d+', name)
-    return m.group(0) if m else None
+    m = re.search(r'[A-Z][A-Z0-9]+-\d+', name, re.IGNORECASE)
+    return m.group(0).upper() if m else None
 
 
 def _doc_matches(expected_doc: str, result_id: str) -> bool:
