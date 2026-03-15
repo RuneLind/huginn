@@ -14,6 +14,8 @@ scripts/
 │   ├── fetchers/          # Scripts for downloading Jira issues
 │   ├── sanitizers/        # PII detection and redaction
 │   └── auth/             # Authentication files
+├── traces/
+│   └── extract_query_doc_pairs.py  # Extract search traces from Claude sessions
 └── daily_notion_update.sh # Daily automated Notion index update
 ```
 
