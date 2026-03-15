@@ -19,10 +19,8 @@ Usage:
 
 import argparse
 import json
-import os
-import re
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
@@ -38,7 +36,7 @@ def extract_tool_calls(session_path: Path) -> list[dict]:
     Returns list of dicts with keys: type (search|fetch), timestamp, and tool-specific fields.
     """
     calls = []
-    with open(session_path) as f:
+    with open(session_path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -180,7 +178,16 @@ def find_sessions(projects: list[str] | None, since: str | None) -> list[tuple[s
     Returns list of (project_name, session_path) tuples.
     """
     sessions = []
-    since_dt = datetime.fromisoformat(since) if since else None
+    if not CLAUDE_PROJECTS_DIR.exists():
+        print(f"Warning: Claude projects directory not found: {CLAUDE_PROJECTS_DIR}")
+        return sessions
+
+    since_dt = None
+    if since:
+        since_dt = datetime.fromisoformat(since)
+        # Ensure timezone-aware comparison
+        if since_dt.tzinfo is None:
+            since_dt = since_dt.replace(tzinfo=timezone.utc)
 
     for project_dir in CLAUDE_PROJECTS_DIR.iterdir():
         if not project_dir.is_dir():
@@ -193,7 +200,7 @@ def find_sessions(projects: list[str] | None, since: str | None) -> list[tuple[s
 
         for session_file in project_dir.glob("*.jsonl"):
             if since_dt:
-                mtime = datetime.fromtimestamp(session_file.stat().st_mtime)
+                mtime = datetime.fromtimestamp(session_file.stat().st_mtime, tz=timezone.utc)
                 if mtime < since_dt:
                     continue
             sessions.append((project_name, session_file))
@@ -285,11 +292,12 @@ def main():
     # Write output
     output_path.parent.mkdir(parents=True, exist_ok=True)
     mode = "a" if args.append else "w"
-    with open(output_path, mode) as f:
+    with open(output_path, mode, encoding="utf-8") as f:
         for p in deduped_pairs:
             f.write(json.dumps(p, ensure_ascii=False) + "\n")
 
-    total_lines = sum(1 for _ in open(output_path))
+    with open(output_path, encoding="utf-8") as f:
+        total_lines = sum(1 for _ in f)
     print(f"\nWritten to {output_path} ({total_lines} total pairs)")
 
 
