@@ -535,8 +535,8 @@ def get_document(collection: str, doc_id: str):
     if not store.has_collection(collection):
         raise HTTPException(status_code=404, detail=f"Collection '{collection}' not found")
 
-    # Prevent path traversal
-    if ".." in doc_id or doc_id.startswith("/"):
+    # Prevent absolute paths (actual traversal is caught by realpath check below)
+    if doc_id.startswith("/"):
         raise HTTPException(status_code=400, detail="Invalid document ID")
 
     doc_path = f"{collection}/documents/{doc_id}"
