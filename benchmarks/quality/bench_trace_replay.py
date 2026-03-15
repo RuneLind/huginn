@@ -81,24 +81,34 @@ def _doc_matches(expected_doc: str, result_id: str) -> bool:
     return False
 
 
-def bench_trace_replay(ctx: BenchmarkContext, collection_name: str, trace_data_dir: str | Path = None) -> BenchmarkResult:
+def _find_trace_data_dir(ctx: BenchmarkContext, trace_data_dir: str | Path | None) -> Path | None:
+    """Find the directory containing query-doc-pairs.jsonl."""
+    if trace_data_dir:
+        return Path(trace_data_dir)
+    for d in ctx.data_dirs:
+        if (d / "query-doc-pairs.jsonl").exists():
+            return d
+    return None
+
+
+def _collection_variants(collection_name: str) -> set[str]:
+    """Generate collection name variants for matching (e.g. jira-issues -> jira)."""
+    variants = {collection_name}
+    if "-" in collection_name:
+        variants.add(collection_name.split("-")[0])
+    if collection_name.count("-") >= 2:
+        variants.add(collection_name.rsplit("-v", 1)[0])
+    return variants
+
+
+def bench_trace_replay(ctx: BenchmarkContext, collection_name: str, trace_data_dir: str | Path | None = None) -> BenchmarkResult:
     """Replay real MCP traces and measure retrieval quality.
 
     For each query that was used in a real session, runs it through
     the current search pipeline and checks if the same documents
     that were fetched in the session appear in the results.
     """
-    # Find trace data
-    if trace_data_dir:
-        data_dir = Path(trace_data_dir)
-    else:
-        # Search context data dirs for query-doc-pairs.jsonl
-        data_dir = None
-        for d in ctx.data_dirs:
-            if (d / "query-doc-pairs.jsonl").exists():
-                data_dir = d
-                break
-
+    data_dir = _find_trace_data_dir(ctx, trace_data_dir)
     if not data_dir:
         return BenchmarkResult(
             name=f"trace_replay_{collection_name}",
@@ -118,18 +128,12 @@ def bench_trace_replay(ctx: BenchmarkContext, collection_name: str, trace_data_d
             metadata={"reason": "Empty trace data"},
         )
 
-    # Normalize collection name matching (handle jira-issues vs jira)
-    collection_variants = {collection_name}
-    if "-" in collection_name:
-        collection_variants.add(collection_name.split("-")[0])  # jira-issues -> jira
-    if collection_name.count("-") >= 2:
-        # melosys-confluence-v3 -> melosys-confluence-v3, melosys-confluence
-        collection_variants.add(collection_name.rsplit("-v", 1)[0])
+    variants = _collection_variants(collection_name)
 
     # Filter pairs for this collection
     collection_pairs = [
         p for p in pairs
-        if p.get("collection") in collection_variants or p.get("collection") == collection_name
+        if p.get("collection") in variants
     ]
 
     # Only keep pairs that actually fetched documents (non-empty results)
@@ -234,6 +238,145 @@ def bench_trace_replay(ctx: BenchmarkContext, collection_name: str, trace_data_d
         metadata={
             "collection": collection_name,
             "missed_queries": missed_queries[:10],
+            "trace_data_dir": str(data_dir),
+        },
+    )
+
+
+def bench_session_replay(ctx: BenchmarkContext, collection_name: str, trace_data_dir: str | Path | None = None) -> BenchmarkResult:
+    """Replay traces at session level — group queries by trace_id.
+
+    This is a fairer benchmark than per-query replay because it mirrors
+    how the MCP agent actually works: it tries multiple query variations
+    within a session and the union of all results is what matters.
+
+    For each session (trace_id), runs all queries that targeted this
+    collection, collects the union of all result documents, and checks
+    if all expected documents from the session appear in that union.
+    """
+    data_dir = _find_trace_data_dir(ctx, trace_data_dir)
+    if not data_dir:
+        return BenchmarkResult(
+            name=f"session_replay_{collection_name}",
+            category="quality",
+            metrics={"skipped": 1},
+            duration_ms=0,
+            metadata={"reason": "No query-doc-pairs.jsonl found in data dirs"},
+        )
+
+    pairs = _load_trace_data(data_dir)
+    if not pairs:
+        return BenchmarkResult(
+            name=f"session_replay_{collection_name}",
+            category="quality",
+            metrics={"skipped": 1},
+            duration_ms=0,
+            metadata={"reason": "Empty trace data"},
+        )
+
+    variants = _collection_variants(collection_name)
+
+    # Group pairs by trace_id (session)
+    sessions: dict[str, list[dict]] = defaultdict(list)
+    for p in pairs:
+        trace_id = p.get("trace_id")
+        if trace_id and p.get("collection") in variants:
+            sessions[trace_id].append(p)
+
+    # Only keep sessions that have at least one pair with fetched docs
+    active_sessions = {
+        tid: queries for tid, queries in sessions.items()
+        if any(q.get("fetched_docs") for q in queries)
+    }
+
+    if not active_sessions:
+        return BenchmarkResult(
+            name=f"session_replay_{collection_name}",
+            category="quality",
+            metrics={"skipped": 1},
+            duration_ms=0,
+            metadata={"reason": f"No sessions with fetched docs for {collection_name}"},
+        )
+
+    searcher = ctx.get_searcher(collection_name)
+    t_start = time.monotonic()
+
+    total_expected_docs = 0
+    total_found_docs = 0
+    sessions_with_full_recall = 0
+    session_details = []
+
+    for trace_id, session_pairs in active_sessions.items():
+        # Collect all expected docs for this session
+        expected_docs = set()
+        for p in session_pairs:
+            for doc in p.get("fetched_docs", []):
+                expected_docs.add(doc)
+
+        if not expected_docs:
+            continue
+
+        # Run all queries and collect union of results
+        all_result_ids = []
+        queries_run = []
+        for p in session_pairs:
+            query = p["query"]
+            results = searcher.search(
+                query,
+                max_number_of_chunks=20,
+                skip_reranker=False,
+            )
+            result_ids = [r["id"] for r in results.get("results", [])]
+            all_result_ids.extend(result_ids)
+            queries_run.append(query)
+
+        # Check which expected docs were found across all queries
+        found_docs = set()
+        missed_docs = set()
+        for expected_doc in expected_docs:
+            if any(_doc_matches(expected_doc, rid) for rid in all_result_ids):
+                found_docs.add(expected_doc)
+            else:
+                missed_docs.add(expected_doc)
+
+        total_expected_docs += len(expected_docs)
+        total_found_docs += len(found_docs)
+        if not missed_docs:
+            sessions_with_full_recall += 1
+
+        session_details.append({
+            "trace_id": trace_id[:8],
+            "queries": len(queries_run),
+            "expected_docs": len(expected_docs),
+            "found_docs": len(found_docs),
+            "missed": sorted(missed_docs) if missed_docs else [],
+        })
+
+    total_duration = (time.monotonic() - t_start) * 1000
+    n_sessions = len(session_details)
+
+    doc_recall = total_found_docs / total_expected_docs if total_expected_docs else 0
+    session_hit_rate = sessions_with_full_recall / n_sessions if n_sessions else 0
+
+    missed_sessions = [s for s in session_details if s["missed"]]
+
+    metrics = {
+        "doc_recall": doc_recall,
+        "session_hit_rate": session_hit_rate,
+        "total_sessions": n_sessions,
+        "sessions_full_recall": sessions_with_full_recall,
+        "total_expected_docs": total_expected_docs,
+        "total_found_docs": total_found_docs,
+    }
+
+    return BenchmarkResult(
+        name=f"session_replay_{collection_name}",
+        category="quality",
+        metrics=metrics,
+        duration_ms=total_duration,
+        metadata={
+            "collection": collection_name,
+            "missed_sessions": missed_sessions[:10],
             "trace_data_dir": str(data_dir),
         },
     )
