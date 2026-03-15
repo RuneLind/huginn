@@ -1,4 +1,4 @@
-# Benchmark Findings — 2026-03-14
+# Benchmark Findings — 2026-03-14 (updated 2026-03-15)
 
 Baseline run on jira-issues (2,132 docs, 8,688 chunks) and melosys-confluence-v3 (294 docs, 2,336 chunks).
 
@@ -119,16 +119,23 @@ Entity detection benchmark passes at F1=1.000 with the EESSI graph loaded.
 
 **Status:** Investigated — session-level replay confirms remaining misses are multi-step search artifacts
 
-**Data (from real MCP session traces):**
+**Data (from real MCP session traces, expanded 2026-03-15):**
 | Collection | Doc Recall | Query Hit Rate | MRR | Unique Queries |
 |------------|-----------|----------------|-----|----------------|
+| jira-issues | 69.6% | 84.8% | 0.56 | 46 |
+| melosys-confluence-v3 | 62.3% | 87.9% | 0.60 | 58 |
+
+*Previous baseline (28 sessions, hand-extracted):*
 | jira-issues (initial) | 61.5% | 78.9% | 0.47 | 38 |
-| jira-issues (after fix) | **66.7%** | **84.2%** | **0.54** | 38 |
+| jira-issues (after fix) | 66.7% | 84.2% | 0.54 | 38 |
 | melosys-confluence-v3 | 80.6% | 95.0% | 0.68 | 20 |
 
-Trace replay uses actual query-document pairs captured from Jira analysis sessions.
-These are the queries the MCP agent tried during real work, and the documents it
-actually used. This is the highest-fidelity quality signal we have.
+Trace replay uses actual query-document pairs extracted from Claude Code session
+transcripts (`scripts/traces/extract_query_doc_pairs.py`). The dataset was expanded
+from 119 pairs (28 sessions) to 895 pairs (247 sessions) on 2026-03-15.
+Confluence per-query recall dropped with the expanded dataset because many new
+queries come from multi-collection searches without explicit collection binding,
+making per-query matching stricter. Session-level recall remains strong (see 7c).
 
 **Key gaps:**
 
@@ -153,16 +160,16 @@ with wider search, so they're genuinely cross-query discoveries.
 
 Testing with max_chunks=50 only gains +4% recall (64→68 docs).
 
-**Session-level replay confirms this (2026-03-15):**
-| Collection | Per-query doc recall | Session doc recall | Lift |
-|---|---|---|---|
-| jira-issues | 66.7% | **94.4%** | +27.7% |
-| melosys-confluence-v3 | 80.6% | **89.3%** | +8.7% |
+**Session-level replay confirms this (2026-03-15, expanded dataset):**
+| Collection | Per-query doc recall | Session doc recall | Lift | Sessions |
+|---|---|---|---|---|
+| jira-issues | 69.6% | **94.1%** | +24.5% | 27 (24 full) |
+| melosys-confluence-v3 | 62.3% | **90.5%** | +28.2% | 52 (44 full) |
 
 Session replay groups queries by trace_id and checks if the union of all
-results across a session covers all expected documents. Jira jumps from
-66.7% to 94.4% doc recall, with 18/20 sessions achieving full recall.
-This confirms the per-query "misses" are artifacts of single-query testing.
+results across a session covers all expected documents. Both collections
+show ~90%+ session doc recall, confirming that per-query "misses" are
+artifacts of single-query testing.
 
 ### 7d. 29 queries hit stale `jira` collection (not `jira-issues`)
 The trace data contains queries against a collection named `jira` which
@@ -173,5 +180,5 @@ Only 1 missed query. 7 queries returned empty, mostly very specific.
 
 **Remaining improvement opportunities:**
 1. ~~Build EESSI knowledge graph for entity-rich queries (Finding 5)~~ — DONE
-2. Expand trace dataset with more sessions for better coverage
+2. ~~Expand trace dataset with more sessions for better coverage~~ — DONE (119→895 pairs, 28→247 sessions)
 3. ~~Consider session-level replay (group queries by trace_id)~~ — DONE, see 7c above
