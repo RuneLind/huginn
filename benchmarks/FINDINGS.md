@@ -89,11 +89,15 @@ The 1 remaining untagged Confluence doc is "Godterirullering" (candy rotation sc
 content too minimal for tagger excerpt extraction.
 
 
-## Finding 5: No EESSI knowledge graph
+## Finding 5: No EESSI knowledge graph — FIXED
 
-**Status:** Informational
+**Status:** Fixed (2026-03-15)
 
-The system has entity detection patterns for BUC, SED, Artikkel, and Forordning entities, but no EESSI graph file exists. Only the Jira graph (2,175 nodes, 2,004 edges) is loaded. EESSI entity detection is dormant.
+The system has entity detection patterns for BUC, SED, Artikkel, and Forordning entities, but no EESSI graph file existed. Only the Jira graph was loaded. EESSI entity detection was dormant.
+
+**Fix:** The EESSI graph extractor in huginn-nav (`extract_melosys_graph.py`) already existed and produces a rich graph (71 nodes, 135 edges) from Confluence EESSI documentation. The graph includes BUC, SED, Artikkel, Forordning, AD_BUC, and H_BUC nodes with relationship edges (inneholder_sed, hjemlet_i, del_av, underprosess, refererer_til, implementerer). The server loads it via `KNOWLEDGE_GRAPH_PATH` env var set in huginn-nav's `start.sh`.
+
+Entity detection benchmark passes at F1=1.000 with the EESSI graph loaded.
 
 
 ## Finding 6: Search latency baseline
@@ -113,7 +117,7 @@ The system has entity detection patterns for BUC, SED, Artikkel, and Forordning 
 
 ## Finding 7: Trace replay reveals real search gaps
 
-**Status:** Partially fixed — matching improved, remaining misses are multi-step search artifacts
+**Status:** Investigated — session-level replay confirms remaining misses are multi-step search artifacts
 
 **Data (from real MCP session traces):**
 | Collection | Doc Recall | Query Hit Rate | MRR | Unique Queries |
@@ -140,7 +144,7 @@ The trace replay benchmark had strict filename matching that failed on:
 Fixed by normalizing filenames and adding issue-key matching fallback.
 This improved Jira doc recall from 61.5% to 66.7% (+5.2%).
 
-### 7c. 6 remaining Jira misses are multi-step search artifacts
+### 7c. 6 remaining Jira misses are multi-step search artifacts — CONFIRMED
 The remaining misses are queries where the expected doc was found via
 multi-step search (the MCP agent tried 3-4 different query variations
 across a session). Testing each query independently is stricter than
@@ -148,6 +152,17 @@ how the system actually works. These docs rank outside top 50 even
 with wider search, so they're genuinely cross-query discoveries.
 
 Testing with max_chunks=50 only gains +4% recall (64→68 docs).
+
+**Session-level replay confirms this (2026-03-15):**
+| Collection | Per-query doc recall | Session doc recall | Lift |
+|---|---|---|---|
+| jira-issues | 66.7% | **94.4%** | +27.7% |
+| melosys-confluence-v3 | 80.6% | **89.3%** | +8.7% |
+
+Session replay groups queries by trace_id and checks if the union of all
+results across a session covers all expected documents. Jira jumps from
+66.7% to 94.4% doc recall, with 18/20 sessions achieving full recall.
+This confirms the per-query "misses" are artifacts of single-query testing.
 
 ### 7d. 29 queries hit stale `jira` collection (not `jira-issues`)
 The trace data contains queries against a collection named `jira` which
@@ -157,7 +172,6 @@ no longer exists. These are not real search failures.
 Only 1 missed query. 7 queries returned empty, mostly very specific.
 
 **Remaining improvement opportunities:**
-1. Build EESSI knowledge graph for entity-rich queries (Finding 5)
+1. ~~Build EESSI knowledge graph for entity-rich queries (Finding 5)~~ — DONE
 2. Expand trace dataset with more sessions for better coverage
-3. Consider session-level replay (group queries by trace_id) for a
-   fairer comparison with multi-step search behavior
+3. ~~Consider session-level replay (group queries by trace_id)~~ — DONE, see 7c above
