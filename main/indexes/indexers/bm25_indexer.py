@@ -4,7 +4,12 @@ from rank_bm25 import BM25Okapi
 
 
 def _tokenize(text):
-    return re.findall(r'\w+', text.lower())
+    """Tokenize text for BM25, preserving hyphenated identifiers (e.g. MELOSYS-7969).
+
+    Uses [^\\W_] (word chars minus underscore) so underscores in breadcrumbs/filenames
+    act as separators, not joiners.
+    """
+    return re.findall(r'[^\W_]+(?:-[^\W_]+)*', text.lower())
 
 
 class BM25Indexer:
