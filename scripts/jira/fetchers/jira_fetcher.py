@@ -29,10 +29,16 @@ import json
 import logging
 import os
 import re
+import sys
 import argparse
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set
+
+# Ensure project root is on sys.path so `scripts.*` imports work
+_project_root = str(Path(__file__).resolve().parent.parent.parent.parent)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
