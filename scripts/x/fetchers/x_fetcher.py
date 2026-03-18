@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-X/Twitter Timeline Fetcher — Playwright + GraphQL interception.
+X/Twitter Timeline Fetcher — direct HTTP with cookie auth.
 
-Loads auth cookies, navigates to x.com/home, intercepts GraphQL
-timeline responses, and outputs structured tweet JSON to stdout.
+Uses cookies extracted from your real browser to call X's GraphQL
+API directly. No Playwright / browser automation — just HTTP requests.
 
 Usage:
-    # Fetch latest ~50 tweets from home timeline
+    # Fetch home timeline (~20 tweets per page)
     uv run scripts/x/fetchers/x_fetcher.py
 
-    # Fetch more (scroll N times)
-    uv run scripts/x/fetchers/x_fetcher.py --scrolls 5
+    # Fetch more (multiple pages)
+    uv run scripts/x/fetchers/x_fetcher.py --pages 3
 
     # Output to file instead of stdout
     uv run scripts/x/fetchers/x_fetcher.py --output data/x/timeline.json
@@ -22,21 +22,144 @@ Usage:
 import asyncio
 import argparse
 import json
-import logging
 import re
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from playwright.async_api import async_playwright, Response
-
-logger = logging.getLogger(__name__)
+import httpx
 
 AUTH_FILE = Path(__file__).resolve().parent.parent / "auth" / "x_auth.json"
 
-# GraphQL endpoints that contain timeline data
-TIMELINE_ENDPOINTS = ("HomeTimeline", "HomeLatestTimeline")
+# X's public web-app bearer token (embedded in their JS, same for all users)
+BEARER_TOKEN = (
+    "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs"
+    "%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
+)
+
+# GraphQL features required by the HomeTimeline query.
+# These change occasionally when X ships new features.
+TIMELINE_FEATURES = {
+    "rweb_tipjar_consumption_enabled": True,
+    "responsive_web_graphql_exclude_directive_enabled": True,
+    "verified_phone_label_enabled": False,
+    "creator_subscriptions_tweet_preview_api_enabled": True,
+    "responsive_web_graphql_timeline_navigation_enabled": True,
+    "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
+    "communities_web_enable_tweet_community_results_fetch": True,
+    "c9s_tweet_anatomy_moderator_badge_enabled": True,
+    "articles_preview_enabled": True,
+    "responsive_web_edit_tweet_api_enabled": True,
+    "graphql_is_translatable_rweb_tweet_is_translatable_enabled": True,
+    "view_counts_everywhere_api_enabled": True,
+    "longform_notetweets_consumption_enabled": True,
+    "responsive_web_twitter_article_tweet_consumption_enabled": True,
+    "tweet_awards_web_tipping_enabled": False,
+    "creator_subscriptions_quote_tweet_preview_enabled": False,
+    "freedom_of_speech_not_reach_fetch_enabled": True,
+    "standardized_nudges_misinfo": True,
+    "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": True,
+    "rweb_video_timestamps_enabled": True,
+    "longform_notetweets_rich_text_read_enabled": True,
+    "longform_notetweets_inline_media_enabled": True,
+    "responsive_web_enhance_cards_enabled": False,
+}
+
+
+# ---------------------------------------------------------------------------
+# Auth helpers
+# ---------------------------------------------------------------------------
+
+def load_auth() -> tuple[str, str]:
+    """Load auth_token and ct0 from the auth file."""
+    if not AUTH_FILE.exists():
+        print(
+            f"Error: Auth file not found at {AUTH_FILE}\n"
+            "Run auth setup first: uv run scripts/x/auth_setup.py",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    data = json.loads(AUTH_FILE.read_text())
+    auth_token = data.get("auth_token")
+    ct0 = data.get("ct0")
+
+    if not auth_token or not ct0:
+        print("Error: auth_token or ct0 missing from auth file.", file=sys.stderr)
+        sys.exit(1)
+
+    return auth_token, ct0
+
+
+def build_headers(auth_token: str, ct0: str) -> dict[str, str]:
+    """Build request headers mimicking X's web client."""
+    return {
+        "authorization": f"Bearer {BEARER_TOKEN}",
+        "x-csrf-token": ct0,
+        "cookie": f"auth_token={auth_token}; ct0={ct0}",
+        "user-agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/125.0.0.0 Safari/537.36"
+        ),
+        "x-twitter-active-user": "yes",
+        "x-twitter-client-language": "en",
+    }
+
+
+# ---------------------------------------------------------------------------
+# GraphQL query ID discovery
+# ---------------------------------------------------------------------------
+
+async def discover_query_id(
+    client: httpx.AsyncClient, operation: str = "HomeTimeline"
+) -> str:
+    """Extract a GraphQL query ID from X's JavaScript bundles."""
+    # Fetch main page to find JS bundle URLs
+    resp = await client.get("https://x.com")
+    if resp.status_code != 200:
+        raise RuntimeError(f"Failed to fetch x.com: HTTP {resp.status_code}")
+
+    # Find JS bundle URLs — X serves different bundle names over time
+    js_urls: list[str] = re.findall(
+        r'src="(https://abs\.twimg\.com/responsive-web/client-web[^/]*/main\.[a-f0-9]+\.js)"',
+        resp.text,
+    )
+    if not js_urls:
+        # Broader search for any client-web JS
+        js_urls = re.findall(
+            r'src="(https://abs\.twimg\.com/responsive-web/client-web[^"]*\.js)"',
+            resp.text,
+        )
+
+    # Also look for the api.js or endpoints.js bundles that may contain query IDs
+    api_urls = re.findall(
+        r'src="(https://abs\.twimg\.com/responsive-web/client-web[^"]*(?:api|endpoints)[^"]*\.js)"',
+        resp.text,
+    )
+    js_urls = api_urls + js_urls  # Check api bundles first
+
+    for js_url in js_urls[:10]:  # Don't fetch too many
+        js_resp = await client.get(js_url)
+        if js_resp.status_code != 200:
+            continue
+
+        # Pattern: {queryId:"ABC123",operationName:"HomeTimeline",operationType:"query"}
+        pattern = rf'queryId:"([^"]+)",operationName:"{re.escape(operation)}"'
+        match = re.search(pattern, js_resp.text)
+        if match:
+            return match.group(1)
+
+        # Alternative pattern with different quoting
+        pattern2 = rf"queryId:'([^']+)',operationName:'{re.escape(operation)}'"
+        match2 = re.search(pattern2, js_resp.text)
+        if match2:
+            return match2.group(1)
+
+    raise RuntimeError(
+        f"Could not find queryId for {operation} in X's JS bundles. "
+        "X may have changed their JS structure."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +171,6 @@ def extract_tweets(graphql_data: dict) -> list[dict]:
     tweets = []
     instructions = _dig(graphql_data, "data", "home", "home_timeline_urt", "instructions")
     if not instructions:
-        # Try alternative response shapes
         instructions = _dig(graphql_data, "data", "timeline_by_id", "timeline", "instructions")
     if not instructions:
         return tweets
@@ -63,11 +185,31 @@ def extract_tweets(graphql_data: dict) -> list[dict]:
     return tweets
 
 
+def extract_cursor(graphql_data: dict, cursor_type: str = "Bottom") -> str | None:
+    """Find the pagination cursor from a timeline response."""
+    instructions = _dig(graphql_data, "data", "home", "home_timeline_urt", "instructions")
+    if not instructions:
+        instructions = _dig(graphql_data, "data", "timeline_by_id", "timeline", "instructions")
+    if not instructions:
+        return None
+
+    for instruction in instructions:
+        for entry in instruction.get("entries", []):
+            content = entry.get("content", {})
+            if content.get("cursorType") == cursor_type:
+                return content.get("value")
+            # Nested cursor format
+            entry_type = content.get("entryType") or content.get("__typename")
+            if entry_type == "TimelineTimelineCursor" and content.get("cursorType") == cursor_type:
+                return content.get("value")
+
+    return None
+
+
 def _extract_tweet_from_entry(entry: dict) -> dict | None:
     """Extract a single tweet dict from a timeline entry."""
     content = entry.get("content", {})
 
-    # Regular tweet entries
     item_content = content.get("itemContent") or _dig(content, "items", 0, "item", "itemContent")
     if not item_content:
         return None
@@ -75,7 +217,6 @@ def _extract_tweet_from_entry(entry: dict) -> dict | None:
     tweet_results = item_content.get("tweet_results", {})
     result = tweet_results.get("result", {})
 
-    # Handle "TweetWithVisibilityResults" wrapper
     if result.get("__typename") == "TweetWithVisibilityResults":
         result = result.get("tweet", {})
 
@@ -100,15 +241,13 @@ def _parse_tweet_result(result: dict) -> dict | None:
     full_text = legacy_tweet.get("full_text", "")
     screen_name = legacy_user.get("screen_name", "")
 
-    # Expand t.co URLs in text
     full_text = _expand_urls(full_text, legacy_tweet.get("entities", {}))
 
-    # Check if this is a retweet
+    # Retweet
     is_retweet = False
     retweeted_status = legacy_tweet.get("retweeted_status_result", {}).get("result")
     if retweeted_status:
         is_retweet = True
-        # For retweets, parse the original tweet for the text
         original = _parse_tweet_result(retweeted_status)
         if original:
             full_text = f"RT @{original['handle']}: {original['text']}"
@@ -126,7 +265,6 @@ def _parse_tweet_result(result: dict) -> dict | None:
             "type": m.get("type", "photo"),
             "url": m.get("media_url_https") or m.get("url", ""),
         })
-    # Extended media (videos)
     for m in legacy_tweet.get("extended_entities", {}).get("media", []):
         if m.get("type") == "video":
             variants = m.get("video_info", {}).get("variants", [])
@@ -227,81 +365,91 @@ def save_tweets_as_markdown(tweets: list[dict], output_dir: str):
 # Main fetcher
 # ---------------------------------------------------------------------------
 
-async def fetch_timeline(scrolls: int = 2) -> list[dict]:
-    """Launch browser, intercept GraphQL responses, return tweets."""
-    if not AUTH_FILE.exists():
-        print(
-            f"Error: Auth file not found at {AUTH_FILE}\n"
-            "Run auth setup first: uv run scripts/x/auth_setup.py",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+async def fetch_timeline(pages: int = 1) -> list[dict]:
+    """Fetch home timeline via direct HTTP requests."""
+    auth_token, ct0 = load_auth()
+    headers = build_headers(auth_token, ct0)
 
     seen_ids: set[str] = set()
-    tweets: list[dict] = []
+    all_tweets: list[dict] = []
+    cursor: str | None = None
 
-    async def handle_response(response: Response):
-        url = response.url
-        if not any(ep in url for ep in TIMELINE_ENDPOINTS):
-            return
-        try:
-            data = await response.json()
-            for tweet in extract_tweets(data):
+    async with httpx.AsyncClient(headers=headers, timeout=30) as client:
+        # Discover the current GraphQL query ID
+        print("Discovering GraphQL query ID ...", file=sys.stderr)
+        query_id = await discover_query_id(client, "HomeTimeline")
+        print(f"Found query ID: {query_id}", file=sys.stderr)
+
+        for page_num in range(pages):
+            variables: dict[str, Any] = {
+                "count": 20,
+                "includePromotedContent": True,
+                "latestControlAvailable": True,
+                "requestContext": "launch",
+                "withCommunity": True,
+            }
+            if cursor:
+                variables["cursor"] = cursor
+
+            params = {
+                "variables": json.dumps(variables, separators=(",", ":")),
+                "features": json.dumps(TIMELINE_FEATURES, separators=(",", ":")),
+            }
+
+            url = f"https://x.com/i/api/graphql/{query_id}/HomeTimeline"
+            print(f"Fetching page {page_num + 1}/{pages} ...", file=sys.stderr)
+
+            resp = await client.get(url, params=params)
+
+            if resp.status_code == 401:
+                print(
+                    "Error: Unauthorized (401) — session expired.\n"
+                    "Re-run auth setup: uv run scripts/x/auth_setup.py",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+            if resp.status_code == 429:
+                print("Error: Rate limited (429). Try again later.", file=sys.stderr)
+                sys.exit(1)
+
+            if resp.status_code != 200:
+                print(
+                    f"Error: HTTP {resp.status_code}\n{resp.text[:500]}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+            data = resp.json()
+            page_tweets = extract_tweets(data)
+
+            new_count = 0
+            for tweet in page_tweets:
                 if tweet["id"] not in seen_ids:
                     seen_ids.add(tweet["id"])
-                    tweets.append(tweet)
-        except Exception:
-            pass  # Non-JSON or broken response, skip
+                    all_tweets.append(tweet)
+                    new_count += 1
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            storage_state=str(AUTH_FILE),
-            viewport={"width": 1280, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/125.0.0.0 Safari/537.36"
-            ),
-        )
+            print(f"  Got {new_count} new tweets (total: {len(all_tweets)})", file=sys.stderr)
 
-        page = await context.new_page()
-        page.on("response", handle_response)
+            if new_count == 0:
+                print("  No new tweets, stopping pagination.", file=sys.stderr)
+                break
 
-        print("Navigating to x.com/home ...", file=sys.stderr)
-        await page.goto("https://x.com/home", wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(5000)  # Let initial timeline load
+            # Get cursor for next page
+            cursor = extract_cursor(data)
+            if not cursor:
+                print("  No cursor found, stopping pagination.", file=sys.stderr)
+                break
 
-        # Check if we got redirected to login
-        if "login" in page.url.lower():
-            print(
-                "Error: Session expired — redirected to login.\n"
-                "Re-run auth setup: uv run scripts/x/auth_setup.py",
-                file=sys.stderr,
-            )
-            await browser.close()
-            sys.exit(1)
-
-        # Scroll to load more tweets
-        for i in range(scrolls):
-            print(f"Scrolling ({i + 1}/{scrolls}) — {len(tweets)} tweets so far ...", file=sys.stderr)
-            await page.keyboard.press("End")
-            await page.wait_for_timeout(2000)
-
-        # Save auth state (session refresh)
-        await context.storage_state(path=str(AUTH_FILE))
-
-        await browser.close()
-
-    print(f"Fetched {len(tweets)} tweets total.", file=sys.stderr)
-    return tweets
+    return all_tweets
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Fetch X/Twitter home timeline")
     parser.add_argument(
-        "--scrolls", type=int, default=2,
-        help="Number of scroll actions to load more tweets (default: 2)",
+        "--pages", type=int, default=1,
+        help="Number of pages to fetch (default: 1, ~20 tweets each)",
     )
     parser.add_argument(
         "--output", type=str, default=None,
@@ -317,7 +465,7 @@ def parse_args():
 async def main():
     args = parse_args()
 
-    tweets = await fetch_timeline(scrolls=args.scrolls)
+    tweets = await fetch_timeline(pages=args.pages)
 
     if args.saveMd:
         save_tweets_as_markdown(tweets, args.saveMd)
