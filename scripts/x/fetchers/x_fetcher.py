@@ -102,6 +102,7 @@ def build_headers(auth_token: str, ct0: str) -> dict[str, str]:
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/125.0.0.0 Safari/537.36"
         ),
+        "x-twitter-auth-type": "OAuth2Session",
         "x-twitter-active-user": "yes",
         "x-twitter-client-language": "en",
     }
@@ -111,50 +112,58 @@ def build_headers(auth_token: str, ct0: str) -> dict[str, str]:
 # GraphQL query ID discovery
 # ---------------------------------------------------------------------------
 
-async def discover_query_id(
-    client: httpx.AsyncClient, operation: str = "HomeTimeline"
-) -> str:
-    """Extract a GraphQL query ID from X's JavaScript bundles."""
-    # Fetch main page to find JS bundle URLs
-    resp = await client.get("https://x.com")
-    if resp.status_code != 200:
-        raise RuntimeError(f"Failed to fetch x.com: HTTP {resp.status_code}")
+async def discover_query_id(operation: str = "HomeTimeline") -> str:
+    """Extract a GraphQL query ID from X's JavaScript bundles.
 
-    # Find JS bundle URLs — X serves different bundle names over time
-    js_urls: list[str] = re.findall(
-        r'src="(https://abs\.twimg\.com/responsive-web/client-web[^/]*/main\.[a-f0-9]+\.js)"',
-        resp.text,
-    )
-    if not js_urls:
-        # Broader search for any client-web JS
-        js_urls = re.findall(
-            r'src="(https://abs\.twimg\.com/responsive-web/client-web[^"]*\.js)"',
+    Uses a separate unauthenticated client — JS bundles are public
+    and sending auth headers to x.com's main page causes a 401.
+    """
+    public_headers = {
+        "user-agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/125.0.0.0 Safari/537.36"
+        ),
+    }
+
+    async with httpx.AsyncClient(headers=public_headers, timeout=30, follow_redirects=True) as pub:
+        resp = await pub.get("https://x.com")
+        if resp.status_code != 200:
+            raise RuntimeError(f"Failed to fetch x.com: HTTP {resp.status_code}")
+
+        # Find JS bundle URLs — X serves different bundle names over time
+        js_urls: list[str] = re.findall(
+            r'src="(https://abs\.twimg\.com/responsive-web/client-web[^/]*/main\.[a-f0-9]+\.js)"',
             resp.text,
         )
+        if not js_urls:
+            js_urls = re.findall(
+                r'src="(https://abs\.twimg\.com/responsive-web/client-web[^"]*\.js)"',
+                resp.text,
+            )
 
-    # Also look for the api.js or endpoints.js bundles that may contain query IDs
-    api_urls = re.findall(
-        r'src="(https://abs\.twimg\.com/responsive-web/client-web[^"]*(?:api|endpoints)[^"]*\.js)"',
-        resp.text,
-    )
-    js_urls = api_urls + js_urls  # Check api bundles first
+        # Prioritize api/endpoints bundles that are more likely to contain query IDs
+        api_urls = re.findall(
+            r'src="(https://abs\.twimg\.com/responsive-web/client-web[^"]*(?:api|endpoints)[^"]*\.js)"',
+            resp.text,
+        )
+        js_urls = api_urls + js_urls
 
-    for js_url in js_urls[:10]:  # Don't fetch too many
-        js_resp = await client.get(js_url)
-        if js_resp.status_code != 200:
-            continue
+        for js_url in js_urls[:10]:
+            js_resp = await pub.get(js_url)
+            if js_resp.status_code != 200:
+                continue
 
-        # Pattern: {queryId:"ABC123",operationName:"HomeTimeline",operationType:"query"}
-        pattern = rf'queryId:"([^"]+)",operationName:"{re.escape(operation)}"'
-        match = re.search(pattern, js_resp.text)
-        if match:
-            return match.group(1)
+            # Pattern: {queryId:"ABC123",operationName:"HomeTimeline",operationType:"query"}
+            pattern = rf'queryId:"([^"]+)",operationName:"{re.escape(operation)}"'
+            match = re.search(pattern, js_resp.text)
+            if match:
+                return match.group(1)
 
-        # Alternative pattern with different quoting
-        pattern2 = rf"queryId:'([^']+)',operationName:'{re.escape(operation)}'"
-        match2 = re.search(pattern2, js_resp.text)
-        if match2:
-            return match2.group(1)
+            pattern2 = rf"queryId:'([^']+)',operationName:'{re.escape(operation)}'"
+            match2 = re.search(pattern2, js_resp.text)
+            if match2:
+                return match2.group(1)
 
     raise RuntimeError(
         f"Could not find queryId for {operation} in X's JS bundles. "
@@ -231,6 +240,8 @@ def _parse_tweet_result(result: dict) -> dict | None:
     """Parse a tweet result object into our output format."""
     core = result.get("core", {})
     user_results = _dig(core, "user_results", "result") or {}
+    # X moved name/screen_name from legacy into user.core
+    user_core = user_results.get("core", {})
     legacy_user = user_results.get("legacy", {})
     legacy_tweet = result.get("legacy", {})
 
@@ -239,7 +250,7 @@ def _parse_tweet_result(result: dict) -> dict | None:
         return None
 
     full_text = legacy_tweet.get("full_text", "")
-    screen_name = legacy_user.get("screen_name", "")
+    screen_name = user_core.get("screen_name") or legacy_user.get("screen_name", "")
 
     full_text = _expand_urls(full_text, legacy_tweet.get("entities", {}))
 
@@ -278,7 +289,7 @@ def _parse_tweet_result(result: dict) -> dict | None:
 
     return {
         "id": tweet_id,
-        "author": legacy_user.get("name", ""),
+        "author": user_core.get("name") or legacy_user.get("name", ""),
         "handle": screen_name,
         "text": full_text,
         "created_at": legacy_tweet.get("created_at", ""),
@@ -377,7 +388,7 @@ async def fetch_timeline(pages: int = 1) -> list[dict]:
     async with httpx.AsyncClient(headers=headers, timeout=30) as client:
         # Discover the current GraphQL query ID
         print("Discovering GraphQL query ID ...", file=sys.stderr)
-        query_id = await discover_query_id(client, "HomeTimeline")
+        query_id = await discover_query_id("HomeTimeline")
         print(f"Found query ID: {query_id}", file=sys.stderr)
 
         for page_num in range(pages):

@@ -27,17 +27,33 @@ def verify_cookies(auth_token: str, ct0: str) -> bool:
         "authorization": f"Bearer {BEARER_TOKEN}",
         "x-csrf-token": ct0,
         "cookie": f"auth_token={auth_token}; ct0={ct0}",
+        "x-twitter-auth-type": "OAuth2Session",
+        "x-twitter-active-user": "yes",
+        "x-twitter-client-language": "en",
+        "user-agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/125.0.0.0 Safari/537.36"
+        ),
     }
     try:
         resp = httpx.get(
-            "https://api.x.com/1.1/account/verify_credentials.json",
+            "https://x.com/i/api/2/notifications/all.json?count=1",
             headers=headers,
             timeout=10,
         )
         if resp.status_code == 200:
             data = resp.json()
-            print(f"\nVerified: logged in as @{data.get('screen_name', '?')}")
+            users = data.get("globalObjects", {}).get("users", {})
+            if users:
+                first_user = next(iter(users.values()))
+                print(f"\nVerified: logged in as @{first_user.get('screen_name', '?')}")
+            else:
+                print("\nVerified: cookies accepted by X API")
             return True
+        if resp.status_code in (401, 403):
+            print(f"\nVerification failed (HTTP {resp.status_code}): invalid or expired cookies")
+            return False
         print(f"\nVerification failed (HTTP {resp.status_code}): {resp.text[:200]}")
         return False
     except Exception as e:
