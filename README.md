@@ -4,7 +4,36 @@ Index and search documents from multiple sources using local vector embeddings. 
 
 ## What it does
 
-Huginn fetches documents from **Confluence**, **Notion**, **Jira**, **YouTube**, and **local files**, chunks them, generates vector embeddings locally, and stores them in a FAISS index. You can then search across all your knowledge sources via CLI, HTTP API, or MCP (Model Context Protocol) for AI agents.
+Huginn fetches documents from **Confluence**, **Notion**, **Jira**, **YouTube**, **X/Twitter**, and **local files**, chunks them, generates vector embeddings locally, and stores them in a FAISS index. You can then search across all your knowledge sources via CLI, HTTP API, or MCP (Model Context Protocol) for AI agents.
+
+```mermaid
+graph LR
+    subgraph Sources
+        S1[Confluence]
+        S2[Notion]
+        S3[Jira]
+        S4[YouTube]
+        S5[X/Twitter]
+        S6[Local Files]
+        S7[Claude Sessions]
+    end
+
+    subgraph Huginn
+        F[Fetch & Convert to Markdown]
+        C[Chunk Text]
+        E[Embed Locally<br/>multilingual-e5-base]
+        I[FAISS + BM25 Index]
+    end
+
+    subgraph Search
+        CLI[CLI]
+        API[HTTP API]
+        MCP[MCP for AI Agents]
+    end
+
+    S1 & S2 & S3 & S4 & S5 & S6 & S7 --> F --> C --> E --> I
+    I --> CLI & API & MCP
+```
 
 **Key features:**
 - Fully local — no data leaves your machine (embeddings, indexing, search all run locally)
@@ -67,14 +96,40 @@ Your data lives in `data/` (gitignored) — source markdown in `data/sources/`, 
 uv run knowledge_api_server.py --collections my-notion my-confluence --port 8321
 ```
 
+```mermaid
+graph LR
+    Q[Query] --> EMB[Embed Query]
+    EMB --> HS{Hybrid Search}
+    HS --> FAISS[FAISS Vector]
+    HS --> BM25[BM25 Keyword]
+    FAISS & BM25 --> RRF[Reciprocal Rank Fusion]
+    RRF --> RE[Cross-Encoder Rerank]
+    RE --> R[Results + Citations]
+```
+
 Endpoints:
-- `GET /api/search?q=...&collection=...&limit=10` — Vector search
+- `GET /api/search?q=...&collection=...&limit=10` — Hybrid search with reranking
 - `GET /api/collections` — List loaded collections
 - `GET /api/document/{collection}/{doc_id}` — Full document
 - `GET /api/graph/{node_id}` — Knowledge graph node
 - `GET /health` — Health check
 
 ## MCP Integration
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant AI as AI Assistant<br/>(Claude Code / Cursor)
+    participant MCP as Huginn MCP Server
+    participant API as Huginn API Server
+
+    User->>AI: Ask a question
+    AI->>MCP: search_knowledge(query)
+    MCP->>API: GET /api/search?q=...
+    API-->>MCP: Top results + URLs
+    MCP-->>AI: Context documents
+    AI-->>User: Answer with citations
+```
 
 Use with Claude Code, Cursor, or any MCP-compatible client. Start the API server, then add to your MCP config:
 
@@ -174,6 +229,23 @@ uv run files_collection_create_cmd_adapter.py \
 
 Build a knowledge graph from your documents for entity-aware search:
 
+```mermaid
+graph LR
+    subgraph "Graph Extraction"
+        D[Documents] --> GE[Graph Extractor]
+        GE --> N1[Entities / Nodes]
+        GE --> E1[Relationships / Edges]
+    end
+
+    subgraph "Entity-Aware Search"
+        Q[Query] --> S[Search]
+        S --> KG[Knowledge Graph]
+        KG --> Related[Related Entities<br/>+ Context]
+    end
+
+    N1 & E1 --> KG
+```
+
 ```bash
 # Extract graph from Jira issues (epics + cross-references)
 uv run scripts/knowledge_graph/extract_jira_graph.py \
@@ -244,6 +316,54 @@ uv run knowledge_api_server.py \
 ```
 
 ## Architecture
+
+```mermaid
+graph TD
+    subgraph "Adapters (CLI / API / MCP)"
+        CMD[CLI Adapters<br/>collection_*_cmd_adapter.py]
+        API_SRV[API Server<br/>knowledge_api_server.py]
+        MCP_A[MCP Adapters<br/>knowledge_api_mcp_adapter.py]
+    end
+
+    subgraph "main/core"
+        Creator[Collection Creator]
+        Searcher[Collection Searcher]
+    end
+
+    subgraph "main/sources"
+        Conf[Confluence]
+        Not[Notion]
+        Jira[Jira]
+        Files[Files]
+    end
+
+    subgraph "main/indexes"
+        Embed[Embeddings<br/>multilingual-e5-base]
+        FAISS_I[FAISS Indexer]
+        BM25_I[BM25 Indexer]
+        Hybrid[Hybrid Search + RRF]
+        Rerank[Cross-Encoder Reranker]
+    end
+
+    subgraph "main/graph"
+        KG[Knowledge Graph]
+    end
+
+    subgraph "scripts/"
+        Fetch[Fetchers<br/>Confluence, Jira, YouTube, X]
+        Graph_E[Graph Extractors]
+        Tag[Document Tagging]
+    end
+
+    CMD & API_SRV & MCP_A --> Creator & Searcher
+    Creator --> Conf & Not & Jira & Files
+    Creator --> Embed --> FAISS_I & BM25_I
+    Searcher --> Hybrid --> FAISS_I & BM25_I
+    Hybrid --> Rerank
+    Searcher --> KG
+    Fetch --> Creator
+    Graph_E --> KG
+```
 
 ```
 main/
