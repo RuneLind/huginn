@@ -1,29 +1,36 @@
 # X/Twitter Feed Fetcher — Work Plan
 
+> **Status**: Huginn fetcher DONE. Muninn watcher DONE. Needs migration + end-to-end test.
+
 ## Goal
 
-Fetch the user's X/Twitter home timeline using Playwright (real browser, regular user login — no developer account needed). Output structured JSON that muninn can consume for a daily morning digest.
+Fetch the user's X/Twitter home timeline and deliver a daily morning digest via Telegram.
 
-## Why Playwright?
+## How It Works (Implemented)
 
-- No X developer account required — logs in as a regular user
-- Same pattern as Confluence and Jira fetchers (proven in this project)
-- Real browser bypasses Cloudflare and bot detection
-- Cookie persistence via `storage_state` — only need to log in once
+No developer account needed. The fetcher uses cookie-based auth (auth_token + ct0 copied from Chrome DevTools) and makes direct HTTP requests to X's GraphQL API via httpx. No browser automation — just HTTP. Query IDs are dynamically extracted from X's JS bundles on each run.
+
+### Key decisions during implementation
+
+1. **Started with Playwright** (browser automation intercepting GraphQL responses), but X detects and blocks Playwright's bundled Chromium.
+2. **Switched to direct HTTP** with cookies from the real browser. Undetectable since it makes identical requests to the web client, and faster since no browser process is needed.
+3. **Auth verification** uses the notifications API (`/2/notifications/all.json`) because X removed the v1.1 account/verify endpoint. User data is read from the `user.core` path (not `legacy`, which X emptied out).
+4. **JS bundle discovery** uses a separate unauthenticated httpx client because X rejects auth headers on the main page.
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  Huginn (Python + Playwright)                       │
+│  Huginn (Python, pure HTTP)                         │
 │                                                     │
 │  scripts/x/fetchers/x_fetcher.py                    │
-│    1. Load auth cookies from x_auth.json            │
-│    2. Navigate to x.com/home                        │
-│    3. Intercept GraphQL API responses (timeline)    │
-│    4. Output tweets as JSON to stdout               │
+│    1. Load cookies from x_auth.json                 │
+│    2. Discover GraphQL query ID from JS bundles     │
+│    3. Call HomeTimeline GraphQL API directly         │
+│    4. Cursor-based pagination for multiple pages    │
+│    5. Output tweets as JSON to stdout               │
 │                                                     │
-│  scripts/x/auth/x_auth.json  ← saved browser state │
+│  scripts/x/auth/x_auth.json  ← browser cookies     │
 └───────────────────┬─────────────────────────────────┘
                     │  stdout: JSON array of tweets
                     ▼
@@ -31,112 +38,58 @@ Fetch the user's X/Twitter home timeline using Playwright (real browser, regular
 │  Muninn (TypeScript/Bun)                            │
 │                                                     │
 │  src/watchers/x.ts                                  │
-│    1. Shell out: uv run scripts/x/.../x_fetcher.py  │
+│    1. Shell out: uv run x_fetcher.py --pages 3      │
 │    2. Parse JSON output                             │
 │    3. Haiku summarizes into morning digest           │
 │    4. Return as WatcherAlert[]                      │
 │                                                     │
-│  Scheduler runs watcher once per day (morning)      │
+│  Scheduler runs watcher every 24h                   │
 │  → Sends digest via Telegram                        │
 └─────────────────────────────────────────────────────┘
 ```
 
-## Phase 1: Auth Setup (huginn)
+## Phase 1: Auth Setup (DONE)
 
 **File:** `scripts/x/auth_setup.py`
 
-Same pattern as Confluence/Jira:
-1. Launch Chromium with `headless=False`
-2. Navigate to `https://x.com/login`
-3. User logs in manually (handles 2FA, captcha, whatever X throws)
-4. Wait for redirect to `x.com/home`
-5. Save `storage_state` → `scripts/x/auth/x_auth.json`
-6. Print confirmation, close browser
+Interactive CLI that guides the user through copying cookies from Chrome DevTools:
+
+1. User opens Chrome, navigates to x.com, opens DevTools → Application → Cookies
+2. User copies `auth_token` and `ct0` cookie values
+3. Script verifies cookies work by calling X's notifications API
+4. Saves `{ auth_token, ct0 }` as JSON to `scripts/x/auth/x_auth.json`
 
 ```bash
 uv run scripts/x/auth_setup.py
-# Opens browser → user logs in → cookies saved
+# Prompts for auth_token and ct0 → verifies → saves
 ```
 
 Re-run when session expires (probably every few weeks).
 
-## Phase 2: Timeline Fetcher (huginn)
+## Phase 2: Timeline Fetcher (DONE)
 
 **File:** `scripts/x/fetchers/x_fetcher.py`
 
-### Approach: GraphQL API Interception
+### Approach: Direct GraphQL API via HTTP
 
-X's frontend makes GraphQL calls to load the timeline. Instead of scraping the DOM (fragile), we intercept these API responses which contain clean structured data.
+Pure HTTP with httpx — no Playwright, no browser process. Calls the same GraphQL endpoints that X's web client uses.
 
-```python
-async with async_playwright() as p:
-    browser = await p.chromium.launch(headless=True)
-    context = await browser.new_context(
-        storage_state="scripts/x/auth/x_auth.json"
-    )
+**Query ID discovery:** Fetches x.com's HTML (unauthenticated), finds JS bundle URLs, scans bundles for `queryId:"...",operationName:"HomeTimeline"`. Prioritizes api/endpoints bundles.
 
-    tweets = []
+**Pagination:** Cursor-based. Each response contains a `Bottom` cursor used for the next page request.
 
-    # Intercept timeline GraphQL responses
-    async def handle_response(response):
-        url = response.url
-        if "HomeTimeline" in url or "HomeLatestTimeline" in url:
-            try:
-                data = await response.json()
-                tweets.extend(extract_tweets(data))
-            except:
-                pass
+**Tweet extraction:** Walks the GraphQL response structure (`data.home.home_timeline_urt.instructions[].entries[]`), handles `TweetWithVisibilityResults` wrappers, tombstones, retweets, quoted tweets, and media (images + video with best-bitrate selection).
 
-    page = await context.new_page()
-    page.on("response", handle_response)
-
-    await page.goto("https://x.com/home")
-    await page.wait_for_timeout(5000)  # Let timeline load
-
-    # Optional: scroll to load more
-    for _ in range(scroll_count):
-        await page.keyboard.press("End")
-        await page.wait_for_timeout(2000)
-
-    # Output as JSON
-    print(json.dumps(tweets))
-    await browser.close()
-```
-
-### Tweet Extraction
-
-X's GraphQL response has nested structure. Extract:
-
-```python
-def extract_tweets(graphql_data) -> list[dict]:
-    """Walk GraphQL response, extract tweet objects."""
-    # Navigate: data.home.home_timeline_urt.instructions[].entries[]
-    # Each entry has content.itemContent.tweet_results.result
-    # Extract:
-    return [{
-        "id": tweet_id,
-        "author": display_name,
-        "handle": screen_name,
-        "text": full_text,
-        "created_at": timestamp,
-        "url": f"https://x.com/{screen_name}/status/{tweet_id}",
-        "likes": favorite_count,
-        "retweets": retweet_count,
-        "replies": reply_count,
-        "is_retweet": bool,
-        "quoted_tweet": { ... } or None,
-        "media": [{ "type": "image|video", "url": ... }],
-    }]
-```
+**URL expansion:** Replaces t.co short URLs with their expanded form using entity data.
 
 ### CLI Interface
 
 ```bash
-# Fetch latest ~50 tweets from home timeline
+# Fetch latest ~20 tweets from home timeline
 uv run scripts/x/fetchers/x_fetcher.py
 
-# Fetch more (scroll N times)
-uv run scripts/x/fetchers/x_fetcher.py --scrolls 5
+# Fetch more (multiple pages, ~20 tweets each)
+uv run scripts/x/fetchers/x_fetcher.py --pages 3
 
 # Output to file instead of stdout
 uv run scripts/x/fetchers/x_fetcher.py --output data/x/timeline.json
@@ -145,29 +98,21 @@ uv run scripts/x/fetchers/x_fetcher.py --output data/x/timeline.json
 uv run scripts/x/fetchers/x_fetcher.py --saveMd data/sources/x-timeline
 ```
 
-### Fallback: DOM Scraping
+### Error Handling
 
-If GraphQL interception proves unstable (X changes response format), fall back to DOM scraping:
+- **401 Unauthorized:** Session expired → tells user to re-run auth_setup.py
+- **429 Rate limited:** Tells user to try again later
+- **Duplicate tweets:** Deduplicates by tweet ID across pages
+- **Empty page:** Stops pagination if no new tweets are found
 
-```python
-# Each tweet is an <article> element
-articles = await page.query_selector_all('article[data-testid="tweet"]')
-for article in articles:
-    text = await article.query_selector('[data-testid="tweetText"]')
-    author = await article.query_selector('[data-testid="User-Name"]')
-    # ...extract content...
-```
-
-DOM scraping is more fragile but simpler to debug.
-
-## Phase 3: Muninn Watcher Integration
+## Phase 3: Muninn Watcher Integration (DONE)
 
 **File:** `src/watchers/x.ts` (in muninn)
 
 ```typescript
 export async function checkX(watcher: Watcher): Promise<WatcherAlert[]> {
     const huginnPath = path.resolve("../huginn");
-    const result = await Bun.$`uv run ${huginnPath}/scripts/x/fetchers/x_fetcher.py --scrolls 3`
+    const result = await Bun.$`uv run ${huginnPath}/scripts/x/fetchers/x_fetcher.py --pages 3`
         .cwd(huginnPath)
         .text();
 
@@ -209,20 +154,26 @@ ${JSON.stringify(tweets, null, 2)}`;
 
 Morning digest arrives as a single Telegram message.
 
+## Remaining Work
+
+- [ ] DB migration to add `'x'` to watcher type CHECK constraint
+- [ ] End-to-end test: trigger watcher → digest arrives on Telegram
+
 ## File Checklist
 
-### Huginn (new files)
+### Huginn (implemented)
 
 ```
 scripts/x/
 ├── __init__.py
-├── auth_setup.py              ← interactive browser login + cookie save
+├── auth_setup.py              ← interactive cookie setup (no Playwright)
 ├── auth/
 │   ├── .gitkeep
-│   └── x_auth.json            ← saved browser state (gitignored)
+│   ├── README.md              ← instructions for cookie setup
+│   └── x_auth.json            ← saved cookies (gitignored)
 └── fetchers/
     ├── __init__.py
-    └── x_fetcher.py            ← Playwright timeline fetcher
+    └── x_fetcher.py            ← direct HTTP timeline fetcher
 ```
 
 ### Muninn (changes)
@@ -239,20 +190,11 @@ db/migrations/NNN_add_x_watcher.sql  ← new: add 'x' to CHECK constraint
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| X changes GraphQL schema | Fetcher breaks | Fall back to DOM scraping; both approaches in codebase |
-| Session expires | No data fetched | Watcher logs warning, user re-runs auth_setup.py |
-| X detects automation | Account flagged | headless=True + realistic viewport/UA; read-only usage is low risk |
-| Rate limiting / slow loads | Incomplete timeline | Configurable scroll count + timeouts |
-| Playwright startup overhead | Slow watcher tick | Acceptable for once-daily runs |
-
-## Build Order
-
-1. `scripts/x/auth_setup.py` — get login working, verify cookies persist
-2. `scripts/x/fetchers/x_fetcher.py` — fetch timeline, figure out GraphQL structure
-3. Test manually: `uv run scripts/x/fetchers/x_fetcher.py | jq .`
-4. `src/watchers/x.ts` + runner wiring in muninn
-5. DB migration + type updates
-6. End-to-end test: trigger watcher → digest arrives on Telegram
+| X changes GraphQL schema | Fetcher breaks | Query ID auto-discovery adapts; tweet extraction may need updating |
+| X changes JS bundle structure | Can't find query ID | Multiple regex patterns + fallback to broader bundle search |
+| Session expires | No data fetched | Clear error message telling user to re-run auth_setup.py |
+| Rate limiting | Incomplete timeline | Stops pagination gracefully; user can retry later |
+| X removes notifications API | Auth verification breaks | Can try alternative lightweight endpoints |
 
 ## Optional Later: Index into Huginn Collections
 
