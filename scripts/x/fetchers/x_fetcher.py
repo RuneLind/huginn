@@ -22,8 +22,10 @@ Usage:
 import asyncio
 import argparse
 import json
+import os
 import re
 import sys
+from datetime import datetime as _dt
 from pathlib import Path
 from typing import Any
 
@@ -347,50 +349,141 @@ def _dig(data: Any, *keys: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Markdown helpers
+# ---------------------------------------------------------------------------
+
+def _parse_x_date(created_at: str) -> str:
+    """Parse X's created_at into YYYY-MM-DD. Returns '' on failure."""
+    try:
+        dt = _dt.strptime(created_at, "%a %b %d %H:%M:%S %z %Y")
+        return dt.strftime("%Y-%m-%d")
+    except (ValueError, TypeError):
+        return ""
+
+
+def _yaml_value(value: str) -> str:
+    """Quote a YAML value if it contains special characters."""
+    if not value:
+        return '""'
+    if any(c in value for c in (':', '#', '{', '}', '[', ']', ',', '&', '*', '?', '|', '-', '<', '>', '=', '!', '%', '@', '`', '"', "'", '\\')):
+        escaped = value.replace('\\', '\\\\').replace('"', '\\"')
+        return f'"{escaped}"'
+    return value
+
+
+def _build_tweet_frontmatter(tweet: dict) -> str:
+    """Build YAML frontmatter with fields the huginn indexer preserves."""
+    handle = tweet["handle"]
+    text_preview = tweet["text"][:100].replace("\n", " ")
+    date_str = _parse_x_date(tweet["created_at"])
+
+    lines = ["---"]
+    lines.append(f"title: {_yaml_value(f'@{handle} — {text_preview}')}")
+    lines.append(f"url: {tweet['url']}")
+    if date_str:
+        lines.append(f"date: {date_str}")
+    lines.append("category: x-timeline")
+    lines.append("---\n")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Markdown output
 # ---------------------------------------------------------------------------
 
-def save_tweets_as_markdown(tweets: list[dict], output_dir: str):
-    """Save each tweet as a markdown file."""
+def save_tweets_as_markdown(
+    tweets: list[dict],
+    output_dir: str,
+    skip_existing: bool = False,
+    include_retweets: bool = False,
+):
+    """Save each tweet as a markdown file with YAML frontmatter.
+
+    Filenames: {date}_{handle}_{tweet_id}.md
+    Skips retweets by default. With skip_existing, scans output_dir
+    for existing tweet IDs in filenames and skips those.
+    """
     base = Path(output_dir)
     base.mkdir(parents=True, exist_ok=True)
 
+    # Build set of existing tweet IDs from filenames
+    existing_ids: set[str] = set()
+    if skip_existing:
+        for f in base.glob("*.md"):
+            # tweet_id is always the last underscore-separated segment
+            parts = f.stem.rsplit("_", 1)
+            if len(parts) == 2:
+                existing_ids.add(parts[-1])
+
+    saved = 0
+    skipped_existing = 0
+    skipped_retweet = 0
+
     for tweet in tweets:
-        handle = tweet["handle"]
         tweet_id = tweet["id"]
-        filename = f"{handle}_{tweet_id}.md"
+
+        if tweet.get("is_retweet") and not include_retweets:
+            skipped_retweet += 1
+            continue
+
+        if skip_existing and tweet_id in existing_ids:
+            skipped_existing += 1
+            continue
+
+        handle = tweet["handle"]
+        date_str = _parse_x_date(tweet["created_at"])
+        prefix = f"{date_str}_" if date_str else ""
+        filename = f"{prefix}{handle}_{tweet_id}.md"
         filepath = base / filename
 
-        lines = [
+        frontmatter = _build_tweet_frontmatter(tweet)
+
+        body_lines = [
             f"# @{handle} — {tweet['author']}",
             "",
             tweet["text"],
-            "",
-            "---",
-            "",
-            f"- **Date:** {tweet['created_at']}",
-            f"- **Likes:** {tweet['likes']}  **Retweets:** {tweet['retweets']}  **Replies:** {tweet['replies']}",
-            f"- **URL:** {tweet['url']}",
         ]
-
-        if tweet.get("is_retweet"):
-            lines.append("- **Type:** Retweet")
 
         if tweet.get("quoted_tweet"):
             qt = tweet["quoted_tweet"]
-            lines.extend([
+            body_lines.extend([
                 "",
                 f"> **Quoted @{qt['handle']}:** {qt['text']}",
             ])
 
         if tweet.get("media"):
-            lines.append("")
+            body_lines.append("")
             for m in tweet["media"]:
-                lines.append(f"- [{m['type']}]({m['url']})")
+                body_lines.append(f"- [{m['type']}]({m['url']})")
 
-        filepath.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        body_lines.extend([
+            "",
+            "---",
+            "",
+            f"- **Engagement:** {tweet['likes']:,} likes · {tweet['retweets']:,} retweets · {tweet.get('views', 0):,} views · {tweet.get('bookmarks', 0):,} bookmarks",
+            f"- **Date:** {tweet['created_at']}",
+            f"- **Type:** {tweet.get('tweet_type', 'tweet')}",
+            f"- **Link:** {tweet['url']}",
+        ])
 
-    print(f"Saved {len(tweets)} tweets to {base}/", file=sys.stderr)
+        content = frontmatter + "\n".join(body_lines) + "\n"
+        filepath.write_text(content, encoding="utf-8")
+
+        # Set file mtime to tweet timestamp for incremental update support
+        if date_str:
+            try:
+                ts = _dt.strptime(tweet["created_at"], "%a %b %d %H:%M:%S %z %Y").timestamp()
+                os.utime(filepath, (ts, ts))
+            except (ValueError, OSError):
+                pass
+
+        saved += 1
+
+    print(f"Saved {saved} tweets to {base}/", file=sys.stderr)
+    if skipped_existing:
+        print(f"  Skipped {skipped_existing} (already existing)", file=sys.stderr)
+    if skipped_retweet:
+        print(f"  Skipped {skipped_retweet} retweets", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -491,6 +584,14 @@ def parse_args():
         "--saveMd", type=str, default=None,
         help="Save tweets as markdown files to this directory",
     )
+    parser.add_argument(
+        "--skipExisting", action="store_true", default=False,
+        help="Skip tweets already saved as markdown (by tweet ID in filename)",
+    )
+    parser.add_argument(
+        "--includeRetweets", action="store_true", default=False,
+        help="Include retweets in markdown output (skipped by default)",
+    )
     return parser.parse_args()
 
 
@@ -500,7 +601,11 @@ async def main():
     tweets = await fetch_timeline(pages=args.pages)
 
     if args.saveMd:
-        save_tweets_as_markdown(tweets, args.saveMd)
+        save_tweets_as_markdown(
+            tweets, args.saveMd,
+            skip_existing=args.skipExisting,
+            include_retweets=args.includeRetweets,
+        )
 
     json_output = json.dumps(tweets, indent=2, ensure_ascii=False)
 
