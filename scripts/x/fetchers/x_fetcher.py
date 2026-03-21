@@ -382,7 +382,7 @@ def _build_tweet_frontmatter(tweet: dict) -> str:
     lines.append(f"url: {tweet['url']}")
     if date_str:
         lines.append(f"date: {date_str}")
-    lines.append("category: x-timeline")
+    lines.append("category: x-feed")
     lines.append("---\n")
     return "\n".join(lines)
 

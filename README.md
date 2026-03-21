@@ -70,6 +70,9 @@ NOTION_TOKEN="secret_..." ./examples/setup-notion.sh my-notion
 # Claude Code session transcripts
 ./examples/setup-claude-sessions.sh
 
+# X/Twitter timeline (requires cookie auth setup)
+./examples/setup-x-timeline.sh 5
+
 # Confluence space (requires Playwright: uv run playwright install chromium)
 CONF_TOKEN="Bearer ..." ./examples/setup-confluence.sh MYSPACE my-confluence
 
@@ -225,6 +228,25 @@ uv run files_collection_create_cmd_adapter.py \
 ```
 </details>
 
+<details>
+<summary>X/Twitter (manual steps)</summary>
+
+```bash
+# Set up auth (extract cookies from browser)
+uv run scripts/x/auth_setup.py
+
+# Fetch timeline and save as markdown
+uv run scripts/x/fetchers/x_fetcher.py --pages 10 --saveMd ./data/sources/x-feed --skipExisting
+
+# Index
+uv run files_collection_create_cmd_adapter.py \
+  --basePath ./data/sources/x-feed --collection x-feed
+
+# Incremental update (after fetching more tweets)
+uv run collection_update_cmd_adapter.py --collection x-feed
+```
+</details>
+
 ## Knowledge Graph
 
 Build a knowledge graph from your documents for entity-aware search:
@@ -279,6 +301,7 @@ uv run scripts/tagging/tag_documents.py --source data/sources/my-docs \
 | Confluence/Jira Server | `CONF_TOKEN` / `JIRA_TOKEN` (Bearer) or `CONF_LOGIN` + `CONF_PASSWORD` |
 | Confluence/Jira Cloud | `ATLASSIAN_EMAIL` + `ATLASSIAN_TOKEN` |
 | Notion | `NOTION_TOKEN` |
+| X/Twitter | Cookie auth via `uv run scripts/x/auth_setup.py` |
 
 See `.env.example` for a template.
 
