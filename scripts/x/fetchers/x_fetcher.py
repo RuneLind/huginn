@@ -252,7 +252,25 @@ def _parse_tweet_result(result: dict) -> dict | None:
     full_text = legacy_tweet.get("full_text", "")
     screen_name = user_core.get("screen_name") or legacy_user.get("screen_name", "")
 
+    # Long-form note tweets override legacy full_text
+    tweet_type = "tweet"
+    note_tweet = result.get("note_tweet", {})
+    if note_tweet:
+        note_text = _dig(note_tweet, "note_tweet_results", "result", "text")
+        if note_text:
+            full_text = note_text
+            tweet_type = "note"
+
     full_text = _expand_urls(full_text, legacy_tweet.get("entities", {}))
+
+    # View count (top-level, not in legacy)
+    views = 0
+    views_raw = _dig(result, "views", "count")
+    if views_raw:
+        try:
+            views = int(views_raw)
+        except (ValueError, TypeError):
+            pass
 
     # Retweet
     is_retweet = False
@@ -297,6 +315,9 @@ def _parse_tweet_result(result: dict) -> dict | None:
         "likes": legacy_tweet.get("favorite_count", 0),
         "retweets": legacy_tweet.get("retweet_count", 0),
         "replies": legacy_tweet.get("reply_count", 0),
+        "views": views,
+        "bookmarks": legacy_tweet.get("bookmark_count", 0),
+        "tweet_type": tweet_type,
         "is_retweet": is_retweet,
         "quoted_tweet": quoted_tweet,
         "media": media if media else None,
