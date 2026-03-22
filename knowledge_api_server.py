@@ -232,6 +232,17 @@ class YouTubeIngestRequest(BaseModel):
     category: Optional[str] = None  # auto-detected if not provided
 
 
+class XArticleIngestRequest(BaseModel):
+    """X/Twitter article content summarized by the Chrome extension."""
+    title: str
+    url: str
+    author: str  # @handle of the article author
+    summary: str  # pre-made summary from the extension
+    date: Optional[str] = None
+    category: Optional[str] = None  # auto-detected if not provided
+    tags: Optional[list[str]] = None
+
+
 class JiraIngestComment(BaseModel):
     author: str = "Unknown"
     date: str = ""
@@ -877,6 +888,111 @@ def youtube_categories():
     return {"categories": categories}
 
 
+# ── X article ingest ──────────────────────────────────────────────────────
+
+
+@app.post("/api/x-articles/ingest")
+def x_article_ingest(req: XArticleIngestRequest, background_tasks: BackgroundTasks):
+    """Ingest an X/Twitter article: save summary as markdown, find similar, reindex."""
+    xa_path = app.state.x_articles_sources_path
+    xa_collection = app.state.x_articles_collection
+    if not xa_path:
+        raise HTTPException(status_code=503, detail="X articles sources path not configured (--x-articles-sources-path)")
+
+    date = req.date or dt.date.today().isoformat()
+
+    # Validate / auto-detect category
+    category = req.category or "ai/general"
+    if category not in CATEGORIES:
+        raise HTTPException(status_code=400, detail=f"Invalid category '{category}'. Must be one of: {', '.join(CATEGORIES)}")
+
+    # Build tags from explicit tags + category parts
+    tag_parts = list(category.split("/"))
+    if req.tags:
+        for t in req.tags:
+            if t not in tag_parts:
+                tag_parts.append(t)
+    tags = ", ".join(tag_parts)
+
+    # Build markdown content
+    frontmatter = (
+        f"---\n"
+        f"date: {date}\n"
+        f"url: {req.url}\n"
+        f"author: {req.author}\n"
+        f"category: {category}\n"
+        f"tags: \"{tags}\"\n"
+        f"---\n\n"
+    )
+    md_content = frontmatter + req.summary
+
+    # Save file under category subdirectory
+    category_dir = os.path.join(xa_path, category)
+    os.makedirs(category_dir, exist_ok=True)
+    base_filename = sanitize_filename(req.title)
+    filename = base_filename + ".md"
+    filepath = os.path.join(category_dir, filename)
+
+    if os.path.exists(filepath):
+        # Check if it's the same article (same URL) — overwrite is fine
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                existing_content = f.read(500)
+            if f"url: {req.url}" not in existing_content:
+                for i in range(2, 100):
+                    filename = f"{base_filename} ({i}).md"
+                    filepath = os.path.join(category_dir, filename)
+                    if not os.path.exists(filepath):
+                        break
+        except Exception:
+            pass
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(md_content)
+    file_rel_path = os.path.join(category, filename)
+    logger.info(f"X article ingest: saved {file_rel_path} (author: {req.author}, category: {category})")
+
+    # Search for similar articles
+    similar = []
+    if xa_collection and store.has_collection(xa_collection):
+        searcher = store.get_searchers([xa_collection]).get(xa_collection)
+        if searcher:
+            search_result = searcher.search(
+                req.summary[:2000],
+                max_number_of_chunks=30,
+                max_number_of_documents=5,
+                include_matched_chunks_content=True,
+            )
+            for doc in search_result.get("results", []):
+                doc_url = doc.get("url", "")
+                if doc_url == req.url:
+                    continue
+                doc_title = doc.get("path", "").rsplit("/", 1)[-1].replace(".json", "")
+                chunks = doc.get("matchedChunks", [])
+                snippet = ""
+                if chunks:
+                    raw = chunks[0].get("content", "")
+                    snippet = _truncate_snippet(_extract_chunk_text(raw))
+                similar.append({
+                    "title": doc_title,
+                    "url": doc_url,
+                    "snippet": snippet,
+                })
+
+    # Trigger background reindex
+    if xa_collection and store.has_collection(xa_collection):
+        background_tasks.add_task(run_collection_update, xa_collection)
+
+    return {
+        "status": "ingested",
+        "file_path": file_rel_path,
+        "author": req.author,
+        "category": category,
+        "summary": req.summary,
+        "similar": similar[:5],
+    }
+
+
 # ── Jira ingest ────────────────────────────────────────────────────────────
 
 
@@ -1345,6 +1461,16 @@ def main():
         default=os.environ.get("JIRA_COLLECTION", "jira-issues"),
         help="Collection name for Jira issues",
     )
+    ap.add_argument(
+        "--x-articles-sources-path",
+        default=os.environ.get("X_ARTICLES_SOURCES_PATH"),
+        help="Path to save X article summary markdown files",
+    )
+    ap.add_argument(
+        "--x-articles-collection",
+        default=os.environ.get("X_ARTICLES_COLLECTION", "x-articles"),
+        help="Collection name for X article summaries",
+    )
     args = ap.parse_args()
 
     app.state.data_path = args.data_path
@@ -1353,6 +1479,8 @@ def main():
     app.state.youtube_collection = args.youtube_collection
     app.state.jira_sources_path = args.jira_sources_path
     app.state.jira_collection = args.jira_collection
+    app.state.x_articles_sources_path = args.x_articles_sources_path
+    app.state.x_articles_collection = args.x_articles_collection
 
     uvicorn.run(app, host=args.host, port=args.port)
 
