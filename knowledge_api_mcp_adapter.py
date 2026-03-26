@@ -240,10 +240,13 @@ def _search_knowledge_impl(
             breadcrumb = f"\n   {r['breadcrumb']}" if r.get("breadcrumb") else ""
             wip = " **[UNDER ARBEID]**" if _is_wip(r) else ""
             graph_ctx = f"\n   *{' | '.join(r['graph_context'])}*" if r.get("graph_context") else ""
+            meta = r.get("metadata") or {}
+            visible_meta = {k: v for k, v in meta.items() if k not in _INTERNAL_METADATA_KEYS and v}
+            meta_line = f"\n   *{' | '.join(f'{k}: {v}' for k, v in visible_meta.items())}*" if visible_meta else ""
             parts.append(
                 f"{i}. **{r['title']}**{heading}{wip}{relevance}{date}\n"
                 f"   {r.get('url', '')}{breadcrumb}\n"
-                f"   {r.get('snippet', '')}{graph_ctx}\n"
+                f"   {r.get('snippet', '')}{graph_ctx}{meta_line}\n"
                 f"   collection: `{r['collection']}` doc_id: `{r['id']}`"
             )
     else:
@@ -297,13 +300,17 @@ def get_document(collection: str, doc_id: str) -> str:
     title = doc.get("title", doc_id)
     url = doc.get("url", "")
     text = doc.get("text", "")
-    is_wip = (doc.get("metadata") or {}).get("wip") == "true"
+    metadata = doc.get("metadata") or {}
+    is_wip = metadata.get("wip") == "true"
 
     header = f"# {title}"
     if is_wip:
         header += "\n**[UNDER ARBEID]** Dette dokumentet er merket som under arbeid i Confluence."
     if url:
         header += f"\n{url}"
+    visible_meta = {k: v for k, v in metadata.items() if k not in _INTERNAL_METADATA_KEYS and v}
+    if visible_meta:
+        header += "\n" + " | ".join(f"**{k}:** {v}" for k, v in visible_meta.items())
     return f"{header}\n\n{text}"
 
 
