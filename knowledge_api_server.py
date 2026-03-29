@@ -622,7 +622,7 @@ def _build_similarity_graph(name, searcher):
             headings = [c["heading"] for c in doc_json.get("chunks", []) if c.get("heading")]
             text = doc_json.get("text", "")
             if text:
-                summary = text[:200].rstrip() + ("..." if len(text) > 200 else "")
+                summary = text[:500].rstrip() + ("..." if len(text) > 500 else "")
         except Exception:
             logger.debug(f"Could not read metadata for {doc_id}")
         tags = [t.strip() for t in category.split("/") if t.strip()]
