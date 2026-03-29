@@ -609,6 +609,8 @@ def _build_similarity_graph(name, searcher):
         title = doc_id.rsplit("/", 1)[-1].replace(".md", "")
         category = doc_id.split("/")[0] if "/" in doc_id else "uncategorized"
         doc_date = None
+        headings = []
+        summary = ""
         try:
             doc_json = json.loads(store.disk_persister.read_text_file(
                 f"{name}/documents/{doc_id}.json"
@@ -617,6 +619,10 @@ def _build_similarity_graph(name, searcher):
             doc_date = chunk_meta.get("date")
             if chunk_meta.get("category"):
                 category = chunk_meta["category"]
+            headings = [c["heading"] for c in doc_json.get("chunks", []) if c.get("heading")]
+            text = doc_json.get("text", "")
+            if text:
+                summary = text[:200].rstrip() + ("..." if len(text) > 200 else "")
         except Exception:
             logger.debug(f"Could not read metadata for {doc_id}")
         tags = [t.strip() for t in category.split("/") if t.strip()]
@@ -627,6 +633,8 @@ def _build_similarity_graph(name, searcher):
             "category": category,
             "tags": tags,
             "date": doc_date,
+            "headings": headings,
+            "summary": summary,
         })
 
     return {"nodes": nodes, "sim_matrix": sim_matrix, "doc_ids": doc_ids}
