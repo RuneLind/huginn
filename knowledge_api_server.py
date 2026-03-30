@@ -57,6 +57,8 @@ class KnowledgeStore:
         self.notion_id_to_doc = {}
         # Maps collection name -> {tag: count} for tag distribution
         self.tag_counts = {}
+        # Cached similarity graphs: collection_name -> {nodes, all_edges}
+        self._similarity_graph_cache = {}
         self._lock = threading.Lock()
 
     def load_collections(self, collection_names, data_path="./data/collections"):
@@ -104,6 +106,7 @@ class KnowledgeStore:
         searcher = self._build_searcher(collection_name)
         with self._lock:
             self.searchers[collection_name] = searcher
+            self._similarity_graph_cache.pop(collection_name, None)
         self._build_tag_counts(collection_name)
         self._build_notion_id_lookup(collection_name)
         logger.info(f"Collection {collection_name} reloaded ({searcher.indexer.get_size()} embeddings)")
@@ -539,6 +542,164 @@ def list_collection_documents(name: str):
         documents.append({"id": doc_id, "url": doc_url})
 
     return {"documents": documents}
+
+
+_EMPTY_GRAPH = {"nodes": [], "edges": [], "stats": {"node_count": 0, "edge_count": 0, "avg_similarity": 0.0}}
+
+
+def _build_similarity_graph(name, searcher):
+    """Compute the full similarity graph for a collection (cached by caller)."""
+    import faiss
+    import numpy as np
+
+    indexer = searcher.indexer
+    faiss_indexer = indexer.faiss_indexer if hasattr(indexer, "faiss_indexer") else indexer
+    idx = faiss_indexer.faiss_index  # IndexIDMap wrapping IndexFlatL2
+
+    n_vectors = idx.ntotal
+    if n_vectors == 0:
+        return None
+
+    all_vectors = idx.index.reconstruct_n(0, n_vectors)
+    id_map = faiss.vector_to_array(idx.id_map)
+
+    try:
+        mapping_text = store.disk_persister.read_text_file(
+            f"{name}/indexes/index_document_mapping.json"
+        )
+        mapping = json.loads(mapping_text)
+    except Exception:
+        logger.warning(f"Could not load index mapping for {name}")
+        return None
+
+    # Group vectors by document, filter to youtube docs only
+    doc_chunks = {}
+    doc_meta = {}
+    for vec_idx, chunk_id in enumerate(id_map):
+        entry = mapping.get(str(int(chunk_id)))
+        if not entry:
+            continue
+        doc_url = entry.get("documentUrl", "")
+        if "youtube.com" not in doc_url and "youtu.be" not in doc_url:
+            continue
+        doc_id = entry["documentId"]
+        doc_chunks.setdefault(doc_id, []).append(vec_idx)
+        if doc_id not in doc_meta:
+            doc_meta[doc_id] = {"url": doc_url, "path": entry.get("documentPath", "")}
+
+    if not doc_chunks:
+        return None
+
+    # Mean-pool chunk vectors into document vectors, normalize for cosine similarity
+    doc_ids = list(doc_chunks.keys())
+    dim = all_vectors.shape[1]
+    doc_vectors = np.zeros((len(doc_ids), dim), dtype=np.float32)
+    for i, doc_id in enumerate(doc_ids):
+        doc_vectors[i] = all_vectors[doc_chunks[doc_id]].mean(axis=0)
+    faiss.normalize_L2(doc_vectors)
+
+    # Compute full pairwise cosine similarity via inner product
+    # ~400 docs x 768 dim — a single matrix multiply is faster than building a FAISS index
+    sim_matrix = doc_vectors @ doc_vectors.T
+
+    # Build nodes with metadata
+    nodes = []
+    for doc_id in doc_ids:
+        meta = doc_meta[doc_id]
+        title = doc_id.rsplit("/", 1)[-1].replace(".md", "")
+        category = doc_id.split("/")[0] if "/" in doc_id else "uncategorized"
+        doc_date = None
+        headings = []
+        summary = ""
+        try:
+            doc_json = json.loads(store.disk_persister.read_text_file(
+                f"{name}/documents/{doc_id}.json"
+            ))
+            chunk_meta = (doc_json.get("chunks") or [{}])[0].get("metadata", {})
+            doc_date = chunk_meta.get("date")
+            if chunk_meta.get("category"):
+                category = chunk_meta["category"]
+            headings = [c["heading"] for c in doc_json.get("chunks", []) if c.get("heading")]
+            text = doc_json.get("text", "")
+            if text:
+                summary = text[:500].rstrip() + ("..." if len(text) > 500 else "")
+        except Exception:
+            logger.debug(f"Could not read metadata for {doc_id}")
+        tags = [t.strip() for t in category.split("/") if t.strip()]
+        nodes.append({
+            "id": doc_id,
+            "title": title,
+            "url": meta["url"],
+            "category": category,
+            "tags": tags,
+            "date": doc_date,
+            "headings": headings,
+            "summary": summary,
+        })
+
+    return {"nodes": nodes, "sim_matrix": sim_matrix, "doc_ids": doc_ids}
+
+
+@app.get("/api/collection/{name}/similarity-graph")
+def collection_similarity_graph(
+    name: str,
+    top_k: int = Query(5, ge=1, le=20),
+    min_similarity: float = Query(0.65, ge=0.0, le=1.0),
+):
+    """Build a document similarity graph from FAISS embeddings (mean-pooled per document)."""
+    if not store.has_collection(name):
+        raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
+
+    # Use cached graph or compute on first request
+    cached = store._similarity_graph_cache.get(name)
+    if not cached:
+        searcher = store.get_searchers([name])[name]
+        cached = _build_similarity_graph(name, searcher)
+        if not cached:
+            return _EMPTY_GRAPH
+        store._similarity_graph_cache[name] = cached
+
+    import numpy as np
+
+    nodes = cached["nodes"]
+    sim_matrix = cached["sim_matrix"]
+    doc_ids = cached["doc_ids"]
+    n = len(doc_ids)
+    k = min(top_k, n - 1)
+
+    # For each document, find top-k neighbors above threshold
+    edges = []
+    seen_pairs = set()
+    for i in range(n):
+        row = sim_matrix[i]
+        # Get top-(k+1) indices, exclude self
+        top_indices = np.argpartition(row, -(k + 1))[-(k + 1):]
+        for idx in top_indices:
+            j = int(idx)
+            if j == i:
+                continue
+            sim = float(row[j])
+            if sim < min_similarity:
+                continue
+            pair = (min(i, j), max(i, j))
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            edges.append({
+                "source": doc_ids[i],
+                "target": doc_ids[j],
+                "similarity": round(sim, 4),
+            })
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "stats": {
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+            "avg_similarity": round(sum(e["similarity"] for e in edges) / max(len(edges), 1), 4),
+        },
+    }
 
 
 @app.get("/api/document/{collection}/{doc_id:path}")
