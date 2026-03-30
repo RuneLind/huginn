@@ -616,15 +616,15 @@ def _build_similarity_graph(name, searcher):
             chunk_meta = (doc_json.get("chunks") or [{}])[0].get("metadata", {})
             doc_date = chunk_meta.get("date") or doc_meta_fields.get("date")
 
-            # Derive category from the richest available metadata
+            # Derive category: chunk category (YouTube), first tag (Jira/Confluence), epic, fallback
             if chunk_meta.get("category"):
                 category = chunk_meta["category"]
-            elif doc_meta_fields.get("epic_summary"):
-                category = doc_meta_fields["epic_summary"]
             elif doc_meta_fields.get("tags"):
                 first_tag = doc_meta_fields["tags"].split(",")[0].strip()
                 if first_tag:
                     category = first_tag
+            elif doc_meta_fields.get("epic_summary"):
+                category = doc_meta_fields["epic_summary"]
 
             if doc_meta_fields.get("title"):
                 title = doc_meta_fields["title"]
