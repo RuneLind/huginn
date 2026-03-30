@@ -572,7 +572,6 @@ def _build_similarity_graph(name, searcher):
         logger.warning(f"Could not load index mapping for {name}")
         return None
 
-    # Group vectors by document, filter to youtube docs only
     doc_chunks = {}
     doc_meta = {}
     for vec_idx, chunk_id in enumerate(id_map):
@@ -580,8 +579,6 @@ def _build_similarity_graph(name, searcher):
         if not entry:
             continue
         doc_url = entry.get("documentUrl", "")
-        if "youtube.com" not in doc_url and "youtu.be" not in doc_url:
-            continue
         doc_id = entry["documentId"]
         doc_chunks.setdefault(doc_id, []).append(vec_idx)
         if doc_id not in doc_meta:
