@@ -621,10 +621,10 @@ def _build_similarity_graph(name, searcher):
                 category = chunk_meta["category"]
             elif doc_meta_fields.get("epic_summary"):
                 category = doc_meta_fields["epic_summary"]
-            elif doc_meta_fields.get("breadcrumb"):
-                # Use second-level breadcrumb for Confluence (first level is always the space root)
-                parts = [p.strip() for p in doc_meta_fields["breadcrumb"].replace(" > ", "/").split("/") if p.strip()]
-                category = parts[1] if len(parts) > 1 else parts[0] if parts else category
+            elif doc_meta_fields.get("tags"):
+                first_tag = doc_meta_fields["tags"].split(",")[0].strip()
+                if first_tag:
+                    category = first_tag
 
             if doc_meta_fields.get("title"):
                 title = doc_meta_fields["title"]
