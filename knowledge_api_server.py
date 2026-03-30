@@ -599,7 +599,6 @@ def _build_similarity_graph(name, searcher):
     # ~400 docs x 768 dim — a single matrix multiply is faster than building a FAISS index
     sim_matrix = doc_vectors @ doc_vectors.T
 
-    # Build nodes with metadata
     nodes = []
     for doc_id in doc_ids:
         meta = doc_meta[doc_id]
@@ -608,27 +607,44 @@ def _build_similarity_graph(name, searcher):
         doc_date = None
         headings = []
         summary = ""
+        tags_list = []
         try:
             doc_json = json.loads(store.disk_persister.read_text_file(
                 f"{name}/documents/{doc_id}.json"
             ))
+            doc_meta_fields = doc_json.get("metadata") or {}
             chunk_meta = (doc_json.get("chunks") or [{}])[0].get("metadata", {})
-            doc_date = chunk_meta.get("date")
+            doc_date = chunk_meta.get("date") or doc_meta_fields.get("date")
+
+            # Derive category from the richest available metadata
             if chunk_meta.get("category"):
                 category = chunk_meta["category"]
+            elif doc_meta_fields.get("epic_summary"):
+                category = doc_meta_fields["epic_summary"]
+            elif doc_meta_fields.get("breadcrumb"):
+                # Use second-level breadcrumb for Confluence (first level is always the space root)
+                parts = [p.strip() for p in doc_meta_fields["breadcrumb"].replace(" > ", "/").split("/") if p.strip()]
+                category = parts[1] if len(parts) > 1 else parts[0] if parts else category
+
+            if doc_meta_fields.get("title"):
+                title = doc_meta_fields["title"]
+            if doc_meta_fields.get("tags"):
+                tags_list = [t.strip() for t in doc_meta_fields["tags"].split(",") if t.strip()]
+
             headings = [c["heading"] for c in doc_json.get("chunks", []) if c.get("heading")]
             text = doc_json.get("text", "")
             if text:
                 summary = text[:500].rstrip() + ("..." if len(text) > 500 else "")
         except Exception:
             logger.debug(f"Could not read metadata for {doc_id}")
-        tags = [t.strip() for t in category.split("/") if t.strip()]
+        if not tags_list:
+            tags_list = [t.strip() for t in category.split("/") if t.strip()]
         nodes.append({
             "id": doc_id,
             "title": title,
             "url": meta["url"],
             "category": category,
-            "tags": tags,
+            "tags": tags_list,
             "date": doc_date,
             "headings": headings,
             "summary": summary,
