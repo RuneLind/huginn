@@ -626,8 +626,18 @@ def _detect_communities(sim_matrix, doc_ids, nodes, min_similarity=0.5):
         top_members = sorted(members, key=lambda x: -internal_degree.get(x, 0))[:3]
         representative_titles = [nodes[idx]["title"] for idx in top_members]
 
+        # Generate a readable community name from top tags/categories
+        if top_tags:
+            name_parts = [t for t, _ in top_tags[:2]]
+        elif top_categories:
+            name_parts = [c for c, _ in top_categories[:2]]
+        else:
+            name_parts = [f"Cluster {comm_id}"]
+        community_name = " + ".join(name_parts)
+
         community_info.append({
             "id": comm_id,
+            "name": community_name,
             "size": len(members),
             "top_tags": [{"tag": t, "count": c} for t, c in top_tags],
             "top_categories": [{"category": c, "count": n} for c, n in top_categories],
