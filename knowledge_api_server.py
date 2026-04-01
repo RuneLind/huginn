@@ -544,7 +544,97 @@ def list_collection_documents(name: str):
     return {"documents": documents}
 
 
-_EMPTY_GRAPH = {"nodes": [], "edges": [], "stats": {"node_count": 0, "edge_count": 0, "avg_similarity": 0.0}}
+_EMPTY_GRAPH = {"nodes": [], "edges": [], "stats": {"node_count": 0, "edge_count": 0, "avg_similarity": 0.0},
+                 "communities": []}
+
+
+def _detect_communities(sim_matrix, doc_ids, nodes, min_similarity=0.5):
+    """Run Louvain community detection on the similarity matrix.
+
+    Builds a networkx graph from document pairs above min_similarity,
+    then finds communities. Returns list of community dicts and updates
+    each node with its community ID.
+    """
+    import networkx as nx
+    from networkx.algorithms.community import louvain_communities
+
+    n = len(doc_ids)
+    G = nx.Graph()
+    G.add_nodes_from(range(n))
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            sim = float(sim_matrix[i][j])
+            if sim >= min_similarity:
+                G.add_edge(i, j, weight=sim)
+
+    # Remove isolated nodes (no edges above threshold) before community detection
+    isolates = list(nx.isolates(G))
+    G.remove_nodes_from(isolates)
+
+    if G.number_of_nodes() == 0:
+        # All nodes are isolated — assign each to its own community
+        for i, node in enumerate(nodes):
+            node["community"] = i
+        return []
+
+    communities = louvain_communities(G, weight="weight", resolution=1.0, seed=42)
+
+    # Sort communities by size (largest first)
+    communities = sorted(communities, key=len, reverse=True)
+
+    # Build node-to-community mapping
+    node_to_community = {}
+    for comm_id, members in enumerate(communities):
+        for member_idx in members:
+            node_to_community[member_idx] = comm_id
+
+    # Assign isolated nodes to their own communities starting after detected ones
+    next_comm = len(communities)
+    for idx in isolates:
+        node_to_community[idx] = next_comm
+        next_comm += 1
+
+    # Update nodes with community ID
+    for i, node in enumerate(nodes):
+        node["community"] = node_to_community.get(i, -1)
+
+    # Build community summaries
+    community_info = []
+    for comm_id, members in enumerate(communities):
+        member_nodes = [nodes[idx] for idx in members]
+        # Count tags across members
+        tag_counts = {}
+        for mn in member_nodes:
+            for tag in mn.get("tags", []):
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+        top_tags = sorted(tag_counts.items(), key=lambda x: -x[1])[:5]
+
+        # Count categories
+        cat_counts = {}
+        for mn in member_nodes:
+            cat = mn.get("category", "")
+            cat_counts[cat] = cat_counts.get(cat, 0) + 1
+        top_categories = sorted(cat_counts.items(), key=lambda x: -x[1])[:3]
+
+        # Representative titles (top 3 most connected within community)
+        member_set = set(members)
+        internal_degree = {}
+        for idx in members:
+            deg = sum(1 for neighbor in G.neighbors(idx) if neighbor in member_set)
+            internal_degree[idx] = deg
+        top_members = sorted(members, key=lambda x: -internal_degree.get(x, 0))[:3]
+        representative_titles = [nodes[idx]["title"] for idx in top_members]
+
+        community_info.append({
+            "id": comm_id,
+            "size": len(members),
+            "top_tags": [{"tag": t, "count": c} for t, c in top_tags],
+            "top_categories": [{"category": c, "count": n} for c, n in top_categories],
+            "representative_docs": representative_titles,
+        })
+
+    return community_info
 
 
 def _build_similarity_graph(name, searcher):
@@ -650,7 +740,10 @@ def _build_similarity_graph(name, searcher):
             "summary": summary,
         })
 
-    return {"nodes": nodes, "sim_matrix": sim_matrix, "doc_ids": doc_ids}
+    # Run community detection on the similarity matrix
+    communities = _detect_communities(sim_matrix, doc_ids, nodes, min_similarity=0.5)
+
+    return {"nodes": nodes, "sim_matrix": sim_matrix, "doc_ids": doc_ids, "communities": communities}
 
 
 @app.get("/api/collection/{name}/similarity-graph")
@@ -707,9 +800,11 @@ def collection_similarity_graph(
     return {
         "nodes": nodes,
         "edges": edges,
+        "communities": cached.get("communities", []),
         "stats": {
             "node_count": len(nodes),
             "edge_count": len(edges),
+            "community_count": len(cached.get("communities", [])),
             "avg_similarity": round(sum(e["similarity"] for e in edges) / max(len(edges), 1), 4),
         },
     }
