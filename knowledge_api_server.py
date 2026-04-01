@@ -572,7 +572,6 @@ def _build_similarity_graph(name, searcher):
         logger.warning(f"Could not load index mapping for {name}")
         return None
 
-    # Group vectors by document, filter to youtube docs only
     doc_chunks = {}
     doc_meta = {}
     for vec_idx, chunk_id in enumerate(id_map):
@@ -580,8 +579,6 @@ def _build_similarity_graph(name, searcher):
         if not entry:
             continue
         doc_url = entry.get("documentUrl", "")
-        if "youtube.com" not in doc_url and "youtu.be" not in doc_url:
-            continue
         doc_id = entry["documentId"]
         doc_chunks.setdefault(doc_id, []).append(vec_idx)
         if doc_id not in doc_meta:
@@ -599,10 +596,9 @@ def _build_similarity_graph(name, searcher):
     faiss.normalize_L2(doc_vectors)
 
     # Compute full pairwise cosine similarity via inner product
-    # ~400 docs x 768 dim — a single matrix multiply is faster than building a FAISS index
+    # A single matrix multiply is faster than building a FAISS index at this scale
     sim_matrix = doc_vectors @ doc_vectors.T
 
-    # Build nodes with metadata
     nodes = []
     for doc_id in doc_ids:
         meta = doc_meta[doc_id]
@@ -611,27 +607,44 @@ def _build_similarity_graph(name, searcher):
         doc_date = None
         headings = []
         summary = ""
+        tags_list = []
         try:
             doc_json = json.loads(store.disk_persister.read_text_file(
                 f"{name}/documents/{doc_id}.json"
             ))
+            stored_meta = doc_json.get("metadata") or {}
             chunk_meta = (doc_json.get("chunks") or [{}])[0].get("metadata", {})
-            doc_date = chunk_meta.get("date")
+            doc_date = chunk_meta.get("date") or stored_meta.get("date")
+
+            # Derive category: chunk category (YouTube), first tag (Jira/Confluence), epic, fallback
             if chunk_meta.get("category"):
                 category = chunk_meta["category"]
+            elif stored_meta.get("tags"):
+                first_tag = stored_meta["tags"].split(",")[0].strip()
+                if first_tag:
+                    category = first_tag
+            elif stored_meta.get("epic_summary"):
+                category = stored_meta["epic_summary"]
+
+            if stored_meta.get("title"):
+                title = stored_meta["title"]
+            if stored_meta.get("tags"):
+                tags_list = [t.strip() for t in stored_meta["tags"].split(",") if t.strip()]
+
             headings = [c["heading"] for c in doc_json.get("chunks", []) if c.get("heading")]
             text = doc_json.get("text", "")
             if text:
                 summary = text[:500].rstrip() + ("..." if len(text) > 500 else "")
         except Exception:
             logger.debug(f"Could not read metadata for {doc_id}")
-        tags = [t.strip() for t in category.split("/") if t.strip()]
+        if not tags_list:
+            tags_list = [t.strip() for t in category.split("/") if t.strip()]
         nodes.append({
             "id": doc_id,
             "title": title,
             "url": meta["url"],
             "category": category,
-            "tags": tags,
+            "tags": tags_list,
             "date": doc_date,
             "headings": headings,
             "summary": summary,
