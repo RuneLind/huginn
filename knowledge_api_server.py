@@ -596,7 +596,7 @@ def _build_similarity_graph(name, searcher):
     faiss.normalize_L2(doc_vectors)
 
     # Compute full pairwise cosine similarity via inner product
-    # ~400 docs x 768 dim — a single matrix multiply is faster than building a FAISS index
+    # A single matrix multiply is faster than building a FAISS index at this scale
     sim_matrix = doc_vectors @ doc_vectors.T
 
     nodes = []
@@ -612,24 +612,24 @@ def _build_similarity_graph(name, searcher):
             doc_json = json.loads(store.disk_persister.read_text_file(
                 f"{name}/documents/{doc_id}.json"
             ))
-            doc_meta_fields = doc_json.get("metadata") or {}
+            stored_meta = doc_json.get("metadata") or {}
             chunk_meta = (doc_json.get("chunks") or [{}])[0].get("metadata", {})
-            doc_date = chunk_meta.get("date") or doc_meta_fields.get("date")
+            doc_date = chunk_meta.get("date") or stored_meta.get("date")
 
             # Derive category: chunk category (YouTube), first tag (Jira/Confluence), epic, fallback
             if chunk_meta.get("category"):
                 category = chunk_meta["category"]
-            elif doc_meta_fields.get("tags"):
-                first_tag = doc_meta_fields["tags"].split(",")[0].strip()
+            elif stored_meta.get("tags"):
+                first_tag = stored_meta["tags"].split(",")[0].strip()
                 if first_tag:
                     category = first_tag
-            elif doc_meta_fields.get("epic_summary"):
-                category = doc_meta_fields["epic_summary"]
+            elif stored_meta.get("epic_summary"):
+                category = stored_meta["epic_summary"]
 
-            if doc_meta_fields.get("title"):
-                title = doc_meta_fields["title"]
-            if doc_meta_fields.get("tags"):
-                tags_list = [t.strip() for t in doc_meta_fields["tags"].split(",") if t.strip()]
+            if stored_meta.get("title"):
+                title = stored_meta["title"]
+            if stored_meta.get("tags"):
+                tags_list = [t.strip() for t in stored_meta["tags"].split(",") if t.strip()]
 
             headings = [c["heading"] for c in doc_json.get("chunks", []) if c.get("heading")]
             text = doc_json.get("text", "")
