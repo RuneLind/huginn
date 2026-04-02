@@ -90,10 +90,17 @@ class KnowledgeStore:
         graph_paths = []
         eessi_path_str = os.environ.get("KNOWLEDGE_GRAPH_PATH", "")
         jira_path_str = os.environ.get("JIRA_GRAPH_PATH", "")
+        llm_graph_str = os.environ.get("LLM_GRAPH_PATH", "")
         if eessi_path_str and Path(eessi_path_str).exists():
             graph_paths.append(Path(eessi_path_str))
         if jira_path_str and Path(jira_path_str).exists():
             graph_paths.append(Path(jira_path_str))
+        if llm_graph_str and Path(llm_graph_str).exists():
+            graph_paths.append(Path(llm_graph_str))
+        # Also auto-detect LLM graphs in the knowledge_graph scripts dir
+        for p in Path("./scripts/knowledge_graph").glob("*_llm_graph.json"):
+            if p not in graph_paths:
+                graph_paths.append(p)
         if graph_paths:
             from main.graph.knowledge_graph import KnowledgeGraph
             self.graph = KnowledgeGraph(graph_paths)

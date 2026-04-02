@@ -41,6 +41,13 @@ class KnowledgeGraph:
                 self.outgoing[edge["source"]].append(edge)
                 self.incoming[edge["target"]].append(edge)
 
+        # Build fast lookup for LLM-extracted entities (entity:* nodes)
+        # Only include labels with 3+ chars to avoid false positives
+        self._entity_patterns = []
+        for node_id, node in self.nodes.items():
+            if node_id.startswith("entity:") and len(node["label"]) >= 3:
+                self._entity_patterns.append((node["label"].lower(), node_id))
+
     def node_count(self) -> int:
         return len(self.nodes)
 
@@ -92,6 +99,12 @@ class KnowledgeGraph:
                 found.append(issue_id)
             elif epic_id in self.nodes:
                 found.append(epic_id)
+        # LLM-extracted entities: match by label (case-insensitive word boundary)
+        if self._entity_patterns:
+            text_lower = text.lower()
+            for label_lower, node_id in self._entity_patterns:
+                if label_lower in text_lower:
+                    found.append(node_id)
         return list(dict.fromkeys(found))  # deduplicate, preserve order
 
     # --- Query expansion ---
