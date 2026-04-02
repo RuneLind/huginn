@@ -194,16 +194,30 @@ def main():
         return
 
     output_path = Path(args.output) if args.output else Path(f"./scripts/knowledge_graph/{args.collection}_llm_graph.json")
+    cache_path = output_path.with_suffix(".cache.json")
 
     # Find all document JSON files
     doc_files = sorted(docs_dir.rglob("*.json"))
     if args.limit > 0:
         doc_files = doc_files[:args.limit]
 
+    # Load cache of previously extracted documents
+    cache = {}
+    if cache_path.exists():
+        try:
+            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        except Exception:
+            cache = {}
+
+    cached_count = sum(1 for f in doc_files
+                       for doc in [json.loads(f.read_text(encoding="utf-8"))]
+                       if doc.get("id", f.stem) in cache) if cache else 0
+
     print(f"Collection: {args.collection}")
     print(f"Model: {args.model}")
-    print(f"Documents: {len(doc_files)}")
+    print(f"Documents: {len(doc_files)} ({cached_count} cached, {len(doc_files) - cached_count} to process)")
     print(f"Output: {output_path}")
+    print(f"Cache: {cache_path}")
     print()
 
     # Check Ollama is running
@@ -218,6 +232,7 @@ def main():
     doc_titles = {}
     skipped = 0
     errors = 0
+    new_count = 0
     start_time = time.time()
 
     for i, doc_file in enumerate(doc_files):
@@ -237,9 +252,15 @@ def main():
         title = metadata.get("title", doc_id.rsplit("/", 1)[-1].replace(".md", ""))
         doc_titles[doc_id] = title
 
+        # Use cached extraction if available
+        if doc_id in cache:
+            all_extractions.append((doc_id, cache[doc_id]))
+            continue
+
         elapsed = time.time() - start_time
-        rate = (i / elapsed) if elapsed > 0 and i > 0 else 0
-        eta = ((len(doc_files) - i) / rate) if rate > 0 else 0
+        rate = (new_count / elapsed) if elapsed > 0 and new_count > 0 else 0
+        remaining = len(doc_files) - i
+        eta = (remaining / rate) if rate > 0 else 0
         print(f"  [{i+1}/{len(doc_files)}] {title[:60]}... ", end="", flush=True)
 
         extraction = call_ollama(args.model, text, title)
@@ -248,12 +269,16 @@ def main():
             n_rel = len(extraction.get("relationships", []))
             print(f"{n_ent} entities, {n_rel} relationships ({eta:.0f}s remaining)")
             all_extractions.append((doc_id, extraction))
+            cache[doc_id] = extraction
+            new_count += 1
+            # Save cache after each successful extraction
+            cache_path.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
         else:
             print("failed")
             errors += 1
 
     elapsed = time.time() - start_time
-    print(f"\nProcessed {len(all_extractions)} documents in {elapsed:.1f}s ({errors} errors, {skipped} skipped)")
+    print(f"\nProcessed {new_count} new + {cached_count} cached documents in {elapsed:.1f}s ({errors} errors, {skipped} skipped)")
 
     # Build merged graph
     graph = build_graph(all_extractions, doc_titles)
