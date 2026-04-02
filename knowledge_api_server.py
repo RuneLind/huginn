@@ -757,8 +757,16 @@ def _build_similarity_graph(name, searcher):
             "summary": summary,
         })
 
-    # Run community detection on the similarity matrix
-    communities = _detect_communities(sim_matrix, doc_ids, nodes, min_similarity=0.5)
+    # Run community detection on the full similarity matrix
+    # Use a percentile-based threshold: only connect pairs above median similarity
+    all_sims = []
+    for i in range(len(doc_ids)):
+        for j in range(i + 1, len(doc_ids)):
+            all_sims.append(float(sim_matrix[i][j]))
+    all_sims.sort()
+    # Use 75th percentile as threshold — keeps top 25% of connections
+    p75 = all_sims[int(len(all_sims) * 0.75)] if all_sims else 0.5
+    communities = _detect_communities(sim_matrix, doc_ids, nodes, min_similarity=p75)
 
     return {"nodes": nodes, "sim_matrix": sim_matrix, "doc_ids": doc_ids, "communities": communities}
 
