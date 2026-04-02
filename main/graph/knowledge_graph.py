@@ -151,6 +151,23 @@ class KnowledgeGraph:
                         if target:
                             terms.append(target["label"][:60])
                             ref_count += 1
+            elif node_id.startswith("entity:"):
+                # LLM-extracted entities: include labels of neighbors (limited)
+                neighbor_count = 0
+                for edge in self.outgoing.get(node_id, []):
+                    if neighbor_count >= 5:
+                        break
+                    target = self.nodes.get(edge["target"])
+                    if target:
+                        terms.append(target["label"])
+                        neighbor_count += 1
+                for edge in self.incoming.get(node_id, []):
+                    if neighbor_count >= 5:
+                        break
+                    source = self.nodes.get(edge["source"])
+                    if source:
+                        terms.append(source["label"])
+                        neighbor_count += 1
             else:
                 # EESSI types: BUC → SED, BUC → Artikkel, etc.
                 for edge in self.outgoing.get(node_id, []):
@@ -234,6 +251,25 @@ class KnowledgeGraph:
                         epic_summary = epic.get("properties", {}).get("summary", "")
                         parts.append(f"Epic: {epic_summary}" if epic_summary else f"Epic: {epic['label']}")
                     break
+
+        elif node_id.startswith("entity:"):
+            # LLM-extracted entity
+            mentions = node.get("properties", {}).get("mention_count", 0)
+            parts.append(f"{node['label']} ({node_type})")
+            # Show key relationships
+            related = []
+            for edge in self.outgoing.get(node_id, []):
+                target = self.nodes.get(edge["target"])
+                if target:
+                    related.append(f"{edge['type']} {target['label']}")
+            for edge in self.incoming.get(node_id, []):
+                source = self.nodes.get(edge["source"])
+                if source:
+                    related.append(f"{source['label']} {edge['type']}")
+            if related:
+                parts.append(", ".join(related[:5]))
+            if mentions > 1:
+                parts.append(f"{mentions} mentions")
 
         return " | ".join(parts) if parts else None
 
