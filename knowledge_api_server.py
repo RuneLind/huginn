@@ -644,12 +644,27 @@ def _detect_communities(sim_matrix, doc_ids, nodes, min_similarity=0.5):
 
         community_info.append({
             "id": comm_id,
-            "name": community_name,
+            "name": community_name,  # may be deduplicated below
             "size": len(members),
             "top_tags": [{"tag": t, "count": c} for t, c in top_tags],
             "top_categories": [{"category": c, "count": n} for c, n in top_categories],
             "representative_docs": representative_titles,
         })
+
+    # Deduplicate names: append representative doc title for collisions
+    name_counts = {}
+    for c in community_info:
+        name_counts[c["name"]] = name_counts.get(c["name"], 0) + 1
+    for name_val, count in name_counts.items():
+        if count <= 1:
+            continue
+        for c in community_info:
+            if c["name"] == name_val and c["representative_docs"]:
+                # Shorten the first representative doc title for disambiguation
+                doc_hint = c["representative_docs"][0]
+                if len(doc_hint) > 30:
+                    doc_hint = doc_hint[:27] + "..."
+                c["name"] = f"{name_val}: {doc_hint}"
 
     return community_info
 
