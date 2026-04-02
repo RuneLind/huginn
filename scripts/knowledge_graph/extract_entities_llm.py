@@ -193,7 +193,19 @@ def main():
         print(f"Error: Documents directory not found: {docs_dir}")
         return
 
-    output_path = Path(args.output) if args.output else Path(f"./scripts/knowledge_graph/{args.collection}_llm_graph.json")
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        # Default to private repo dir, fall back to local scripts dir
+        for candidate in [
+            Path(f"./huginn-jarvis/scripts/knowledge_graph/{args.collection}_llm_graph.json"),
+            Path(f"./huginn-nav/scripts/knowledge_graph/{args.collection}_llm_graph.json"),
+        ]:
+            if candidate.parent.exists():
+                output_path = candidate
+                break
+        else:
+            output_path = Path(f"./scripts/knowledge_graph/{args.collection}_llm_graph.json")
     cache_path = output_path.with_suffix(".cache.json")
 
     # Find all document JSON files
