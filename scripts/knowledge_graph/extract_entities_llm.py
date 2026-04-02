@@ -196,14 +196,15 @@ def main():
     if args.output:
         output_path = Path(args.output)
     else:
-        # Default to private repo dir, fall back to local scripts dir
-        for candidate in [
-            Path(f"./huginn-jarvis/scripts/knowledge_graph/{args.collection}_llm_graph.json"),
-            Path(f"./huginn-nav/scripts/knowledge_graph/{args.collection}_llm_graph.json"),
-        ]:
-            if candidate.parent.exists():
-                output_path = candidate
-                break
+        # Route to the right private repo based on collection name
+        nav_collections = {"melosys-confluence-v3", "melosys-jira", "jira-issues", "nav-begreper-eessi"}
+        if args.collection in nav_collections:
+            preferred = Path(f"./huginn-nav/scripts/knowledge_graph/{args.collection}_llm_graph.json")
+        else:
+            preferred = Path(f"./huginn-jarvis/scripts/knowledge_graph/{args.collection}_llm_graph.json")
+
+        if preferred.parent.exists():
+            output_path = preferred
         else:
             output_path = Path(f"./scripts/knowledge_graph/{args.collection}_llm_graph.json")
     cache_path = output_path.with_suffix(".cache.json")
