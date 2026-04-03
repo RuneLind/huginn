@@ -121,6 +121,7 @@ class KnowledgeStore:
             self._similarity_graph_cache.pop(collection_name, None)
         self._build_tag_counts(collection_name)
         self._build_notion_id_lookup(collection_name)
+        self._load_knowledge_graph()
         logger.info(f"Collection {collection_name} reloaded ({searcher.indexer.get_size()} embeddings)")
 
     def get_searchers(self, collection_names=None):
