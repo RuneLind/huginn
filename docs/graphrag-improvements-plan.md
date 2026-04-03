@@ -1,49 +1,46 @@
 ---
 title: GraphRAG-inspirerte forbedringer for Huginn
-status: in-progress
+status: 2 of 3 complete
 created: 2026-04-01
+updated: 2026-04-03
 ---
 
 # GraphRAG-inspirerte forbedringer
 
 Inspirert av Microsoft GraphRAG, tilpasset Huginn sin lokale arkitektur.
+Se `docs/graph-enhanced-rag.html` for interaktiv teknisk dokumentasjon.
 
 ## 1. Community detection (Louvain) — FERDIG
 
 Implementert i `feature/community-detection` branch (huginn + muninn).
 
 - Louvain community detection på similarity-matrisen via networkx
-- Community-navn generert fra top tags
-- Frontend: Category/Community toggle, cluster-kraft, konvekse hull-bakgrunner
-- Commits: huginn 849cd41, 8989d22 | muninn 8e0f8a4, 663a31b, c41183b
+- Percentile-basert terskel (75th) for å håndtere homogene collections
+- Community-navn generert fra top tags, deduplisert med representative docs
+- Frontend: Category/Community toggle, cluster-kraft, konvekse hull-bakgrunner, named chips
+- Commits: huginn 849cd41..eb9aa60 | muninn 8e0f8a4..f2495da
 
-## 2. LLM-basert entitetsekstraksjon (valgfri berikelse)
+## 2. LLM-basert entitetsekstraksjon — FERDIG
 
-Bruk lokal LLM (Ollama) til å ekstrahere entiteter og relasjoner fra dokumenttekst.
-Fanger implisitte relasjoner som regex ikke ser.
+Implementert og kjørt på 3 collections. Totalt 8,096 entiteter, 15,022 relasjoner.
 
-### Konsept
+- Script: `scripts/knowledge_graph/extract_entities_llm.py`
+- Bruker Ollama (qwen3.5) lokalt — ingen data forlater maskinen
+- Inkrementell cache (.cache.json) — kan stoppes og gjenopptas
+- Auto-detekteres fra huginn-jarvis/ og huginn-nav/ ved server-oppstart
+- Entity detection i søk via label-matching på entity:* noder
+- Query expansion via 1-hop graf-traversering
+- Graph context annoteres på hvert søkeresultat
 
-- Kjør Ollama (f.eks. qwen3:8b, qwen3.5:32b) over dokumenter i en collection
-- Ekstraher entiteter (personer, konsepter, teknologier, organisasjoner)
-- Ekstraher relasjoner mellom entiteter
-- Lagre som JSON i samme format som eksisterende knowledge graph
-- Kan merges inn i KnowledgeGraph ved oppstart
+### Ekstraksjonsstatus
 
-### Implementasjon
+| Collection | Docs | Entiteter | Relasjoner | Lagret i |
+|---|---|---|---|---|
+| youtube-summaries | 402 | 2,383 | 3,118 | huginn-jarvis |
+| melosys-confluence | 296 | 1,348 | 1,888 | huginn-nav |
+| jira-issues | 2,158 | 5,637 | 10,016 | huginn-nav |
 
-- Nytt script: `scripts/knowledge_graph/extract_entities_llm.py`
-- Input: collection-mappe med dokumenter (markdown/JSON)
-- Output: graph JSON (nodes + edges) kompatibelt med KnowledgeGraph
-- Prompt-design: strukturert output (JSON) med entitetstyper og relasjoner
-- Batch-prosessering med progress bar
-- Inkrementell: hopp over allerede prosesserte dokumenter
-
-### Verdi
-
-- Oppdager relasjoner på tvers av dokumenter (f.eks. "denne videoen og den artikkelen handler begge om RAG")
-- Bygger et semantisk nettverk utover det tags og kategorier gir
-- Beriker søkeresultater med graf-kontekst
+Commits: huginn 8b683d1..075a1f2
 
 ## 3. Global search (map-reduce over cluster-sammendrag)
 
