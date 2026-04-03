@@ -8,6 +8,7 @@ A comprehensive guide to understanding the complete pipeline from document to AI
 - [The Complete Pipeline](#the-complete-pipeline)
 - [Detailed Example](#detailed-example)
 - [Query Time: How Search Works](#query-time-how-search-works)
+- [Knowledge Graph Enhancement](#knowledge-graph-enhancement)
 - [Why This Works: Semantic Understanding](#why-this-works-semantic-understanding)
 - [Performance Characteristics](#performance-characteristics)
 - [Memory & Storage](#memory--storage)
@@ -254,6 +255,29 @@ A **BM25 index** is also built alongside FAISS for keyword matching. At search t
 User: "Hva er reglene for grensearbeidere?"
 ```
 
+### Step 1b: Knowledge Graph Enhancement
+
+Before vector search, the query is analyzed against the knowledge graph (built by LLM entity extraction):
+
+```python
+# Detect entities in the query
+detected = graph.detect_entities("Hva er reglene for grensearbeidere?")
+# → ["entity:grensearbeider", "entity:forordning"]
+
+# Expand query with graph neighbors (1-hop traversal)
+expansion_terms = graph.get_expansion_terms(detected)
+# → ["grensearbeider", "Artikkel 13", "EØS", "trygdeforordningen"]
+
+search_q = query + " " + " ".join(expansion_terms)
+# → "Hva er reglene for grensearbeidere? grensearbeider Artikkel 13 EØS trygdeforordningen"
+```
+
+Entity detection uses two methods:
+- **Regex patterns** for known formats (BUC codes, SED codes, Jira keys, article references)
+- **LLM graph label matching** for entities discovered during extraction (case-insensitive substring match against all `entity:*` node labels)
+
+The expanded query finds documents that discuss the topic indirectly — for example, a page about "Artikkel 13" that never mentions "grensearbeider" but is directly relevant.
+
 ### Step 2: Convert Query to Vector
 
 ```python
@@ -303,6 +327,26 @@ After reranking, **title boost** adjusts scores for documents whose filename mat
 
 **Note:** For English queries (3+ words), the reranker is automatically skipped because it collapses scores for cross-lingual (EN→NO) pairs. The hybrid search scores are used directly.
 
+### Step 3c: Graph Context Enrichment
+
+After ranking, each result is annotated with structured relationship information from the knowledge graph:
+
+```python
+# For each result, detect entities in its title and add graph context
+for result in results:
+    entities = graph.detect_entities(result["title"])
+    result["graph_context"] = [graph.get_entity_context(e) for e in entities]
+```
+
+**Example:** A result titled "Definisjoner i forordningene" gets annotated with:
+```
+graph_context: [
+  "Forordning 883/2004 (Concept) | regulates Trygdeavgift, defines grensearbeider | 22 mentions"
+]
+```
+
+This gives AI agents consuming search results immediate understanding of how concepts relate — without needing additional context retrieval.
+
 ### Step 4: Retrieve Full Context
 
 ```python
@@ -313,7 +357,8 @@ for idx in indices:
         "text": chunk_metadata["chunk_text"],
         "url": chunk_metadata["url"],
         "title": chunk_metadata["title"],
-        "score": distances[idx]
+        "score": distances[idx],
+        "graph_context": [...]  # entity relationships from knowledge graph
     })
 ```
 
@@ -324,7 +369,8 @@ for idx in indices:
   "text": "En grensearbeider er en person som utfører lønnet arbeid i en medlemsstat...",
   "url": "https://confluence.example.com/spaces/MYSPACE/pages/123456789",
   "title": "Definisjoner i forordningene",
-  "score": 0.12
+  "score": 0.12,
+  "graph_context": ["Forordning 883/2004 (Concept) | regulates Trygdeavgift, defines grensearbeider"]
 }
 ```
 
@@ -400,6 +446,41 @@ Finds similar vectors:
 | **Related concepts** | ❌ Misses "artikkel 1(f)" | ✅ Finds related regulations |
 | **Typos** | ❌ "grensearbeidre" = no match | ✅ Still finds similar vectors |
 | **Context** | ❌ "apple" (fruit or company?) | ✅ Understands from context |
+
+---
+
+## Knowledge Graph Enhancement
+
+Standard vector search treats documents as isolated text. The knowledge graph adds a layer of structured understanding by capturing entities and their relationships across the entire document collection.
+
+### How the Graph is Built
+
+A local LLM (Ollama, qwen3.5) processes each document to extract entities and relationships:
+
+```
+Document: "Trygdeavgift beregnes av næringsinntekt og utenlandsk inntekt, og betales til NAV via Melosys"
+    ↓ LLM extraction
+Entities:  Trygdeavgift (Concept), Næringsinntekt (Concept), NAV (Organization), Melosys (Product)
+Relations: Trygdeavgift --calculated_from--> Næringsinntekt
+           Trygdeavgift --paid_to--> NAV
+           Trygdeavgift --improves--> Melosys
+```
+
+This runs fully locally — no data leaves the machine. Results are cached per document for incremental updates.
+
+### Three Ways the Graph Enhances Search
+
+| Enhancement | When | What happens |
+|-------------|------|-------------|
+| **Entity detection** | Query arrives | Matches query terms against graph entities (regex + label matching) |
+| **Query expansion** | Before search | Adds related terms from graph neighbors to the search query |
+| **Context enrichment** | After ranking | Annotates each result with entity relationships |
+
+### Current Scale
+
+The knowledge graph currently contains **8,096 entities** and **15,022 relationships** across three collections (youtube-summaries, melosys-confluence, jira-issues). Entity types include Technology, Product, Organization, Concept, and Person.
+
+For detailed architecture and diagrams, see [graph-enhanced-rag.html](graph-enhanced-rag.html).
 
 ---
 

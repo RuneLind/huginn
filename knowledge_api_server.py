@@ -90,10 +90,22 @@ class KnowledgeStore:
         graph_paths = []
         eessi_path_str = os.environ.get("KNOWLEDGE_GRAPH_PATH", "")
         jira_path_str = os.environ.get("JIRA_GRAPH_PATH", "")
+        llm_graph_str = os.environ.get("LLM_GRAPH_PATH", "")
         if eessi_path_str and Path(eessi_path_str).exists():
             graph_paths.append(Path(eessi_path_str))
         if jira_path_str and Path(jira_path_str).exists():
             graph_paths.append(Path(jira_path_str))
+        if llm_graph_str and Path(llm_graph_str).exists():
+            graph_paths.append(Path(llm_graph_str))
+        # Auto-detect LLM graphs in private repo dirs and fallback to local scripts
+        for search_dir in [
+            Path("./huginn-jarvis/scripts/knowledge_graph"),
+            Path("./huginn-nav/scripts/knowledge_graph"),
+            Path("./scripts/knowledge_graph"),
+        ]:
+            for p in search_dir.glob("*_llm_graph.json"):
+                if p not in graph_paths:
+                    graph_paths.append(p)
         if graph_paths:
             from main.graph.knowledge_graph import KnowledgeGraph
             self.graph = KnowledgeGraph(graph_paths)
@@ -544,7 +556,122 @@ def list_collection_documents(name: str):
     return {"documents": documents}
 
 
-_EMPTY_GRAPH = {"nodes": [], "edges": [], "stats": {"node_count": 0, "edge_count": 0, "avg_similarity": 0.0}}
+_EMPTY_GRAPH = {"nodes": [], "edges": [], "stats": {"node_count": 0, "edge_count": 0, "avg_similarity": 0.0},
+                 "communities": []}
+
+
+def _detect_communities(sim_matrix, doc_ids, nodes, min_similarity=0.5):
+    """Run Louvain community detection on the similarity matrix.
+
+    Builds a networkx graph from document pairs above min_similarity,
+    then finds communities. Returns list of community dicts and updates
+    each node with its community ID.
+    """
+    import numpy as np
+    import networkx as nx
+    from networkx.algorithms.community import louvain_communities
+
+    num_docs = len(doc_ids)
+    G = nx.Graph()
+    G.add_nodes_from(range(num_docs))
+
+    # Vectorized edge filtering — avoids O(n^2) Python loop
+    rows, cols = np.where(np.triu(sim_matrix, k=1) >= min_similarity)
+    for r, c in zip(rows, cols):
+        G.add_edge(int(r), int(c), weight=float(sim_matrix[r, c]))
+
+    # Remove isolated nodes (no edges above threshold) before community detection
+    isolates = list(nx.isolates(G))
+    G.remove_nodes_from(isolates)
+
+    if G.number_of_nodes() == 0:
+        # All nodes are isolated — assign each to its own community
+        for i, node in enumerate(nodes):
+            node["community"] = i
+        return []
+
+    communities = louvain_communities(G, weight="weight", resolution=1.0, seed=42)
+
+    # Sort communities by size (largest first)
+    communities = sorted(communities, key=len, reverse=True)
+
+    # Build node-to-community mapping
+    node_to_community = {}
+    for comm_id, members in enumerate(communities):
+        for member_idx in members:
+            node_to_community[member_idx] = comm_id
+
+    # Assign isolated nodes to their own communities starting after detected ones
+    next_comm = len(communities)
+    for idx in isolates:
+        node_to_community[idx] = next_comm
+        next_comm += 1
+
+    # Update nodes with community ID
+    for i, node in enumerate(nodes):
+        node["community"] = node_to_community.get(i, -1)
+
+    # Build community summaries
+    community_info = []
+    for comm_id, members in enumerate(communities):
+        member_nodes = [nodes[idx] for idx in members]
+        # Count tags across members
+        tag_counts = {}
+        for mn in member_nodes:
+            for tag in mn.get("tags", []):
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+        top_tags = sorted(tag_counts.items(), key=lambda x: -x[1])[:5]
+
+        # Count categories
+        cat_counts = {}
+        for mn in member_nodes:
+            cat = mn.get("category", "")
+            cat_counts[cat] = cat_counts.get(cat, 0) + 1
+        top_categories = sorted(cat_counts.items(), key=lambda x: -x[1])[:3]
+
+        # Representative titles (top 3 most connected within community)
+        member_set = set(members)
+        internal_degree = {}
+        for idx in members:
+            deg = sum(1 for neighbor in G.neighbors(idx) if neighbor in member_set)
+            internal_degree[idx] = deg
+        top_members = sorted(members, key=lambda x: -internal_degree.get(x, 0))[:3]
+        representative_titles = [nodes[idx]["title"] for idx in top_members]
+
+        # Generate a readable community name from top tags/categories
+        if top_tags:
+            name_parts = [t for t, _ in top_tags[:2]]
+        elif top_categories:
+            name_parts = [c for c, _ in top_categories[:2]]
+        else:
+            name_parts = [f"Cluster {comm_id}"]
+        community_name = " + ".join(name_parts)
+
+        community_info.append({
+            "id": comm_id,
+            "name": community_name,  # may be deduplicated below
+            "size": len(members),
+            "top_tags": [{"tag": t, "count": c} for t, c in top_tags],
+            "top_categories": [{"category": c, "count": cnt} for c, cnt in top_categories],
+            "representative_docs": representative_titles,
+        })
+
+    # Deduplicate names: append representative doc title for collisions
+    name_counts = {}
+    for c in community_info:
+        name_counts[c["name"]] = name_counts.get(c["name"], 0) + 1
+    for name_val, count in name_counts.items():
+        if count <= 1:
+            continue
+        for c in community_info:
+            if c["name"] == name_val and c["representative_docs"]:
+                # Shorten the first representative doc title for disambiguation
+                doc_hint = c["representative_docs"][0]
+                if len(doc_hint) > 30:
+                    doc_hint = doc_hint[:27] + "..."
+                c["name"] = f"{name_val}: {doc_hint}"
+
+    return community_info
 
 
 def _build_similarity_graph(name, searcher):
@@ -650,7 +777,14 @@ def _build_similarity_graph(name, searcher):
             "summary": summary,
         })
 
-    return {"nodes": nodes, "sim_matrix": sim_matrix, "doc_ids": doc_ids}
+    # Run community detection on the full similarity matrix
+    # Use 75th percentile as threshold — keeps top 25% of connections
+    import numpy as np
+    upper_tri = sim_matrix[np.triu_indices(len(doc_ids), k=1)]
+    p75 = float(np.percentile(upper_tri, 75)) if len(upper_tri) > 0 else 0.5
+    communities = _detect_communities(sim_matrix, doc_ids, nodes, min_similarity=p75)
+
+    return {"nodes": nodes, "sim_matrix": sim_matrix, "doc_ids": doc_ids, "communities": communities}
 
 
 @app.get("/api/collection/{name}/similarity-graph")
@@ -707,9 +841,11 @@ def collection_similarity_graph(
     return {
         "nodes": nodes,
         "edges": edges,
+        "communities": cached.get("communities", []),
         "stats": {
             "node_count": len(nodes),
             "edge_count": len(edges),
+            "community_count": len(cached.get("communities", [])),
             "avg_similarity": round(sum(e["similarity"] for e in edges) / max(len(edges), 1), 4),
         },
     }

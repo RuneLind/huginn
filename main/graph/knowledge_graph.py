@@ -12,6 +12,9 @@ from collections import defaultdict
 from pathlib import Path
 
 
+ENTITY_PREFIX = "entity:"
+
+
 class KnowledgeGraph:
 
     def __init__(self, graph_path):
@@ -40,6 +43,13 @@ class KnowledgeGraph:
             for edge in data["edges"]:
                 self.outgoing[edge["source"]].append(edge)
                 self.incoming[edge["target"]].append(edge)
+
+        # Build fast lookup for LLM-extracted entities (entity:* nodes)
+        # Only include labels with 3+ chars to avoid false positives
+        self._entity_patterns = []
+        for node_id, node in self.nodes.items():
+            if node_id.startswith(ENTITY_PREFIX) and len(node["label"]) >= 3:
+                self._entity_patterns.append((node["label"].lower(), node_id))
 
     def node_count(self) -> int:
         return len(self.nodes)
@@ -92,6 +102,12 @@ class KnowledgeGraph:
                 found.append(issue_id)
             elif epic_id in self.nodes:
                 found.append(epic_id)
+        # LLM-extracted entities: match by label (case-insensitive word boundary)
+        if self._entity_patterns:
+            text_lower = text.lower()
+            for label_lower, node_id in self._entity_patterns:
+                if label_lower in text_lower:
+                    found.append(node_id)
         return list(dict.fromkeys(found))  # deduplicate, preserve order
 
     # --- Query expansion ---
@@ -138,6 +154,23 @@ class KnowledgeGraph:
                         if target:
                             terms.append(target["label"][:60])
                             ref_count += 1
+            elif node_id.startswith("entity:"):
+                # LLM-extracted entities: include labels of neighbors (limited)
+                neighbor_count = 0
+                for edge in self.outgoing.get(node_id, []):
+                    if neighbor_count >= 5:
+                        break
+                    target = self.nodes.get(edge["target"])
+                    if target:
+                        terms.append(target["label"])
+                        neighbor_count += 1
+                for edge in self.incoming.get(node_id, []):
+                    if neighbor_count >= 5:
+                        break
+                    source = self.nodes.get(edge["source"])
+                    if source:
+                        terms.append(source["label"])
+                        neighbor_count += 1
             else:
                 # EESSI types: BUC → SED, BUC → Artikkel, etc.
                 for edge in self.outgoing.get(node_id, []):
@@ -221,6 +254,25 @@ class KnowledgeGraph:
                         epic_summary = epic.get("properties", {}).get("summary", "")
                         parts.append(f"Epic: {epic_summary}" if epic_summary else f"Epic: {epic['label']}")
                     break
+
+        elif node_id.startswith("entity:"):
+            # LLM-extracted entity
+            mentions = node.get("properties", {}).get("mention_count", 0)
+            parts.append(f"{node['label']} ({node_type})")
+            # Show key relationships
+            related = []
+            for edge in self.outgoing.get(node_id, []):
+                target = self.nodes.get(edge["target"])
+                if target:
+                    related.append(f"{edge['type']} {target['label']}")
+            for edge in self.incoming.get(node_id, []):
+                source = self.nodes.get(edge["source"])
+                if source:
+                    related.append(f"{source['label']} {edge['type']}")
+            if related:
+                parts.append(", ".join(related[:5]))
+            if mentions > 1:
+                parts.append(f"{mentions} mentions")
 
         return " | ".join(parts) if parts else None
 
