@@ -567,18 +567,18 @@ def _detect_communities(sim_matrix, doc_ids, nodes, min_similarity=0.5):
     then finds communities. Returns list of community dicts and updates
     each node with its community ID.
     """
+    import numpy as np
     import networkx as nx
     from networkx.algorithms.community import louvain_communities
 
-    n = len(doc_ids)
+    num_docs = len(doc_ids)
     G = nx.Graph()
-    G.add_nodes_from(range(n))
+    G.add_nodes_from(range(num_docs))
 
-    for i in range(n):
-        for j in range(i + 1, n):
-            sim = float(sim_matrix[i][j])
-            if sim >= min_similarity:
-                G.add_edge(i, j, weight=sim)
+    # Vectorized edge filtering — avoids O(n^2) Python loop
+    rows, cols = np.where(np.triu(sim_matrix, k=1) >= min_similarity)
+    for r, c in zip(rows, cols):
+        G.add_edge(int(r), int(c), weight=float(sim_matrix[r, c]))
 
     # Remove isolated nodes (no edges above threshold) before community detection
     isolates = list(nx.isolates(G))
@@ -652,7 +652,7 @@ def _detect_communities(sim_matrix, doc_ids, nodes, min_similarity=0.5):
             "name": community_name,  # may be deduplicated below
             "size": len(members),
             "top_tags": [{"tag": t, "count": c} for t, c in top_tags],
-            "top_categories": [{"category": c, "count": n} for c, n in top_categories],
+            "top_categories": [{"category": c, "count": cnt} for c, cnt in top_categories],
             "representative_docs": representative_titles,
         })
 
@@ -778,14 +778,10 @@ def _build_similarity_graph(name, searcher):
         })
 
     # Run community detection on the full similarity matrix
-    # Use a percentile-based threshold: only connect pairs above median similarity
-    all_sims = []
-    for i in range(len(doc_ids)):
-        for j in range(i + 1, len(doc_ids)):
-            all_sims.append(float(sim_matrix[i][j]))
-    all_sims.sort()
     # Use 75th percentile as threshold — keeps top 25% of connections
-    p75 = all_sims[int(len(all_sims) * 0.75)] if all_sims else 0.5
+    import numpy as np
+    upper_tri = sim_matrix[np.triu_indices(len(doc_ids), k=1)]
+    p75 = float(np.percentile(upper_tri, 75)) if len(upper_tri) > 0 else 0.5
     communities = _detect_communities(sim_matrix, doc_ids, nodes, min_similarity=p75)
 
     return {"nodes": nodes, "sim_matrix": sim_matrix, "doc_ids": doc_ids, "communities": communities}

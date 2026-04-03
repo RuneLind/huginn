@@ -12,6 +12,9 @@ from collections import defaultdict
 from pathlib import Path
 
 
+ENTITY_PREFIX = "entity:"
+
+
 class KnowledgeGraph:
 
     def __init__(self, graph_path):
@@ -45,7 +48,7 @@ class KnowledgeGraph:
         # Only include labels with 3+ chars to avoid false positives
         self._entity_patterns = []
         for node_id, node in self.nodes.items():
-            if node_id.startswith("entity:") and len(node["label"]) >= 3:
+            if node_id.startswith(ENTITY_PREFIX) and len(node["label"]) >= 3:
                 self._entity_patterns.append((node["label"].lower(), node_id))
 
     def node_count(self) -> int:

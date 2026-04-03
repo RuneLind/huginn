@@ -125,7 +125,7 @@ def build_graph(all_extractions: list[dict], doc_titles: dict[str, str]) -> dict
 
     # Build nodes — include entities that appear in 2+ documents or are important
     nodes = []
-    node_ids = set()
+    node_names = set()
     for name, count in sorted(entity_counts.items(), key=lambda x: -x[1]):
         node_id = f"entity:{name.lower().replace(' ', '_')}"
         nodes.append({
@@ -137,13 +137,13 @@ def build_graph(all_extractions: list[dict], doc_titles: dict[str, str]) -> dict
                 "source_documents": sorted(entity_sources[name]),
             },
         })
-        node_ids.add(name)
+        node_names.add(name)
 
     # Build edges — only between nodes that exist
     edges = []
     seen_edges = set()
     for (src, tgt, rtype), count in sorted(relationship_counts.items(), key=lambda x: -x[1]):
-        if src not in node_ids or tgt not in node_ids:
+        if src not in node_names or tgt not in node_names:
             continue
         src_id = f"entity:{src.lower().replace(' ', '_')}"
         tgt_id = f"entity:{tgt.lower().replace(' ', '_')}"
@@ -222,13 +222,9 @@ def main():
         except Exception:
             cache = {}
 
-    cached_count = sum(1 for f in doc_files
-                       for doc in [json.loads(f.read_text(encoding="utf-8"))]
-                       if doc.get("id", f.stem) in cache) if cache else 0
-
     print(f"Collection: {args.collection}")
     print(f"Model: {args.model}")
-    print(f"Documents: {len(doc_files)} ({cached_count} cached, {len(doc_files) - cached_count} to process)")
+    print(f"Documents: {len(doc_files)} ({len(cache)} in cache)")
     print(f"Output: {output_path}")
     print(f"Cache: {cache_path}")
     print()
@@ -284,13 +280,18 @@ def main():
             all_extractions.append((doc_id, extraction))
             cache[doc_id] = extraction
             new_count += 1
-            # Save cache after each successful extraction
-            cache_path.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+            if new_count % 20 == 0:
+                cache_path.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
         else:
             print("failed")
             errors += 1
 
+    # Final cache write
+    if new_count > 0:
+        cache_path.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+
     elapsed = time.time() - start_time
+    cached_count = len(all_extractions) - new_count
     print(f"\nProcessed {new_count} new + {cached_count} cached documents in {elapsed:.1f}s ({errors} errors, {skipped} skipped)")
 
     # Build merged graph
