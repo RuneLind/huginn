@@ -856,41 +856,84 @@ def collection_similarity_graph(
 def collection_author_graph(
     name: str,
     min_score: float = Query(0.0, ge=0.0, le=1.0),
-    min_tweets: int = Query(2, ge=1, le=100),
+    min_tweets: int = Query(3, ge=1, le=100),
     min_interactions: int = Query(1, ge=1, le=100),
 ):
     """Serve the author interaction graph for a collection.
 
     Reads pre-computed author scores from huginn-jarvis and transforms
     them into the same node/edge/community format as similarity-graph.
+    Only includes authors that have at least one interaction edge (no isolates).
     """
     import json as _json
     from pathlib import Path
     from collections import defaultdict
 
-    # Look for author scores JSON (produced by huginn-jarvis/scripts/x/scoring/author_graph.py)
     scores_path = Path(__file__).parent / "huginn-jarvis" / "data" / f"{name}-author-scores.json"
     if not scores_path.exists():
         raise HTTPException(status_code=404, detail=f"No author graph found for '{name}'")
 
     data = _json.loads(scores_path.read_text())
 
+    # Pre-filter candidates by score and tweet count
+    candidates = {
+        handle for handle, info in data.items()
+        if info.get("author_score", 0) >= min_score
+        and info.get("tweet_count", 0) >= min_tweets
+    }
+
+    # Build edges first so we can filter to connected nodes only
+    tweet_dir = Path(__file__).parent / "data" / "sources" / name
+    interaction_counts: dict[tuple[str, str], float] = defaultdict(float)
+    if tweet_dir.exists():
+        import re
+        re_handle = re.compile(r"^\d{4}-\d{2}-\d{2}_(.+?)_\d+\.md$")
+        re_quoted = re.compile(r"> \*\*Quoted @(\w+):")
+        re_mention = re.compile(r"(?<![.\w])@(\w{1,15})(?!\.\w)")
+
+        for f in tweet_dir.glob("*.md"):
+            m = re_handle.match(f.name)
+            if not m:
+                continue
+            src = m.group(1).lower()
+            if src not in candidates:
+                continue
+            content = f.read_text(encoding="utf-8")
+            body = content
+            if content.startswith("---"):
+                end = content.find("---", 3)
+                if end != -1:
+                    body = content[end + 3:]
+
+            for qh in re_quoted.findall(body):
+                tgt = qh.lower()
+                if tgt in candidates and tgt != src:
+                    interaction_counts[(src, tgt)] += 3.0
+            for line in body.split("\n"):
+                if line.startswith("# @") or line.startswith("> **Quoted @") or line.startswith("- **Engagement"):
+                    continue
+                for mh in re_mention.findall(line):
+                    tgt = mh.lower()
+                    if tgt in candidates and tgt != src:
+                        interaction_counts[(src, tgt)] += 1.0
+
+    # Filter to only connected handles (have at least one edge)
+    connected = set()
+    for (src, tgt), weight in interaction_counts.items():
+        if weight >= min_interactions:
+            connected.add(src)
+            connected.add(tgt)
+
     # Remap sparse community IDs to contiguous 0, 1, 2...
     orig_communities = set()
-    for info in data.values():
-        if info.get("tweet_count", 0) >= min_tweets and info.get("author_score", 0) >= min_score:
-            orig_communities.add(info.get("community", -1))
+    for handle in connected:
+        orig_communities.add(data[handle].get("community", -1))
     comm_remap = {old: new for new, old in enumerate(sorted(orig_communities))}
 
-    # Build nodes
+    # Build nodes (only connected authors)
     nodes = []
-    handle_set = set()
-    for handle, info in data.items():
-        if info.get("author_score", 0) < min_score:
-            continue
-        if info.get("tweet_count", 0) < min_tweets:
-            continue
-        handle_set.add(handle)
+    for handle in connected:
+        info = data[handle]
         nodes.append({
             "id": handle,
             "title": f"@{handle}",
@@ -906,53 +949,23 @@ def collection_author_graph(
                 f"Tweets: {info.get('tweet_count', 0)}"
             ),
             "community": comm_remap.get(info.get("community", -1), -1),
+            "score": info.get("author_score", 0),
         })
 
-    # Build edges from the tweet data (re-parse interactions)
-    tweet_dir = Path(__file__).parent / "data" / "sources" / name
+    # Sort nodes by score descending
+    nodes.sort(key=lambda n: -n["score"])
+
+    # Build edges with normalized weights
     edges = []
-    if tweet_dir.exists():
-        import re
-        re_handle = re.compile(r"^\d{4}-\d{2}-\d{2}_(.+?)_\d+\.md$")
-        re_quoted = re.compile(r"> \*\*Quoted @(\w+):")
-        re_mention = re.compile(r"(?<![.\w])@(\w{1,15})(?!\.\w)")
-
-        interaction_counts: dict[tuple[str, str], float] = defaultdict(float)
-        for f in tweet_dir.glob("*.md"):
-            m = re_handle.match(f.name)
-            if not m:
-                continue
-            src = m.group(1).lower()
-            if src not in handle_set:
-                continue
-            content = f.read_text(encoding="utf-8")
-            body = content
-            if content.startswith("---"):
-                end = content.find("---", 3)
-                if end != -1:
-                    body = content[end + 3:]
-
-            for qh in re_quoted.findall(body):
-                tgt = qh.lower()
-                if tgt in handle_set and tgt != src:
-                    interaction_counts[(src, tgt)] += 3.0
-            for line in body.split("\n"):
-                if line.startswith("# @") or line.startswith("> **Quoted @") or line.startswith("- **Engagement"):
-                    continue
-                for mh in re_mention.findall(line):
-                    tgt = mh.lower()
-                    if tgt in handle_set and tgt != src:
-                        interaction_counts[(src, tgt)] += 1.0
-
-        max_weight = max(interaction_counts.values()) if interaction_counts else 1.0
-        for (src, tgt), weight in interaction_counts.items():
-            if weight < min_interactions:
-                continue
-            edges.append({
-                "source": src,
-                "target": tgt,
-                "similarity": round(weight / max_weight, 4),
-            })
+    max_weight = max(interaction_counts.values()) if interaction_counts else 1.0
+    for (src, tgt), weight in interaction_counts.items():
+        if weight < min_interactions or src not in connected or tgt not in connected:
+            continue
+        edges.append({
+            "source": src,
+            "target": tgt,
+            "similarity": round(weight / max_weight, 4),
+        })
 
     # Build community summaries
     comm_members: dict[int, list] = defaultdict(list)
@@ -963,7 +976,7 @@ def collection_author_graph(
     for cid, members in sorted(comm_members.items(), key=lambda x: -len(x[1])):
         if len(members) < 2:
             continue
-        top_authors = sorted(members, key=lambda n: -float(n["summary"].split("|")[0].split(":")[1].strip()))
+        top_authors = sorted(members, key=lambda n: -n["score"])
         name_parts = [n["title"] for n in top_authors[:2]]
         communities.append({
             "id": cid,
