@@ -59,6 +59,7 @@ class KnowledgeStore:
         self.tag_counts = {}
         # Cached similarity graphs: collection_name -> {nodes, all_edges}
         self._similarity_graph_cache = {}
+        self._author_graph_cache = {}
         self._lock = threading.Lock()
 
     def load_collections(self, collection_names, data_path="./data/collections"):
@@ -119,6 +120,7 @@ class KnowledgeStore:
         with self._lock:
             self.searchers[collection_name] = searcher
             self._similarity_graph_cache.pop(collection_name, None)
+            self._author_graph_cache.pop(collection_name, None)
         self._build_tag_counts(collection_name)
         self._build_notion_id_lookup(collection_name)
         self._load_knowledge_graph()
@@ -864,16 +866,20 @@ def collection_author_graph(
     Reads pre-computed author scores from huginn-jarvis and transforms
     them into the same node/edge/community format as similarity-graph.
     Only includes authors that have at least one interaction edge (no isolates).
+    Results are cached per collection; invalidated on collection reload.
     """
-    import json as _json
-    from pathlib import Path
     from collections import defaultdict
+
+    cache_key = name
+    cached = store._author_graph_cache.get(cache_key)
+    if cached:
+        return cached
 
     scores_path = Path(__file__).parent / "huginn-jarvis" / "data" / f"{name}-author-scores.json"
     if not scores_path.exists():
         raise HTTPException(status_code=404, detail=f"No author graph found for '{name}'")
 
-    data = _json.loads(scores_path.read_text())
+    data = json.loads(scores_path.read_text())
 
     # Pre-filter candidates by score and tweet count
     candidates = {
@@ -886,7 +892,6 @@ def collection_author_graph(
     tweet_dir = Path(__file__).parent / "data" / "sources" / name
     interaction_counts: dict[tuple[str, str], float] = defaultdict(float)
     if tweet_dir.exists():
-        import re
         re_handle = re.compile(r"^\d{4}-\d{2}-\d{2}_(.+?)_\d+\.md$")
         re_quoted = re.compile(r"> \*\*Quoted @(\w+):")
         re_mention = re.compile(r"(?<![.\w])@(\w{1,15})(?!\.\w)")
@@ -987,7 +992,7 @@ def collection_author_graph(
             "representative_docs": [n["title"] for n in top_authors[:3]],
         })
 
-    return {
+    result = {
         "nodes": nodes,
         "edges": edges,
         "communities": communities,
@@ -998,6 +1003,8 @@ def collection_author_graph(
             "avg_similarity": round(sum(e["similarity"] for e in edges) / max(len(edges), 1), 4),
         },
     }
+    store._author_graph_cache[cache_key] = result
+    return result
 
 
 @app.get("/api/document/{collection}/{doc_id:path}")
