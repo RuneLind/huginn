@@ -59,6 +59,7 @@ class KnowledgeStore:
         self.tag_counts = {}
         # Cached similarity graphs: collection_name -> {nodes, all_edges}
         self._similarity_graph_cache = {}
+        self._author_graph_cache = {}
         self._lock = threading.Lock()
 
     def load_collections(self, collection_names, data_path="./data/collections"):
@@ -119,6 +120,7 @@ class KnowledgeStore:
         with self._lock:
             self.searchers[collection_name] = searcher
             self._similarity_graph_cache.pop(collection_name, None)
+            self._author_graph_cache.pop(collection_name, None)
         self._build_tag_counts(collection_name)
         self._build_notion_id_lookup(collection_name)
         self._load_knowledge_graph()
@@ -850,6 +852,159 @@ def collection_similarity_graph(
             "avg_similarity": round(sum(e["similarity"] for e in edges) / max(len(edges), 1), 4),
         },
     }
+
+
+@app.get("/api/collection/{name}/author-graph")
+def collection_author_graph(
+    name: str,
+    min_score: float = Query(0.0, ge=0.0, le=1.0),
+    min_tweets: int = Query(3, ge=1, le=100),
+    min_interactions: int = Query(1, ge=1, le=100),
+):
+    """Serve the author interaction graph for a collection.
+
+    Reads pre-computed author scores from huginn-jarvis and transforms
+    them into the same node/edge/community format as similarity-graph.
+    Only includes authors that have at least one interaction edge (no isolates).
+    Results are cached per collection; invalidated on collection reload.
+    """
+    from collections import defaultdict
+
+    cache_key = name
+    cached = store._author_graph_cache.get(cache_key)
+    if cached:
+        return cached
+
+    scores_path = Path(__file__).parent / "huginn-jarvis" / "data" / f"{name}-author-scores.json"
+    if not scores_path.exists():
+        raise HTTPException(status_code=404, detail=f"No author graph found for '{name}'")
+
+    data = json.loads(scores_path.read_text())
+
+    # Pre-filter candidates by score and tweet count
+    candidates = {
+        handle for handle, info in data.items()
+        if info.get("author_score", 0) >= min_score
+        and info.get("tweet_count", 0) >= min_tweets
+    }
+
+    # Build edges first so we can filter to connected nodes only
+    tweet_dir = Path(__file__).parent / "data" / "sources" / name
+    interaction_counts: dict[tuple[str, str], float] = defaultdict(float)
+    if tweet_dir.exists():
+        re_handle = re.compile(r"^\d{4}-\d{2}-\d{2}_(.+?)_\d+\.md$")
+        re_quoted = re.compile(r"> \*\*Quoted @(\w+):")
+        re_mention = re.compile(r"(?<![.\w])@(\w{1,15})(?!\.\w)")
+
+        for f in tweet_dir.glob("*.md"):
+            m = re_handle.match(f.name)
+            if not m:
+                continue
+            src = m.group(1).lower()
+            if src not in candidates:
+                continue
+            content = f.read_text(encoding="utf-8")
+            body = content
+            if content.startswith("---"):
+                end = content.find("---", 3)
+                if end != -1:
+                    body = content[end + 3:]
+
+            for qh in re_quoted.findall(body):
+                tgt = qh.lower()
+                if tgt in candidates and tgt != src:
+                    interaction_counts[(src, tgt)] += 3.0
+            for line in body.split("\n"):
+                if line.startswith("# @") or line.startswith("> **Quoted @") or line.startswith("- **Engagement"):
+                    continue
+                for mh in re_mention.findall(line):
+                    tgt = mh.lower()
+                    if tgt in candidates and tgt != src:
+                        interaction_counts[(src, tgt)] += 1.0
+
+    # Filter to only connected handles (have at least one edge)
+    connected = set()
+    for (src, tgt), weight in interaction_counts.items():
+        if weight >= min_interactions:
+            connected.add(src)
+            connected.add(tgt)
+
+    # Remap sparse community IDs to contiguous 0, 1, 2...
+    orig_communities = set()
+    for handle in connected:
+        orig_communities.add(data[handle].get("community", -1))
+    comm_remap = {old: new for new, old in enumerate(sorted(orig_communities))}
+
+    # Build nodes (only connected authors)
+    nodes = []
+    for handle in connected:
+        info = data[handle]
+        nodes.append({
+            "id": handle,
+            "title": f"@{handle}",
+            "url": f"https://x.com/{handle}",
+            "category": f"community-{comm_remap.get(info.get('community', -1), 0)}",
+            "tags": [f"tweets:{info.get('tweet_count', 0)}"],
+            "date": None,
+            "headings": [],
+            "summary": (
+                f"Score: {info.get('author_score', 0):.3f} | "
+                f"PageRank: {info.get('pagerank_norm', 0):.3f} | "
+                f"Avg engagement: {info.get('avg_engagement', 0):.1f} | "
+                f"Tweets: {info.get('tweet_count', 0)}"
+            ),
+            "community": comm_remap.get(info.get("community", -1), -1),
+            "score": info.get("author_score", 0),
+        })
+
+    # Sort nodes by score descending
+    nodes.sort(key=lambda n: -n["score"])
+
+    # Build edges with normalized weights
+    edges = []
+    max_weight = max(interaction_counts.values()) if interaction_counts else 1.0
+    for (src, tgt), weight in interaction_counts.items():
+        if weight < min_interactions or src not in connected or tgt not in connected:
+            continue
+        edges.append({
+            "source": src,
+            "target": tgt,
+            "similarity": round(weight / max_weight, 4),
+        })
+
+    # Build community summaries
+    comm_members: dict[int, list] = defaultdict(list)
+    for node in nodes:
+        comm_members[node["community"]].append(node)
+
+    communities = []
+    for cid, members in sorted(comm_members.items(), key=lambda x: -len(x[1])):
+        if len(members) < 2:
+            continue
+        top_authors = sorted(members, key=lambda n: -n["score"])
+        name_parts = [n["title"] for n in top_authors[:2]]
+        communities.append({
+            "id": cid,
+            "name": " + ".join(name_parts),
+            "size": len(members),
+            "top_tags": [],
+            "top_categories": [],
+            "representative_docs": [n["title"] for n in top_authors[:3]],
+        })
+
+    result = {
+        "nodes": nodes,
+        "edges": edges,
+        "communities": communities,
+        "stats": {
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+            "community_count": len(communities),
+            "avg_similarity": round(sum(e["similarity"] for e in edges) / max(len(edges), 1), 4),
+        },
+    }
+    store._author_graph_cache[cache_key] = result
+    return result
 
 
 @app.get("/api/document/{collection}/{doc_id:path}")
