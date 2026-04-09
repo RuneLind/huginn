@@ -12,8 +12,7 @@ tmp
 **/auth/*.json
 
 # Data directories
-/data/*
-!/data/wiki/
+/data/
 
 # Log files
 logs/
