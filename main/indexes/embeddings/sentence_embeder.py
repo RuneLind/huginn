@@ -1,10 +1,13 @@
 import os
-from sentence_transformers import SentenceTransformer
 
-# Use cached models only — skip HF Hub network requests for faster startup
+# Use cached models only — skip HF Hub network requests for faster startup.
+# Must be set BEFORE importing sentence_transformers / huggingface_hub,
+# because huggingface_hub reads HF_HUB_OFFLINE into a constant at import time.
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+from sentence_transformers import SentenceTransformer
 
 class SentenceEmbedder:
     def __init__(self, model_name="sentence-transformers/all-MiniLM-L6-v2", query_prefix="", passage_prefix=""):
