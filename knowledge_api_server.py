@@ -299,8 +299,11 @@ def health():
 def list_collections():
     result = []
     for name, searcher in store.get_searchers().items():
-        manifest_text = store.disk_persister.read_text_file(f"{name}/manifest.json")
-        manifest = json.loads(manifest_text)
+        try:
+            manifest_text = store.disk_persister.read_text_file(f"{name}/manifest.json")
+            manifest = json.loads(manifest_text)
+        except FileNotFoundError:
+            manifest = {}
         result.append({
             "name": name,
             "document_count": manifest.get("numberOfDocuments", 0),
