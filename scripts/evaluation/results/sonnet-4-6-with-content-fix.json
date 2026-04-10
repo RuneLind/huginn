@@ -1,0 +1,215 @@
+{
+  "timestamp": "2026-04-10T20:51:32",
+  "evaluations": [
+    {
+      "issue_key": "MELOSYS-6079",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 4.0,
+        "technical_context": 4.0,
+        "related_work": 4.0,
+        "actionability": 4.0,
+        "noise_ratio": 5.0
+      },
+      "weighted_score": 4.125,
+      "judge_reasoning": "The analysis demonstrates strong understanding of Norwegian social security concepts (mandatory vs voluntary membership, legal sections, MEDL registry) and correctly maps technical components (stegvelger, FTRL flows, billing integration). It identifies 9 genuinely related issues and provides actionable guidance for implementation, with minimal irrelevant content.",
+      "num_search_results": 45,
+      "graph_results_found": 2
+    },
+    {
+      "issue_key": "MELOSYS-6432",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 5.0,
+        "technical_context": 4.0,
+        "related_work": 5.0,
+        "actionability": 3.0,
+        "noise_ratio": 5.0
+      },
+      "weighted_score": 4.375,
+      "judge_reasoning": "The analysis demonstrates excellent domain understanding with detailed rate tables, correct identification of tax liability rules, and clear distinction between mandatory/voluntary membership. Related work identification is comprehensive, mapping the full ecosystem of connected issues and their relationships. However, actionability is limited - while it identifies key components and flows, it lacks specific files, APIs, or concrete implementation steps that would enable immediate development work.",
+      "num_search_results": 44,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-6433",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 5.0,
+        "technical_context": 4.0,
+        "related_work": 5.0,
+        "actionability": 4.0,
+        "noise_ratio": 5.0
+      },
+      "weighted_score": 4.5625,
+      "judge_reasoning": "The analysis demonstrates excellent domain understanding of Melosys concepts, correctly identifies technical issues like enum mapping problems, and makes strong connections to related issues and patterns. The actionability is good but could be more specific about implementation steps, while the information is highly relevant with minimal noise.",
+      "num_search_results": 45,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-7219",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 4.0,
+        "technical_context": 4.0,
+        "related_work": 5.0,
+        "actionability": 3.0,
+        "noise_ratio": 5.0
+      },
+      "weighted_score": 4.125,
+      "judge_reasoning": "The analysis demonstrates strong domain understanding of årsavregning processes and correctly identifies the technical architecture and data flow. Related work identification is excellent with comprehensive issue mapping. However, actionability is limited due to the analysis being cut off mid-sentence and lacking specific file paths or concrete next steps for investigation.",
+      "num_search_results": 45,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-6593",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 5.0,
+        "technical_context": 4.0,
+        "related_work": 4.0,
+        "actionability": 3.0,
+        "noise_ratio": 5.0
+      },
+      "weighted_score": 4.1875,
+      "judge_reasoning": "The analysis shows excellent domain knowledge of Norwegian social security concepts and good technical understanding, with comprehensive cross-referencing to related work. However, it appears incomplete (ends mid-sentence) and lacks specific implementation guidance pointing to files or services that would need modification.",
+      "num_search_results": 42,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-6494",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 5.0,
+        "technical_context": 4.0,
+        "related_work": 5.0,
+        "actionability": 3.0,
+        "noise_ratio": 5.0
+      },
+      "weighted_score": 4.375,
+      "judge_reasoning": "The analysis demonstrates excellent domain knowledge and comprehensive related work mapping, but lacks specific implementation details that would make it immediately actionable for development work.",
+      "num_search_results": 42,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-5412",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 4.0,
+        "technical_context": 3.0,
+        "related_work": 5.0,
+        "actionability": 4.0,
+        "noise_ratio": 5.0
+      },
+      "weighted_score": 4.0625,
+      "judge_reasoning": "The analysis correctly identifies this as a UX pattern definition task and demonstrates solid understanding of the Melosys domain and NAV's design system context. It excels at discovering related work with comprehensive cross-references to follow-up implementations, though technical context is limited by available documentation. The guidance is actionable and well-organized with minimal irrelevant information.",
+      "num_search_results": 45,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-7081",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 4.0,
+        "technical_context": 5.0,
+        "related_work": 3.0,
+        "actionability": 3.0,
+        "noise_ratio": 4.0
+      },
+      "weighted_score": 3.875,
+      "judge_reasoning": "The analysis correctly identifies domain concepts like YrkesaktivFtrlVedtak and treatment replication, with excellent technical diagnosis of the race condition causing flaky CI tests. However, it provides somewhat generic actionable guidance and could better explain the domain-specific replication mechanism.",
+      "num_search_results": 34,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-4151",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 5.0,
+        "technical_context": 4.0,
+        "related_work": 4.0,
+        "actionability": 3.0,
+        "noise_ratio": 4.0
+      },
+      "weighted_score": 4.0625,
+      "judge_reasoning": "The analysis demonstrates excellent domain expertise in Norwegian social security systems, EESSI regulations, and the technical nuances of SED/BUC handling. It provides solid technical context about Melosys architecture and effectively synthesizes related work, but could be more actionable with specific implementation steps and file-level guidance.",
+      "num_search_results": 45,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-5310",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 4.0,
+        "technical_context": 5.0,
+        "related_work": 5.0,
+        "actionability": 4.0,
+        "noise_ratio": 5.0
+      },
+      "weighted_score": 4.5625,
+      "judge_reasoning": "The analysis demonstrates excellent technical understanding of API type contracts and provides comprehensive architectural context from the melosys-api documentation. It skillfully connects multiple related Jira issues and identifies meaningful synergies, particularly with the Kotlin migration effort. The actionable recommendations are concrete but the analysis cuts off mid-sentence, slightly reducing completeness.",
+      "num_search_results": 31,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-2832",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 4.0,
+        "technical_context": 4.0,
+        "related_work": 5.0,
+        "actionability": 4.0,
+        "noise_ratio": 5.0
+      },
+      "weighted_score": 4.3125,
+      "judge_reasoning": "The analysis demonstrates strong domain knowledge of EU social security regulations and Norwegian case processing concepts, correctly identifies the technical root cause as a React event handling bug, and excellently maps related Jira issues showing this is a recurring pattern. The actionable guidance is good though could be more implementation-specific, and the analysis maintains excellent focus with no irrelevant content.",
+      "num_search_results": 38,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-1171",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 4.0,
+        "technical_context": 3.0,
+        "related_work": 5.0,
+        "actionability": 3.0,
+        "noise_ratio": 4.0
+      },
+      "weighted_score": 3.75,
+      "judge_reasoning": "The analysis demonstrates strong domain understanding of faktaavklaring in the case handling flow and excellent mapping of related issues with clear dependencies. However, it lacks concrete implementation guidance and appears incomplete, ending abruptly in the 'Mangler og uklarheter' section.",
+      "num_search_results": 39,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-5159",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 5.0,
+        "technical_context": 3.0,
+        "related_work": 5.0,
+        "actionability": 4.0,
+        "noise_ratio": 4.0
+      },
+      "weighted_score": 4.1875,
+      "judge_reasoning": "This analysis demonstrates excellent domain understanding and comprehensive mapping of related work, correctly identifying this as primarily a legal/policy question rather than technical implementation. While technical context is limited by the issue's nature, the analysis provides strong actionability through identifying critical documentation gaps that create risk for future work.",
+      "num_search_results": 43,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-4302",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 5.0,
+        "technical_context": 4.0,
+        "related_work": 5.0,
+        "actionability": 3.0,
+        "noise_ratio": 5.0
+      },
+      "weighted_score": 4.375,
+      "judge_reasoning": "The analysis demonstrates excellent domain knowledge of EU/EØS coordination rules and SED A001 processing, correctly synthesizes information from Confluence docs and related Jira issues, and identifies patterns in similar validation bugs. However, it lacks specific technical pointers like file paths or API endpoints that would make it immediately actionable for implementation, though it provides sound general direction for investigation.",
+      "num_search_results": 42,
+      "graph_results_found": 1
+    }
+  ]
+}
