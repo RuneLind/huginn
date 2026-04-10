@@ -1,0 +1,140 @@
+{
+  "timestamp": "2026-04-10T19:51:20",
+  "evaluations": [
+    {
+      "issue_key": "MELOSYS-6432",
+      "config_name": "baseline",
+      "scores": {
+        "domain_understanding": 4.0,
+        "technical_context": 3.0,
+        "related_work": 5.0,
+        "actionability": 2.0,
+        "noise_ratio": 4.0
+      },
+      "weighted_score": 3.5625,
+      "judge_reasoning": "Excellent domain coverage of trygdeavgift concepts and comprehensive related work including the full epic context, but lacks specific technical implementation details and the confluence documentation referenced in the issue. An agent could understand the business requirements but would struggle to create a concrete implementation plan without technical specifications for the periodization logic and specific code/service references.",
+      "num_search_results": 30,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-7219",
+      "config_name": "baseline",
+      "scores": {
+        "domain_understanding": 3.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 3.0
+      },
+      "weighted_score": 2.75,
+      "judge_reasoning": "The search found good coverage of related Jira issues within the same epic and basic domain concepts like trygdeavgift and årsavregning, but lacks deep technical implementation details needed for debugging the automatic creation and display issues. The confluence results focus more on general tax calculation rules rather than the specific automatic processes, making it difficult for an agent to create a concrete technical work plan.",
+      "num_search_results": 30,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-4302",
+      "config_name": "baseline",
+      "scores": {
+        "domain_understanding": 3.0,
+        "technical_context": 2.0,
+        "related_work": 5.0,
+        "actionability": 2.0,
+        "noise_ratio": 4.0
+      },
+      "weighted_score": 3.0625,
+      "judge_reasoning": "The search results provide good domain coverage of SED A001 and EU/EEA regulations, and excellent related work including the exact issue and similar validation bugs in the same epic. However, they lack technical implementation details about period selection validation logic, specific code locations, and how to modify the filtering to exclude non-EU/EEA periods, making them less actionable for an AI agent to create a concrete work plan.",
+      "num_search_results": 30,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-6432",
+      "config_name": "with-wiki",
+      "scores": {
+        "domain_understanding": 4.0,
+        "technical_context": 3.0,
+        "related_work": 5.0,
+        "actionability": 3.0,
+        "noise_ratio": 4.0
+      },
+      "weighted_score": 3.75,
+      "judge_reasoning": "The search results provide excellent domain knowledge and related work context but lack specific technical implementation details and concrete code references needed for detailed planning. An agent could understand the requirements but would need additional technical documentation to create a specific implementation plan.",
+      "num_search_results": 44,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-7219",
+      "config_name": "with-wiki",
+      "scores": {
+        "domain_understanding": 3.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 3.0
+      },
+      "weighted_score": 2.75,
+      "judge_reasoning": "The results provide good coverage of the annual settlement domain and related Jira issues, particularly finding the exact issue and its epic context. However, they lack specific technical details about the tax integration APIs, frontend display components, and data fetching logic that would be needed to diagnose this display error. The results would help understand the broader context but don't provide actionable starting points for investigation or implementation.",
+      "num_search_results": 45,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-4302",
+      "config_name": "with-wiki",
+      "scores": {
+        "domain_understanding": 3.0,
+        "technical_context": 2.0,
+        "related_work": 5.0,
+        "actionability": 2.0,
+        "noise_ratio": 5.0
+      },
+      "weighted_score": 3.1875,
+      "judge_reasoning": "The search results excellently capture related issues and domain processes around SED A001 validation, providing good context about EU/EEA regulations vs Norwegian national insurance law. However, they lack specific technical implementation details like service classes, API endpoints, or validation logic locations needed for an agent to create a concrete work plan for fixing the validation issue.",
+      "num_search_results": 42,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-6432",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 5.0,
+        "technical_context": 4.0,
+        "related_work": 5.0,
+        "actionability": 3.0,
+        "noise_ratio": 4.0
+      },
+      "weighted_score": 4.25,
+      "judge_reasoning": "Excellent domain coverage with detailed trygdeavgift calculation rules, periodization requirements, and business logic. Strong related work discovery including the exact epic MELOSYS-6079 and related issues. Good technical context with OEBS integration details, though lacks specific implementation details like API endpoints or file paths that would enable immediate coding.",
+      "num_search_results": 44,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-7219",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 3.0,
+        "technical_context": 3.0,
+        "related_work": 5.0,
+        "actionability": 2.0,
+        "noise_ratio": 4.0
+      },
+      "weighted_score": 3.3125,
+      "judge_reasoning": "The search results provide excellent coverage of related Jira issues and epic context, with good domain knowledge about trygdeavgift and årsavregning concepts. However, they lack specific technical details about the automatic creation mechanism triggered by tax authority messages and don't provide concrete file paths, service methods, or APIs to investigate for the display/fetching failures described in the issue.",
+      "num_search_results": 45,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-4302",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 4.0,
+        "technical_context": 3.0,
+        "related_work": 4.0,
+        "actionability": 3.0,
+        "noise_ratio": 4.0
+      },
+      "weighted_score": 3.5625,
+      "judge_reasoning": "The search results provide strong domain understanding of SED/BUC/lovvalg concepts and find the exact issue plus many related production errors. However, they lack specific implementation details like file paths, database schemas, and validation logic locations needed for concrete technical action. Most results are relevant with low noise.",
+      "num_search_results": 42,
+      "graph_results_found": 1
+    }
+  ]
+}

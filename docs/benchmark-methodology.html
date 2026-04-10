@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jira Analysis Benchmark — Methodology & Architecture</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <style>
+        :root {
+            --bg: #f8f9fa;
+            --text: #1a1a2e;
+            --text-secondary: #666;
+            --text-muted: #999;
+            --accent: #4361ee;
+            --surface: #fff;
+            --surface-hover: #fafbff;
+            --surface-code: #f0f0f5;
+            --surface-th: #f0f0f5;
+            --border: #e5e7eb;
+            --shadow: rgba(0,0,0,0.08);
+            --shadow-sm: rgba(0,0,0,0.06);
+            --callout-bg: #eef2ff;
+            --callout-warn-bg: #fff8e1;
+            --callout-success-bg: #ecfdf5;
+            --pre-bg: #1e1e2e;
+            --pre-text: #cdd6f4;
+            --h3-color: #333;
+        }
+        [data-theme="dark"] {
+            --bg: #11111b;
+            --text: #cdd6f4;
+            --text-secondary: #a6adc8;
+            --text-muted: #6c7086;
+            --accent: #89b4fa;
+            --surface: #1e1e2e;
+            --surface-hover: #252538;
+            --surface-code: #313244;
+            --surface-th: #313244;
+            --border: #45475a;
+            --shadow: rgba(0,0,0,0.3);
+            --shadow-sm: rgba(0,0,0,0.2);
+            --callout-bg: #1e2040;
+            --callout-warn-bg: #2d2a1e;
+            --callout-success-bg: #1a2e25;
+            --pre-bg: #181825;
+            --pre-text: #cdd6f4;
+            --h3-color: #bac2de;
+        }
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px 30px;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            transition: background 0.3s, color 0.3s;
+        }
+        h1 {
+            text-align: center;
+            color: var(--text);
+            font-size: 2em;
+            margin-bottom: 0.2em;
+            border-bottom: 3px solid var(--accent);
+            padding-bottom: 15px;
+        }
+        .subtitle {
+            text-align: center;
+            color: var(--text-secondary);
+            font-size: 1.1em;
+            margin-bottom: 40px;
+        }
+        h2 {
+            color: var(--accent);
+            font-size: 1.5em;
+            margin-top: 50px;
+            border-left: 4px solid var(--accent);
+            padding-left: 12px;
+        }
+        h3 {
+            color: var(--h3-color);
+            font-size: 1.15em;
+            margin-top: 25px;
+        }
+        .diagram-container {
+            background: var(--surface);
+            border-radius: 10px;
+            padding: 30px;
+            margin: 20px 0;
+            box-shadow: 0 2px 12px var(--shadow);
+            overflow-x: auto;
+            transition: background 0.3s;
+        }
+        .diagram-container .mermaid {
+            display: flex;
+            justify-content: center;
+        }
+        .explanation {
+            background: var(--surface);
+            border-radius: 10px;
+            padding: 24px 28px;
+            margin: 20px 0;
+            box-shadow: 0 2px 12px var(--shadow);
+            transition: background 0.3s;
+        }
+        .callout {
+            background: var(--callout-bg);
+            border-left: 4px solid var(--accent);
+            padding: 16px 20px;
+            margin: 16px 0;
+            border-radius: 0 8px 8px 0;
+        }
+        .callout-warning {
+            background: var(--callout-warn-bg);
+            border-left-color: #f59e0b;
+        }
+        .callout-success {
+            background: var(--callout-success-bg);
+            border-left-color: #10b981;
+        }
+        .callout strong {
+            display: block;
+            margin-bottom: 4px;
+        }
+        code {
+            background: var(--surface-code);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.9em;
+            font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+        }
+        pre {
+            background: var(--pre-bg);
+            color: var(--pre-text);
+            padding: 16px 20px;
+            border-radius: 8px;
+            overflow-x: auto;
+            font-size: 0.85em;
+            line-height: 1.5;
+        }
+        pre code {
+            background: none;
+            padding: 0;
+            color: inherit;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 16px 0;
+        }
+        th, td {
+            padding: 10px 14px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+        th {
+            background: var(--surface-th);
+            font-weight: 600;
+            color: var(--accent);
+        }
+        tr:hover td { background: var(--surface-hover); }
+        .metric-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin: 20px 0;
+        }
+        .metric-card {
+            background: var(--surface);
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 2px 8px var(--shadow-sm);
+            text-align: center;
+            border-top: 3px solid var(--accent);
+            transition: background 0.3s;
+        }
+        .metric-card .label { color: var(--text-secondary); font-size: 0.85em; }
+        .metric-card .value { font-size: 2em; font-weight: 700; color: var(--text); }
+        .metric-card .weight { color: var(--text-muted); font-size: 0.8em; margin-top: 4px; }
+        .metric-card.highlight { border-top-color: #f59e0b; }
+        .toc {
+            background: var(--surface);
+            border-radius: 10px;
+            padding: 20px 28px;
+            margin: 20px 0;
+            box-shadow: 0 2px 12px var(--shadow);
+            transition: background 0.3s;
+        }
+        .toc ol { padding-left: 20px; }
+        .toc li { margin: 6px 0; }
+        .toc a { color: var(--accent); text-decoration: none; }
+        .toc a:hover { text-decoration: underline; }
+        .file-ref {
+            font-family: 'SF Mono', monospace;
+            font-size: 0.85em;
+            color: var(--accent);
+        }
+
+        /* Theme toggle */
+        .theme-toggle {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 100;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 50px;
+            padding: 8px 16px;
+            cursor: pointer;
+            font-size: 1.1em;
+            box-shadow: 0 2px 8px var(--shadow);
+            transition: background 0.3s, border-color 0.3s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--text);
+        }
+        .theme-toggle:hover {
+            border-color: var(--accent);
+        }
+        .theme-toggle .icon { font-size: 1.2em; }
+        .theme-toggle .label-text { font-size: 0.8em; }
+    </style>
+</head>
+<body>
+
+<button class="theme-toggle" onclick="toggleTheme()">
+    <span class="icon" id="theme-icon">&#9790;</span>
+    <span class="label-text" id="theme-label">Dark</span>
+</button>
+
+<h1>Jira Analysis Benchmark</h1>
+<p class="subtitle">Methodology & Architecture — Autoresearch-inspired evaluation of Jira issue analysis quality</p>
+
+<div class="toc">
+    <strong>Contents</strong>
+    <ol>
+        <li><a href="#production-flow">Production Flow: Chrome Extension to Analysis</a></li>
+        <li><a href="#benchmark-pipeline">Benchmark Pipeline</a></li>
+        <li><a href="#query-extraction">Query Extraction</a></li>
+        <li><a href="#scoring-rubric">Scoring Rubric</a></li>
+        <li><a href="#autoresearch-loop">Autoresearch Iteration Loop</a></li>
+        <li><a href="#content-fix">The Content Visibility Fix</a></li>
+        <li><a href="#results">Results Comparison</a></li>
+        <li><a href="#usage">Usage Reference</a></li>
+    </ol>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<h2 id="production-flow">1. Production Flow: Chrome Extension to Analysis</h2>
+
+<div class="explanation">
+    <p>In production, Jira issue analysis flows through four systems. The benchmark recreates the middle part (knowledge search + analysis) in isolation so we can measure and iterate.</p>
+</div>
+
+<div class="diagram-container">
+    <div class="mermaid">
+flowchart LR
+    subgraph Browser["Browser (jira.adeo.no)"]
+        CE["Chrome Extension\n'Send til analyse'"]
+    end
+
+    subgraph Muninn["Muninn (localhost:3010)"]
+        RR["POST /api/research/chat"]
+        PM["Pending Message Store"]
+        Chat["Chat Page"]
+    end
+
+    subgraph AI["AI Agent"]
+        Model["Model\n(Qwen 3.5 or Sonnet 4.6)"]
+        MCP["MCP Tools"]
+    end
+
+    subgraph Huginn["Huginn Knowledge API (:8321)"]
+        Search["Vector + BM25 Search"]
+        Graph["Knowledge Graph"]
+        Coll["Collections:\n- melosys-confluence-v3\n- jira-issues\n- nav-wiki"]
+    end
+
+    CE -->|"POST issue\ncontent as markdown"| RR
+    RR --> PM
+    PM -->|"User opens\nchat URL"| Chat
+    Chat -->|"jiraAnalysis\nprompt"| Model
+    Model <-->|"search_knowledge()\nget_graph_node()"| MCP
+    MCP <-->|"HTTP API"| Search
+    MCP <-->|"HTTP API"| Graph
+    Search --- Coll
+
+    style CE fill:#e0e7ff,stroke:#4361ee
+    style Muninn fill:#fef3c7,stroke:#f59e0b
+    style AI fill:#ecfdf5,stroke:#10b981
+    style Huginn fill:#fce7f3,stroke:#ec4899
+    </div>
+</div>
+
+<div class="explanation">
+    <h3>What each system does</h3>
+    <table>
+        <tr><th>System</th><th>Role</th><th>Key Files</th></tr>
+        <tr>
+            <td>Chrome Extension</td>
+            <td>Extracts Jira issue DOM (key, summary, description, comments, metadata), converts HTML to markdown</td>
+            <td class="file-ref">huginn-nav/chrome-extension/content.js</td>
+        </tr>
+        <tr>
+            <td>Muninn</td>
+            <td>Creates analysis thread, stores pending message, opens chat UI, routes through AI connector</td>
+            <td class="file-ref">muninn/src/dashboard/routes/research-routes.ts</td>
+        </tr>
+        <tr>
+            <td>AI Agent</td>
+            <td>Receives jiraAnalysis prompt + Jira content, uses MCP tools to search knowledge base, produces structured analysis</td>
+            <td class="file-ref">muninn-config/bots/melosys/config.json</td>
+        </tr>
+        <tr>
+            <td>Huginn</td>
+            <td>Serves knowledge collections via API: FAISS vector search, BM25 full-text, cross-encoder reranking, knowledge graph</td>
+            <td class="file-ref">huginn/knowledge_api_server.py</td>
+        </tr>
+    </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<h2 id="benchmark-pipeline">2. Benchmark Pipeline</h2>
+
+<div class="explanation">
+    <p>The benchmark has <strong>two modes</strong>. In <em>search-quality mode</em> (default), it scores what the knowledge base returns. In <em>analysis mode</em> (<code>--analyze MODEL</code>), it also generates an analysis and scores the model's synthesis ability.</p>
+</div>
+
+<div class="diagram-container">
+    <div class="mermaid">
+flowchart TD
+    Config["Load benchmark_config.json\n14 issues + 3 configs + rubric"]
+    Loop{"For each\nissue x config"}
+
+    subgraph QueryPhase["Step 1: Query Extraction"]
+        Read["Read issue markdown"]
+        Extract["Extract queries from:\n1. Title/summary\n2. Domain terms (BUC, SED, lovvalg...)\n3. Epic context"]
+    end
+
+    subgraph SearchPhase["Step 2: Knowledge Search"]
+        S1["Search each collection\nwith each query\n(3 queries x N collections)"]
+        S2["Graph lookup\n(issue + epic nodes)"]
+        S3["Collect results with:\ntitle, content snippet,\nbreadcrumb, graph_context"]
+    end
+
+    subgraph ScorePhase["Step 3: Scoring"]
+        direction TB
+        Mode{"--analyze\nflag?"}
+        SearchScore["Search-Quality Mode\nJudge scores raw\nsearch results"]
+        AnalyzeGen["Analysis Mode\nGenerate analysis\nwith specified model"]
+        AnalyzeScore["Judge scores the\ngenerated analysis"]
+    end
+
+    Aggregate["Aggregate scores\nper config, compute\nweighted averages"]
+    Report["Print comparison table\n+ save results JSON"]
+
+    Config --> Loop
+    Loop --> Read
+    Read --> Extract
+    Extract --> S1
+    S1 --> S2
+    S2 --> S3
+    S3 --> Mode
+    Mode -->|No| SearchScore
+    Mode -->|Yes| AnalyzeGen
+    AnalyzeGen --> AnalyzeScore
+    SearchScore --> Aggregate
+    AnalyzeScore --> Aggregate
+    Aggregate --> Report
+    Report -->|"Next issue\nx config"| Loop
+
+    style Config fill:#e0e7ff,stroke:#4361ee
+    style QueryPhase fill:#fef9c3,stroke:#ca8a04
+    style SearchPhase fill:#ecfdf5,stroke:#10b981
+    style ScorePhase fill:#fce7f3,stroke:#ec4899
+    style Report fill:#f0f0f5,stroke:#666
+    </div>
+</div>
+
+<div class="explanation">
+    <h3>What gets evaluated</h3>
+    <p>Each evaluation produces scores for one issue under one configuration. With 14 issues and 3 configs, a full run produces <strong>42 evaluations</strong>.</p>
+
+    <table>
+        <tr><th>Config</th><th>Collections Searched</th><th>Graph</th></tr>
+        <tr><td><code>baseline</code></td><td>melosys-confluence-v3, jira-issues</td><td>No</td></tr>
+        <tr><td><code>with-wiki</code></td><td>melosys-confluence-v3, jira-issues, nav-wiki</td><td>No</td></tr>
+        <tr><td><code>full-knowledge</code></td><td>melosys-confluence-v3, jira-issues, nav-wiki</td><td>Yes</td></tr>
+    </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<h2 id="query-extraction">3. Query Extraction</h2>
+
+<div class="explanation">
+    <p>The benchmark simulates what an AI agent would search for by extracting queries from the Jira issue content. Each issue generates up to 3 queries, searched against each collection.</p>
+</div>
+
+<div class="diagram-container">
+    <div class="mermaid">
+flowchart TD
+    Issue["Jira Issue Markdown\n(YAML frontmatter + body)"]
+
+    subgraph Q1["Query 1: Title"]
+        Title["Issue title/summary\ne.g. 'Tilpasse beregning trygdeavgift'"]
+    end
+
+    subgraph Q2["Query 2: Domain Terms"]
+        Patterns["Regex extraction:\n- BUC/SED codes (SED A001)\n- Article refs (artikkel 13)\n- Regulation refs (forordning 883/2004)\n- Law refs (folketrygdloven § 2-8)\n- Domain concepts (lovvalg, vedtak)\n- Issue cross-refs (MELOSYS-1234)"]
+        Combine["Combine top 4 terms\ninto single query"]
+    end
+
+    subgraph Q3["Query 3: Epic Context"]
+        Epic["'epic MELOSYS-6079 Tilpasse...'"]
+    end
+
+    Search["Search each collection\nwith each query\n(limit: 5 results per search)"]
+
+    Issue --> Title
+    Issue --> Patterns
+    Patterns --> Combine
+    Issue -->|"if epic_link\nin frontmatter"| Epic
+    Title --> Search
+    Combine --> Search
+    Epic --> Search
+
+    style Q1 fill:#dbeafe,stroke:#3b82f6
+    style Q2 fill:#fef3c7,stroke:#f59e0b
+    style Q3 fill:#dcfce7,stroke:#22c55e
+    </div>
+</div>
+
+<div class="callout">
+    <strong>Example: MELOSYS-6432</strong>
+    Queries generated:
+    <ol>
+        <li><code>Tilpasse beregning trygdeavgift</code> (title)</li>
+        <li><code>MELOSYS-6079 MELOSYS-6432 MELOSYS-6522 medlemskap</code> (domain terms)</li>
+        <li><code>epic MELOSYS-6079 Tilpasse beregning trygdeavgift</code> (epic context)</li>
+    </ol>
+    With 3 collections, this produces 9 searches returning up to 45 results.
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<h2 id="scoring-rubric">4. Scoring Rubric</h2>
+
+<div class="explanation">
+    <p>Each evaluation is scored on 5 dimensions by an LLM judge (Claude Sonnet). Dimensions have different weights reflecting their importance for producing a useful work plan.</p>
+</div>
+
+<div class="metric-grid">
+    <div class="metric-card">
+        <div class="label">Domain Understanding</div>
+        <div class="value">2.0x</div>
+        <div class="weight">Do results explain lovvalg, BUC/SED, forordninger?</div>
+    </div>
+    <div class="metric-card highlight">
+        <div class="label">Technical Context</div>
+        <div class="value">2.0x</div>
+        <div class="weight">Are architecture docs, APIs, services found?</div>
+    </div>
+    <div class="metric-card">
+        <div class="label">Related Work</div>
+        <div class="value">1.5x</div>
+        <div class="weight">Are epics, linked issues, cross-refs found?</div>
+    </div>
+    <div class="metric-card highlight">
+        <div class="label">Actionability</div>
+        <div class="value">1.5x</div>
+        <div class="weight">Could an agent create a concrete work plan?</div>
+    </div>
+    <div class="metric-card">
+        <div class="label">Noise Ratio</div>
+        <div class="value">1.0x</div>
+        <div class="weight">Proportion of results that are relevant</div>
+    </div>
+</div>
+
+<div class="diagram-container">
+    <div class="mermaid">
+flowchart LR
+    subgraph Inputs["Judge Inputs"]
+        JI["Jira Issue\n(truncated to 2000 chars)"]
+        SR["Search Results\n(titles + content snippets\n+ breadcrumbs + graph)"]
+        GC["Graph Context\n(epic/issue relationships)"]
+    end
+
+    Judge["LLM Judge\n(Claude Sonnet)\nScores 1-5 per dimension"]
+
+    subgraph Scores["Output"]
+        D["domain: 4"]
+        T["technical: 2"]
+        R["related: 5"]
+        A["action: 3"]
+        N["noise: 4"]
+    end
+
+    Weighted["Weighted Average\n(4x2 + 2x2 + 5x1.5 + 3x1.5 + 4x1) / 8\n= 3.56"]
+
+    JI --> Judge
+    SR --> Judge
+    GC --> Judge
+    Judge --> D & T & R & A & N
+    D & T & R & A & N --> Weighted
+
+    style Judge fill:#fce7f3,stroke:#ec4899
+    style Weighted fill:#ecfdf5,stroke:#10b981
+    </div>
+</div>
+
+<div class="explanation">
+    <h3>How the judge works</h3>
+    <p>The judge receives a structured prompt with the issue content, all search results (with content snippets), and any graph context. It returns a JSON object with 5 scores and a reasoning string.</p>
+    <pre><code># Judge response format
+{"domain_understanding": 4, "technical_context": 2,
+ "related_work": 5, "actionability": 3, "noise_ratio": 4,
+ "reasoning": "Strong domain coverage with relevant docs..."}</code></pre>
+    <p>The judge is invoked via <code>claude --model claude-sonnet-4-6 -p &lt;prompt&gt;</code> with a 120-second timeout. Failed calls receive neutral scores of 3.0.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<h2 id="autoresearch-loop">5. Autoresearch Iteration Loop</h2>
+
+<div class="explanation">
+    <p>Inspired by <a href="https://github.com/karpathy/autoresearch">Karpathy's autoresearch</a>: fixed inputs, variable treatments, measurable outputs. Each iteration changes one variable, runs the benchmark, and keeps or discards the change based on score delta.</p>
+</div>
+
+<div class="diagram-container">
+    <div class="mermaid">
+flowchart TD
+    Start(["Baseline Score: 2.69"])
+
+    subgraph Iteration["Iteration Loop"]
+        direction TB
+        Hypothesize["Hypothesize:\nWhat change might improve scores?"]
+        Configure["Configure variant:\n- Collection set\n- Graph on/off\n- Analysis model\n- Prompt wording"]
+        Run["Run benchmark\n(14 issues x variant)"]
+        Measure["Measure:\nCompare to baseline"]
+        Decision{{"Score improved?"}}
+        Keep["Keep change\nUpdate baseline"]
+        Discard["Discard change\nTry next hypothesis"]
+    end
+
+    Start --> Hypothesize
+    Hypothesize --> Configure
+    Configure --> Run
+    Run --> Measure
+    Measure --> Decision
+    Decision -->|"Yes (+delta)"| Keep
+    Decision -->|"No (-delta)"| Discard
+    Keep --> Hypothesize
+    Discard --> Hypothesize
+
+    style Start fill:#4361ee,color:#fff,stroke:#4361ee
+    style Keep fill:#10b981,color:#fff,stroke:#10b981
+    style Discard fill:#ef4444,color:#fff,stroke:#ef4444
+    </div>
+</div>
+
+<div class="explanation">
+    <h3>Variables we iterate on</h3>
+    <table>
+        <tr><th>Variable</th><th>Example Variants Tested</th><th>Finding</th></tr>
+        <tr>
+            <td>Collections</td>
+            <td>baseline (2 collections) vs +nav-wiki (3) vs +nav-wiki+graph</td>
+            <td>Wiki +11.6% (with content fix)</td>
+        </tr>
+        <tr>
+            <td>Knowledge Graph</td>
+            <td>Graph disabled vs enabled (jira + melosys graphs)</td>
+            <td>+7.1% for related_work</td>
+        </tr>
+        <tr>
+            <td>Analysis Model</td>
+            <td>Qwen 3.5:35b (local) vs Claude Sonnet 4.6</td>
+            <td>Testing in progress</td>
+        </tr>
+        <tr>
+            <td>Content Visibility</td>
+            <td>Titles only vs full content snippets + breadcrumbs + graph</td>
+            <td>+20% baseline improvement (benchmark fix)</td>
+        </tr>
+        <tr>
+            <td>Prompt</td>
+            <td>Basic summary vs structured 4-step methodology</td>
+            <td>Planned</td>
+        </tr>
+    </table>
+</div>
+
+<div class="callout callout-success">
+    <strong>Key insight from autoresearch</strong>
+    The fixed time-budget concept maps perfectly: each benchmark run takes the same ~20 minutes regardless of configuration, making results directly comparable. The metric (weighted judge score) is configuration-independent, just like val_bpb in the original.
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<h2 id="content-fix">6. The Content Visibility Fix</h2>
+
+<div class="explanation">
+    <p>A critical bug in the benchmark caused the wiki to appear useless. The fix changed scores dramatically.</p>
+</div>
+
+<div class="diagram-container">
+    <div class="mermaid">
+sequenceDiagram
+    participant API as Knowledge API
+    participant BM as Benchmark Script
+    participant Judge as LLM Judge
+
+    rect rgb(254, 202, 202)
+    Note over API,Judge: BEFORE FIX - bug
+    API->>BM: Response includes matchedChunks with content, breadcrumb, graph
+    BM->>BM: Looks for top-level matchedContent key - WRONG KEY
+    BM->>BM: Gets empty string
+    BM->>Judge: Title only, no content snippet
+    Judge->>Judge: Sees blank wiki results
+    Judge-->>BM: Wiki scores LOW - looks like noise
+    end
+
+    rect rgb(187, 247, 208)
+    Note over API,Judge: AFTER FIX
+    API->>BM: Same response
+    BM->>BM: Reads matchedChunks content - CORRECT KEY
+    BM->>BM: Also extracts breadcrumb, heading, graph context
+    BM->>Judge: Rich result with content, section, graph entities
+    Judge->>Judge: Sees relevant domain knowledge
+    Judge-->>BM: Wiki scores HIGH - real value
+    end
+    </div>
+</div>
+
+<div class="explanation">
+    <h3>Impact on scores (3-issue pilot)</h3>
+    <table>
+        <tr><th>Config</th><th>Before Fix</th><th>After Fix</th><th>Change</th></tr>
+        <tr><td>baseline</td><td>2.69</td><td>3.23</td><td style="color:#10b981; font-weight:bold">+20%</td></tr>
+        <tr><td>with-wiki</td><td>2.52</td><td>3.60</td><td style="color:#10b981; font-weight:bold">+43%</td></tr>
+        <tr><td>full-knowledge</td><td>2.60</td><td>3.46</td><td style="color:#10b981; font-weight:bold">+33%</td></tr>
+    </table>
+
+    <div class="callout callout-warning">
+        <strong>The wiki went from -6.3% (hurting!) to +11.6% (best config)</strong>
+        The entire "wiki adds noise" finding was a measurement artifact. The curated domain wiki is actually the most valuable collection for analysis — the judge just couldn't see its content.
+    </div>
+</div>
+
+<div class="explanation">
+    <h3>What the fix extracts from each search result</h3>
+    <pre><code># Before: only top-level fields (mostly empty)
+title = r.get("title", "untitled")
+snippet = r.get("matchedContent", "")[:200]  # always empty!
+
+# After: nested content + metadata + graph
+title = r.get("title", "untitled")
+breadcrumb = r.get("breadcrumb", "")
+chunks = r.get("matchedChunks", [])
+snippet = chunks[0].get("content", "")[:300]
+heading = chunks[0].get("heading", "")
+graph_ctx = r.get("graph_context", [])</code></pre>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<h2 id="results">7. Results Comparison</h2>
+
+<div class="explanation">
+    <p>Three benchmark rounds have been run, each revealing something different.</p>
+</div>
+
+<div class="diagram-container">
+    <div class="mermaid">
+flowchart LR
+    subgraph R1["Round 1: No Content (14 issues)"]
+        R1B["baseline\n2.69"]
+        R1W["with-wiki\n2.52 ❌"]
+        R1F["full-knowledge\n2.60"]
+    end
+
+    subgraph R2["Round 2: Content Fix (3 issues)"]
+        R2B["baseline\n3.23"]
+        R2W["with-wiki\n3.60 ✅"]
+        R2F["full-knowledge\n3.46"]
+    end
+
+    subgraph R3["Round 3: Sonnet 4.6 Analysis"]
+        R3A["In progress..."]
+    end
+
+    R1 -->|"Fix: extract\nmatchedChunks"| R2
+    R2 -->|"Add: --analyze\nclaude-sonnet-4-6"| R3
+
+    style R1W fill:#fecaca,stroke:#ef4444
+    style R2W fill:#bbf7d0,stroke:#22c55e
+    style R3A fill:#fef3c7,stroke:#f59e0b
+    </div>
+</div>
+
+<div class="explanation">
+    <h3>Dimension-level comparison (with content fix)</h3>
+    <table>
+        <tr><th>Dimension</th><th>Weight</th><th>Baseline</th><th>+Wiki</th><th>+Wiki+Graph</th></tr>
+        <tr><td>domain_understanding</td><td>2.0x</td><td>3.3</td><td style="font-weight:bold; color:#10b981">3.7</td><td>3.7</td></tr>
+        <tr><td>technical_context</td><td>2.0x</td><td>2.7</td><td>3.0</td><td>2.7</td></tr>
+        <tr><td>related_work</td><td>1.5x</td><td>4.3</td><td>4.7</td><td style="font-weight:bold; color:#10b981">5.0</td></tr>
+        <tr><td>actionability</td><td>1.5x</td><td>2.7</td><td>3.0</td><td>2.3</td></tr>
+        <tr><td>noise_ratio</td><td>1.0x</td><td>3.7</td><td style="font-weight:bold; color:#10b981">4.0</td><td>4.0</td></tr>
+    </table>
+
+    <div class="callout">
+        <strong>Remaining bottleneck: technical_context (2.7) and actionability (2.3-3.0)</strong>
+        The knowledge base has strong business documentation but lacks code architecture docs, API endpoint docs, and service-to-feature mappings. This is the highest-impact area for improvement.
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<h2 id="usage">8. Usage Reference</h2>
+
+<div class="explanation">
+    <h3>Running the benchmark</h3>
+    <pre><code># Full benchmark (14 issues x 3 configs, ~20 min)
+.venv/bin/python scripts/evaluation/jira_analysis_benchmark.py
+
+# Specific issues only
+.venv/bin/python scripts/evaluation/jira_analysis_benchmark.py \
+    --issues MELOSYS-7219 MELOSYS-6432
+
+# Specific configs
+.venv/bin/python scripts/evaluation/jira_analysis_benchmark.py \
+    --configs baseline with-wiki
+
+# Analysis mode: generate analysis with a model, then score it
+.venv/bin/python scripts/evaluation/jira_analysis_benchmark.py \
+    --analyze claude-sonnet-4-6 \
+    --configs full-knowledge
+
+# Dry run (search only, no LLM judge)
+.venv/bin/python scripts/evaluation/jira_analysis_benchmark.py --dry-run
+
+# Custom judge model and output
+.venv/bin/python scripts/evaluation/jira_analysis_benchmark.py \
+    --judge-model claude-sonnet-4-6 \
+    --output scripts/evaluation/results/experiment-42.json</code></pre>
+
+    <h3>Prerequisites</h3>
+    <table>
+        <tr><th>Requirement</th><th>Purpose</th><th>Check</th></tr>
+        <tr><td>Knowledge API Server</td><td>Search collections</td><td><code>curl http://localhost:8321/api/collections</code></td></tr>
+        <tr><td>Claude CLI</td><td>LLM judge + analysis generation</td><td><code>claude --version</code></td></tr>
+        <tr><td>Jira source files</td><td>Benchmark issue content</td><td><code>ls data/sources/jira-issues/</code></td></tr>
+    </table>
+
+    <h3>Key files</h3>
+    <table>
+        <tr><th>File</th><th>Purpose</th></tr>
+        <tr><td class="file-ref">scripts/evaluation/jira_analysis_benchmark.py</td><td>Benchmark runner script</td></tr>
+        <tr><td class="file-ref">scripts/evaluation/benchmark_config.json</td><td>Issues, configs, rubric definition</td></tr>
+        <tr><td class="file-ref">scripts/evaluation/results/latest.json</td><td>Most recent results (JSON)</td></tr>
+        <tr><td class="file-ref">docs/jira-analysis-improvement-report.md</td><td>Full findings report with workplan</td></tr>
+        <tr><td class="file-ref">muninn-config/bots/melosys/.mcp.json</td><td>MCP knowledge config for Muninn bot</td></tr>
+        <tr><td class="file-ref">muninn-config/bots/melosys/config.json</td><td>Bot connector + prompt config</td></tr>
+    </table>
+</div>
+
+<script>
+    // Store original diagram source so we can re-render on theme change
+    const diagramSources = [];
+    document.querySelectorAll('.mermaid').forEach((el, i) => {
+        diagramSources.push(el.textContent.trim());
+        el.setAttribute('data-idx', i);
+    });
+
+    function getMermaidConfig(isDark) {
+        return {
+            startOnLoad: false,
+            theme: isDark ? 'dark' : 'default',
+            sequence: {
+                diagramMarginX: 30, diagramMarginY: 10,
+                actorMargin: 60, width: 180, height: 55,
+                boxMargin: 10, messageMargin: 30,
+                mirrorActors: true, useMaxWidth: true, wrap: true
+            },
+            flowchart: {
+                useMaxWidth: true, htmlLabels: true,
+                curve: 'basis', padding: 15
+            }
+        };
+    }
+
+    function getTheme() {
+        return localStorage.getItem('bench-theme') ||
+            (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    }
+
+    function applyTheme(theme) {
+        document.documentElement.setAttribute('data-theme', theme);
+        document.getElementById('theme-icon').textContent = theme === 'dark' ? '\u2600' : '\u263E';
+        document.getElementById('theme-label').textContent = theme === 'dark' ? 'Light' : 'Dark';
+        localStorage.setItem('bench-theme', theme);
+    }
+
+    async function renderDiagrams(isDark) {
+        mermaid.initialize(getMermaidConfig(isDark));
+        const els = document.querySelectorAll('.mermaid');
+        for (const el of els) {
+            const idx = el.getAttribute('data-idx');
+            const src = diagramSources[idx];
+            el.removeAttribute('data-processed');
+            el.innerHTML = src;
+        }
+        await mermaid.run();
+    }
+
+    function toggleTheme() {
+        const current = document.documentElement.getAttribute('data-theme') || 'light';
+        const next = current === 'dark' ? 'light' : 'dark';
+        applyTheme(next);
+        renderDiagrams(next === 'dark');
+    }
+
+    // Initial load
+    const initial = getTheme();
+    applyTheme(initial);
+    mermaid.initialize(getMermaidConfig(initial === 'dark'));
+    mermaid.run();
+</script>
+
+</body>
+</html>

@@ -1,0 +1,50 @@
+{
+  "timestamp": "2026-04-10T19:27:52",
+  "evaluations": [
+    {
+      "issue_key": "MELOSYS-6432",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 1.0,
+        "technical_context": 1.0,
+        "related_work": 1.0,
+        "actionability": 1.0,
+        "noise_ratio": 1.0
+      },
+      "weighted_score": 1.0,
+      "judge_reasoning": "The AI-generated analysis section contains only an error message about model access issues and provides no actual analysis of the Jira issue whatsoever. There is zero domain understanding, technical context, or actionable guidance - just a complete failure to analyze the issue about Norwegian social security tax calculations.",
+      "num_search_results": 44,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-7219",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 1.0,
+        "technical_context": 1.0,
+        "related_work": 1.0,
+        "actionability": 1.0,
+        "noise_ratio": 1.0
+      },
+      "weighted_score": 1.0,
+      "judge_reasoning": "The provided text is not an analysis at all, but rather an error message indicating the AI model failed to run. No domain concepts, technical context, or actionable guidance was provided - this represents a complete failure to analyze the Jira issue.",
+      "num_search_results": 45,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-4302",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 1.0,
+        "technical_context": 1.0,
+        "related_work": 1.0,
+        "actionability": 1.0,
+        "noise_ratio": 1.0
+      },
+      "weighted_score": 1.0,
+      "judge_reasoning": "No analysis was generated due to a model error, resulting in complete absence of domain insights, technical context, or actionable guidance. Cannot evaluate quality when no content exists.",
+      "num_search_results": 42,
+      "graph_results_found": 1
+    }
+  ]
+}

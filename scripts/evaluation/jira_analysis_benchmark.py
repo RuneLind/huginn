@@ -203,16 +203,7 @@ def score_with_llm_judge(
     """Use Claude as an LLM judge to score search result quality."""
 
     # Format search results
-    sr_parts = []
-    for sr in search_results:
-        sr_parts.append(f"\n### Collection: {sr.collection} | Query: \"{sr.query}\"")
-        if not sr.results:
-            sr_parts.append("  (no results)")
-        for i, r in enumerate(sr.results[:5]):
-            title = r.get("title", r.get("documentId", "untitled"))
-            snippet = r.get("matchedContent", r.get("text", ""))[:200]
-            score = r.get("score", "n/a")
-            sr_parts.append(f"  {i + 1}. [{score}] {title}\n     {snippet}")
+    sr_parts = _format_search_results(search_results)
     search_results_text = "\n".join(sr_parts) if sr_parts else "(no search results)"
 
     # Format graph context
@@ -262,6 +253,166 @@ def score_with_llm_judge(
     return {dim["name"]: 3.0 for dim in rubric["dimensions"]}, "Judge failed — neutral scores"
 
 
+# ── Analysis generation ───────────────────────────────────────────────────────
+
+ANALYSIS_PROMPT_TEMPLATE = """Analyser denne Jira-oppgaven grundig basert på søkeresultatene fra kunnskapsbasen.
+
+## Jira-oppgave
+{issue_content}
+
+## Søkeresultater fra kunnskapsbasen
+{search_results_text}
+
+## Graph-kontekst (epic/issue-relasjoner)
+{graph_context}
+
+## Leveranse
+
+Gi en strukturert analyse:
+- **Domeneforståelse**: Hvilke konsepter og entiteter er relevante (med referanser)
+- **Teknisk kontekst**: Relevant dokumentasjon og arkitekturbeslutninger
+- **Relaterte saker**: Epic, linked issues, lignende oppgaver
+- **Koblinger til eksisterende arbeid**: Hva er gjort før, hva kan gjenbrukes
+- **Mangler og uklarheter**: Hva mangler i kunnskapsbasen eller oppgavebeskrivelsen
+- **Anbefalt tilnærming**: Kort vurdering av hvordan oppgaven bør løses"""
+
+
+ANALYSIS_JUDGE_PROMPT_TEMPLATE = """You are evaluating the quality of an AI-generated analysis of a Jira issue.
+
+## Original Jira Issue
+{issue_content}
+
+## AI-Generated Analysis
+{analysis_text}
+
+## Scoring Rubric
+Score each dimension 1-5 (1=poor, 3=adequate, 5=excellent):
+
+{rubric_text}
+
+## Instructions
+- Score the ANALYSIS quality, not the search results
+- A good analysis synthesizes information, identifies gaps, and provides actionable guidance
+- Consider: Does the analysis correctly identify the domain? Does it connect relevant docs? Is the recommended approach sound?
+
+Respond in this exact JSON format (no markdown, no code fences):
+{{"domain_understanding": <score>, "technical_context": <score>, "related_work": <score>, "actionability": <score>, "noise_ratio": <score>, "reasoning": "<2-3 sentences explaining the scores>"}}"""
+
+
+def generate_analysis(
+    issue_content: str,
+    search_results: list[SearchResult],
+    graph_results: list[dict],
+    model: str,
+) -> str:
+    """Generate a Jira issue analysis using a specified model."""
+
+    sr_parts = _format_search_results(search_results)
+    search_results_text = "\n".join(sr_parts) if sr_parts else "(no search results)"
+
+    graph_parts = []
+    for g in graph_results:
+        if g:
+            graph_parts.append(json.dumps(g, indent=2, ensure_ascii=False)[:500])
+    graph_context = "\n".join(graph_parts) if graph_parts else "(no graph context)"
+
+    prompt = ANALYSIS_PROMPT_TEMPLATE.format(
+        issue_content=issue_content[:3000],
+        search_results_text=search_results_text,
+        graph_context=graph_context,
+    )
+
+    try:
+        result = subprocess.run(
+            ["claude", "--model", model, "-p", prompt, "--output-format", "text"],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        return result.stdout.strip()
+    except subprocess.TimeoutExpired:
+        log.warning(f"Analysis generation timed out with {model}")
+        return "(analysis generation timed out)"
+    except Exception as e:
+        log.warning(f"Analysis generation failed with {model}: {e}")
+        return f"(analysis generation failed: {e})"
+
+
+def score_analysis_with_judge(
+    issue_content: str,
+    analysis_text: str,
+    rubric: dict,
+    judge_model: str = "claude-sonnet-4-20250514",
+) -> tuple[dict[str, float], str]:
+    """Score a generated analysis using an LLM judge."""
+
+    rubric_lines = []
+    for dim in rubric["dimensions"]:
+        rubric_lines.append(f"- **{dim['name']}** (weight {dim['weight']}): {dim['description']}")
+    rubric_text = "\n".join(rubric_lines)
+
+    prompt = ANALYSIS_JUDGE_PROMPT_TEMPLATE.format(
+        issue_content=issue_content[:2000],
+        analysis_text=analysis_text[:4000],
+        rubric_text=rubric_text,
+    )
+
+    try:
+        result = subprocess.run(
+            ["claude", "--model", judge_model, "-p", prompt, "--output-format", "text"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        response = result.stdout.strip()
+
+        json_match = re.search(r"\{[^}]+\}", response, re.DOTALL)
+        if json_match:
+            data = json.loads(json_match.group(0))
+            scores = {}
+            for dim in rubric["dimensions"]:
+                name = dim["name"]
+                scores[name] = float(data.get(name, 3))
+            reasoning = data.get("reasoning", "")
+            return scores, reasoning
+
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception) as e:
+        log.warning(f"Analysis judge failed: {e}")
+
+    return {dim["name"]: 3.0 for dim in rubric["dimensions"]}, "Judge failed — neutral scores"
+
+
+# ── Shared formatting ─────────────────────────────────────────────────────────
+
+def _format_search_results(search_results: list[SearchResult]) -> list[str]:
+    """Format search results for prompts."""
+    sr_parts = []
+    for sr in search_results:
+        sr_parts.append(f"\n### Collection: {sr.collection} | Query: \"{sr.query}\"")
+        if not sr.results:
+            sr_parts.append("  (no results)")
+        for i, r in enumerate(sr.results[:5]):
+            title = r.get("title", r.get("id", "untitled"))
+            breadcrumb = r.get("breadcrumb", "")
+            # Content is in matchedChunks[].content, not top-level
+            chunks = r.get("matchedChunks", [])
+            snippet = chunks[0].get("content", "")[:300] if chunks else ""
+            heading = chunks[0].get("heading", "") if chunks else ""
+            relevance = r.get("relevance", "n/a")
+            # Include graph context from search results if available
+            graph_ctx = r.get("graph_context", [])
+            graph_line = f"\n     Graph: {'; '.join(graph_ctx[:2])}" if graph_ctx else ""
+
+            sr_parts.append(
+                f"  {i + 1}. [{relevance}] {title}"
+                + (f" ({breadcrumb})" if breadcrumb else "")
+                + (f"\n     Section: {heading}" if heading else "")
+                + f"\n     {snippet}"
+                + graph_line
+            )
+    return sr_parts
+
+
 # ── Evaluation runner ─────────────────────────────────────────────────────────
 
 def evaluate_issue(
@@ -273,8 +424,13 @@ def evaluate_issue(
     search_limit: int = 5,
     num_queries: int = 3,
     judge_model: str = "claude-sonnet-4-20250514",
+    analyze_model: str | None = None,
 ) -> IssueEvaluation:
-    """Run one evaluation: search collections for an issue, then score results."""
+    """Run one evaluation: search collections for an issue, then score results.
+
+    If analyze_model is set, also generates an analysis using that model
+    and scores the analysis output (not just search quality).
+    """
 
     queries = extract_search_queries(issue_content, num_queries)
     log.info(f"  Queries for {issue_key}: {queries}")
@@ -301,10 +457,19 @@ def evaluate_issue(
             if node:
                 graph_results.append(node)
 
-    # Score with LLM judge
-    scores, reasoning = score_with_llm_judge(
-        issue_content, search_results, graph_results, rubric, model=judge_model,
-    )
+    if analyze_model:
+        # Generate analysis with the specified model, then score the analysis
+        log.info(f"  Generating analysis with {analyze_model}...")
+        analysis = generate_analysis(issue_content, search_results, graph_results, analyze_model)
+        log.info(f"  Analysis: {len(analysis)} chars. Scoring...")
+        scores, reasoning = score_analysis_with_judge(
+            issue_content, analysis, rubric, judge_model=judge_model,
+        )
+    else:
+        # Score search results directly (original mode)
+        scores, reasoning = score_with_llm_judge(
+            issue_content, search_results, graph_results, rubric, model=judge_model,
+        )
 
     # Compute weighted score
     total_weight = sum(d["weight"] for d in rubric["dimensions"])
@@ -438,6 +603,11 @@ def main():
         help="Path for JSON results output",
     )
     parser.add_argument(
+        "--analyze",
+        metavar="MODEL",
+        help="Generate analysis with MODEL (e.g. claude-sonnet-4-6-20250514) then score the analysis instead of raw search results",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Run searches but skip LLM judge scoring",
@@ -499,6 +669,7 @@ def main():
                 search_limit=search_limit,
                 num_queries=num_queries,
                 judge_model=args.judge_model if not args.dry_run else "skip",
+                analyze_model=args.analyze if not args.dry_run else None,
             )
 
             if args.dry_run:
