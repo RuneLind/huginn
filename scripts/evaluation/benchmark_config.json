@@ -1,0 +1,145 @@
+{
+  "description": "Jira analysis quality benchmark — autoresearch-style evaluation",
+  "knowledge_api_url": "http://localhost:8321",
+  "searches_per_issue": 3,
+  "search_limit": 5,
+
+  "benchmark_issues": [
+    {
+      "key": "MELOSYS-6079",
+      "file": "data/sources/jira-issues/MELOSYS-6079_Pliktig_medlemskap_for_yrkesaktive_etter_folketrygdloven_i_stegvelger.md",
+      "category": "epic",
+      "notes": "Epic with 21 child issues covering medlemskap/trygdeavgift"
+    },
+    {
+      "key": "MELOSYS-6432",
+      "file": "data/sources/jira-issues/MELOSYS-6432_Tilpasse_beregning_trygdeavgift.md",
+      "category": "feature-rich",
+      "notes": "User story with acceptance criteria, references Confluence docs"
+    },
+    {
+      "key": "MELOSYS-6433",
+      "file": "data/sources/jira-issues/MELOSYS-6433_Vedtaksmal_for_pliktig_medlemskap_etter_folketrygdloven.md",
+      "category": "feature-rich",
+      "notes": "Large issue with test failures, rework cycles, stakeholder feedback"
+    },
+    {
+      "key": "MELOSYS-7219",
+      "file": "data/sources/jira-issues/MELOSYS-7219_Feil_i_visning_av_automatisk_opprettet_årsavregningsbehandling.md",
+      "category": "complex-bug",
+      "notes": "619 lines, reproduction steps, Postman scripts, multi-stakeholder analysis"
+    },
+    {
+      "key": "MELOSYS-6593",
+      "file": "data/sources/jira-issues/MELOSYS-6593_Orienteringsbrev_om_at_vi_har_anmodet_om_unntak.md",
+      "category": "eessi-feature",
+      "notes": "EU/EOS utsending epic, QA feedback workflow"
+    },
+    {
+      "key": "MELOSYS-6494",
+      "file": "data/sources/jira-issues/MELOSYS-6494_Tilpasse_flyt_hvis_yrkessituasjon_=_Yrkesaktiv.md",
+      "category": "eessi-feature",
+      "notes": "EFTA/Storbritannia workflow, regulatory nuances (EOS vs Konvensjon)"
+    },
+    {
+      "key": "MELOSYS-5412",
+      "file": "data/sources/jira-issues/MELOSYS-5412_Feilmeldinger.md",
+      "category": "sparse-design",
+      "notes": "Minimal description, Figma references only — tests sparse-issue handling"
+    },
+    {
+      "key": "MELOSYS-7081",
+      "file": "data/sources/jira-issues/MELOSYS-7081_Fiks_komptest_som_feiler_på_sjekk_av_pull_request.md",
+      "category": "tech-bug",
+      "notes": "Small focused CI fix, technical backlog"
+    },
+    {
+      "key": "MELOSYS-4151",
+      "file": "data/sources/jira-issues/MELOSYS-4151_Fjerne_landkoder_i_melosys_journalføring_og_EESSI_(sende_SED_og_opprette_BUC).md",
+      "category": "cross-system",
+      "notes": "Spans journalforing, EESSI, SED — multi-system complexity, long-lived issue"
+    },
+    {
+      "key": "MELOSYS-5310",
+      "file": "data/sources/jira-issues/MELOSYS-5310_Typet_api.md",
+      "category": "sparse-tech",
+      "notes": "Architectural proposal with minimal description"
+    },
+    {
+      "key": "MELOSYS-2832",
+      "file": "data/sources/jira-issues/MELOSYS-2832_11.4_Bosted_steg_Bekreft_og_fortsett_knapp_blir_ikke_aktiv_når_annet_bostedsland_enn_Norge_er_valgt.md",
+      "category": "minimal-bug",
+      "notes": "Orphan bug, no epic, sparse description — baseline complexity"
+    },
+    {
+      "key": "MELOSYS-1171",
+      "file": "data/sources/jira-issues/MELOSYS-1171_Backend_Lagre_og_levere_faktaavklaring_for_en_gitt_behandling.md",
+      "category": "backend-subtask",
+      "notes": "Large sub-task from early development, technical complexity"
+    },
+    {
+      "key": "MELOSYS-5159",
+      "file": "data/sources/jira-issues/MELOSYS-5159_Faglig_analyse_av_fastsettelse_av_renter_på_trygdeavgift.md",
+      "category": "analysis-task",
+      "notes": "Research/analysis issue — domain knowledge over code"
+    },
+    {
+      "key": "MELOSYS-4302",
+      "file": "data/sources/jira-issues/MELOSYS-4302_Prod_Oppretting_av_SED_A001_feilet_pga_forutgående_periode_med_Grunnlagstype_MEDFT.md",
+      "category": "production-bug",
+      "notes": "Production bug, SED/EESSI domain, long resolution time (2020-2024)"
+    }
+  ],
+
+  "configurations": [
+    {
+      "name": "baseline",
+      "description": "Current setup: Confluence + Jira only",
+      "collections": ["melosys-confluence-v3", "jira-issues"],
+      "use_graph": false
+    },
+    {
+      "name": "with-wiki",
+      "description": "Add curated wiki for conceptual understanding",
+      "collections": ["melosys-confluence-v3", "jira-issues", "nav-wiki"],
+      "use_graph": false
+    },
+    {
+      "name": "full-knowledge",
+      "description": "All collections + knowledge graph",
+      "collections": ["melosys-confluence-v3", "jira-issues", "nav-wiki"],
+      "use_graph": true
+    }
+  ],
+
+  "scoring_rubric": {
+    "dimensions": [
+      {
+        "name": "domain_understanding",
+        "weight": 2,
+        "description": "Do the search results explain the domain concepts referenced in the issue (lovvalg, trygdeavtaler, BUC/SED types, forordninger, etc.)?"
+      },
+      {
+        "name": "technical_context",
+        "weight": 2,
+        "description": "Are relevant technical docs, architecture decisions, and implementation guides found?"
+      },
+      {
+        "name": "related_work",
+        "weight": 1.5,
+        "description": "Are related Jira issues, epics, and cross-references found?"
+      },
+      {
+        "name": "actionability",
+        "weight": 1.5,
+        "description": "Could an agent create a concrete work plan from these search results? Do they point to specific files, services, or APIs?"
+      },
+      {
+        "name": "noise_ratio",
+        "weight": 1,
+        "description": "What proportion of results are actually relevant? Low noise = high score."
+      }
+    ],
+    "scale": "1-5 per dimension (1=poor, 3=adequate, 5=excellent)"
+  }
+}

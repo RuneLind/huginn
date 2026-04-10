@@ -1,0 +1,140 @@
+{
+  "timestamp": "2026-04-10T14:08:12",
+  "evaluations": [
+    {
+      "issue_key": "MELOSYS-6432",
+      "config_name": "baseline",
+      "scores": {
+        "domain_understanding": 4.0,
+        "technical_context": 3.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 4.0
+      },
+      "weighted_score": 3.375,
+      "judge_reasoning": "Strong domain coverage with relevant confluence documentation on social security fee calculation and good related work context from the epic, but lacking technical implementation details needed for actionable development planning.",
+      "num_search_results": 30,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-7219",
+      "config_name": "baseline",
+      "scores": {
+        "domain_understanding": 2.0,
+        "technical_context": 1.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 3.0
+      },
+      "weighted_score": 2.25,
+      "judge_reasoning": "The search results excel at finding related Jira issues within the same epic (MELOSYS-6578) but fail to provide crucial technical context about GUI components, APIs, or services involved in displaying year-end assessment treatments. While domain concepts like trygdeavgift are present, specific knowledge about automatic treatment creation workflows and display logic is missing, leaving an AI agent without actionable technical information to fix the display bugs.",
+      "num_search_results": 30,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-4302",
+      "config_name": "baseline",
+      "scores": {
+        "domain_understanding": 3.0,
+        "technical_context": 2.0,
+        "related_work": 3.0,
+        "actionability": 2.0,
+        "noise_ratio": 3.0
+      },
+      "weighted_score": 2.5625,
+      "judge_reasoning": "The search finds relevant SED processing documentation and the target Jira issue, providing good domain context about SED types (A001, A009, A010) and exemption processes. However, results lack technical implementation details like validation logic, code locations, or API specifications needed to fix the MEDFT grunnlagstype filtering issue. While related issues are found, they don't directly address the specific legal basis validation problem, limiting actionability for creating a concrete work plan.",
+      "num_search_results": 30,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-6432",
+      "config_name": "with-wiki",
+      "scores": {
+        "domain_understanding": 3.0,
+        "technical_context": 3.0,
+        "related_work": 3.0,
+        "actionability": 3.0,
+        "noise_ratio": 3.0
+      },
+      "weighted_score": 3.0,
+      "judge_reasoning": "Judge failed — neutral scores",
+      "num_search_results": 35,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-7219",
+      "config_name": "with-wiki",
+      "scores": {
+        "domain_understanding": 2.0,
+        "technical_context": 1.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 2.0
+      },
+      "weighted_score": 2.125,
+      "judge_reasoning": "The search results successfully find multiple related Jira issues within the same epic, providing good context about similar problems with automatic annual settlement processing. However, they completely lack technical documentation about frontend architecture, API integration with Skatteetaten, or implementation details needed to address the GUI display issues. The confluence results are mostly irrelevant business rule examples rather than technical guides or troubleshooting documentation.",
+      "num_search_results": 30,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-4302",
+      "config_name": "with-wiki",
+      "scores": {
+        "domain_understanding": 3.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 3.0
+      },
+      "weighted_score": 2.75,
+      "judge_reasoning": "The results include relevant SED processing documentation and multiple related issues showing a pattern of A001 validation problems, but lack technical implementation details about validation logic, service architecture, or specific code locations. While domain concepts around SED processing are covered, there's insufficient technical context for an agent to create actionable solutions.",
+      "num_search_results": 39,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-6432",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 4.0,
+        "technical_context": 3.0,
+        "related_work": 4.0,
+        "actionability": 3.0,
+        "noise_ratio": 4.0
+      },
+      "weighted_score": 3.5625,
+      "judge_reasoning": "Strong domain coverage with key business rules and calculation methods found, plus excellent related work discovery. However, technical implementation details are limited, and while business context supports planning, specific code/API references needed for implementation are missing.",
+      "num_search_results": 35,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-7219",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 3.0,
+        "technical_context": 3.0,
+        "related_work": 3.0,
+        "actionability": 3.0,
+        "noise_ratio": 3.0
+      },
+      "weighted_score": 3.0,
+      "judge_reasoning": "Judge failed — neutral scores",
+      "num_search_results": 30,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-4302",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 3.0,
+        "technical_context": 3.0,
+        "related_work": 3.0,
+        "actionability": 3.0,
+        "noise_ratio": 3.0
+      },
+      "weighted_score": 3.0,
+      "judge_reasoning": "Judge failed — neutral scores",
+      "num_search_results": 39,
+      "graph_results_found": 1
+    }
+  ]
+}

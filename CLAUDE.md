@@ -51,7 +51,7 @@ Collections live in `data/collections/`. Source documents live in `data/sources/
 |---|---|---|
 | `melosys-confluence-v3` | `./data/sources/melosys-confluence` | `^\.excluded/.*` `^fetch_metadata\.json$` |
 | `jira-issues` | `./data/sources/jira-issues` | `^\.excluded/.*` |
-| `work-wiki` | `./huginn-nav/wiki` | `index\.md` `log\.md` `CLAUDE\.md` |
+| `nav-wiki` | `./huginn-nav/wiki` | `index\.md` `log\.md` `CLAUDE\.md` |
 
 ### Verify after re-indexing
 
