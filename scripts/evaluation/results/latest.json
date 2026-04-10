@@ -1,8 +1,83 @@
 {
-  "timestamp": "2026-04-10T14:08:12",
+  "timestamp": "2026-04-10T17:24:29",
   "evaluations": [
     {
+      "issue_key": "MELOSYS-6079",
+      "config_name": "baseline",
+      "scores": {
+        "domain_understanding": 2.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 3.0
+      },
+      "weighted_score": 2.5,
+      "judge_reasoning": "Search results show strong related work with multiple relevant Jira issues covering decision templates, MEDL integration, and mandatory membership procedures. However, they lack comprehensive coverage of the specific folketrygdloven provisions (§§ 2-1 through 2-5) and technical implementation details for the step selector modifications. While domain concepts are present, the results don't provide sufficient technical guidance for creating a concrete implementation plan, and about 30-40% of results appear tangentially relevant or unrelated to the core issue.",
+      "num_search_results": 30,
+      "graph_results_found": 0
+    },
+    {
       "issue_key": "MELOSYS-6432",
+      "config_name": "baseline",
+      "scores": {
+        "domain_understanding": 4.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 3.0
+      },
+      "weighted_score": 3.0,
+      "judge_reasoning": "The search results provide good domain coverage with documents about trygdeavgift calculation, rates, and periodization, plus strong related work connections including the epic and related Jira issues. However, they lack specific technical implementation details like code files, APIs, or service architectures needed for actual development work, making actionability limited despite good business context.",
+      "num_search_results": 30,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-6433",
+      "config_name": "baseline",
+      "scores": {
+        "domain_understanding": 3.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 3.0
+      },
+      "weighted_score": 2.75,
+      "judge_reasoning": "The search found excellent coverage of related Jira issues including the exact issue and parent epic, plus several similar decision template issues. However, results lack deep technical implementation details like template schemas, document generation APIs, or specific implementation guides that would enable concrete action. Domain coverage includes some relevant Melosys concepts but misses comprehensive folketrygdloven-specific knowledge and legal requirements for decision templates.",
+      "num_search_results": 30,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-7219",
+      "config_name": "baseline",
+      "scores": {
+        "domain_understanding": 3.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 3.0
+      },
+      "weighted_score": 2.75,
+      "judge_reasoning": "The search successfully found the exact Jira issue and several related ones in the same epic (MELOSYS-6578), showing good coverage of related work. However, the results lack specific technical context about the automatic annual assessment implementation, API integrations with tax authorities, or frontend display logic that's failing. The confluence results are somewhat tangential, focusing on tax calculation rules rather than the specific automation and display issues described in the ticket.",
+      "num_search_results": 30,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-6593",
+      "config_name": "baseline",
+      "scores": {
+        "domain_understanding": 3.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 3.0
+      },
+      "weighted_score": 2.75,
+      "judge_reasoning": "The search successfully found the exact Jira issue and many related issues in the same epic, providing good coverage of related work. However, it lacks technical implementation details about letter generation systems, specific file locations, or service APIs needed for actionable work planning. Domain concepts like SED A001 and exception processes are partially covered but need deeper explanation of the legal frameworks and business rules involved.",
+      "num_search_results": 30,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-6494",
       "config_name": "baseline",
       "scores": {
         "domain_understanding": 4.0,
@@ -12,12 +87,72 @@
         "noise_ratio": 4.0
       },
       "weighted_score": 3.375,
-      "judge_reasoning": "Strong domain coverage with relevant confluence documentation on social security fee calculation and good related work context from the epic, but lacking technical implementation details needed for actionable development planning.",
+      "judge_reasoning": "The search results provide strong domain knowledge about social security coordination, posted workers, and relevant articles/regulations, plus excellent coverage of related Jira issues from the same epic. However, they lack specific technical implementation details like code paths, API specifications, or current system architecture that would enable concrete action planning. Most results are highly relevant with minimal noise.",
       "num_search_results": 30,
       "graph_results_found": 0
     },
     {
-      "issue_key": "MELOSYS-7219",
+      "issue_key": "MELOSYS-5412",
+      "config_name": "baseline",
+      "scores": {
+        "domain_understanding": 2.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 2.0
+      },
+      "weighted_score": 2.375,
+      "judge_reasoning": "While the search successfully found the target issue and several related error message Jira issues, it lacks crucial UX/design domain knowledge like design system docs, WCAG guidelines, and component specifications needed for this frontend task. Most confluence results are irrelevant (SED mappings, database models), creating significant noise, and there's insufficient technical context about frontend architecture or implementation approaches for error message standardization.",
+      "num_search_results": 30,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-7081",
+      "config_name": "baseline",
+      "scores": {
+        "domain_understanding": 2.0,
+        "technical_context": 1.0,
+        "related_work": 3.0,
+        "actionability": 1.0,
+        "noise_ratio": 2.0
+      },
+      "weighted_score": 1.75,
+      "judge_reasoning": "The search results lack critical technical context for debugging a component test failure - no testing frameworks, GitHub Actions configuration, or service architecture details are found. While some domain concepts around FTRL/vedtak appear in confluence results, they don't explain the specific business logic being tested. The jira collection found the exact issue and some related test failures, but results are mostly irrelevant with high noise ratio.",
+      "num_search_results": 24,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-4151",
+      "config_name": "baseline",
+      "scores": {
+        "domain_understanding": 3.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 3.0
+      },
+      "weighted_score": 2.75,
+      "judge_reasoning": "The search results show good domain coverage with documents about BUC, SED, and EEA concepts, and excellent related work discovery including the exact issue and epic context. However, there's a significant lack of technical implementation details - no specific files, services, or APIs are identified for where country code validation occurs in journalføring or SED handling, making it difficult for an agent to create a concrete work plan.",
+      "num_search_results": 30,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-5310",
+      "config_name": "baseline",
+      "scores": {
+        "domain_understanding": 2.0,
+        "technical_context": 2.0,
+        "related_work": 3.0,
+        "actionability": 2.0,
+        "noise_ratio": 2.0
+      },
+      "weighted_score": 2.1875,
+      "judge_reasoning": "The search results miss critical technical context needed to address the API type generation question - no documentation about current API architecture, DTO structure, or frontend build processes was found. While some related API issues were retrieved from the epic, most confluence results about trygdeavgift and domain mapping are irrelevant to this technical infrastructure question. An agent would lack sufficient information to create a concrete implementation plan for generating TypeScript types from Java DTOs.",
+      "num_search_results": 20,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-2832",
       "config_name": "baseline",
       "scores": {
         "domain_understanding": 2.0,
@@ -27,57 +162,72 @@
         "noise_ratio": 3.0
       },
       "weighted_score": 2.25,
-      "judge_reasoning": "The search results excel at finding related Jira issues within the same epic (MELOSYS-6578) but fail to provide crucial technical context about GUI components, APIs, or services involved in displaying year-end assessment treatments. While domain concepts like trygdeavgift are present, specific knowledge about automatic treatment creation workflows and display logic is missing, leaving an AI agent without actionable technical information to fix the display bugs.",
-      "num_search_results": 30,
+      "judge_reasoning": "The jira-issues collection successfully found the exact issue (MELOSYS-2832) and several related button activation problems, but the confluence results are largely irrelevant domain documents. Critical gaps include no technical documentation about frontend architecture, JavaScript event handling, or specific code files/components that would need investigation. While related work is strong, the lack of actionable technical context severely limits an agent's ability to create a concrete work plan.",
+      "num_search_results": 29,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-1171",
+      "config_name": "baseline",
+      "scores": {
+        "domain_understanding": 2.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 3.0,
+        "noise_ratio": 2.0
+      },
+      "weighted_score": 2.5625,
+      "judge_reasoning": "The search successfully found the target issue (MELOSYS-1171) and related work (MELOSYS-1727, MELOSYS-1003 on faktaavklaring data model), providing good cross-references for implementation context. However, results lack domain-specific explanations of 'faktaavklaring' concepts and technical implementation details like API patterns or service architecture. About half the results appear tangentially relevant rather than directly actionable for this backend endpoint implementation task.",
+      "num_search_results": 28,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-5159",
+      "config_name": "baseline",
+      "scores": {
+        "domain_understanding": 3.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 4.0
+      },
+      "weighted_score": 2.875,
+      "judge_reasoning": "The results provide good general coverage of social security contribution domain concepts and processes, but critically missing specific legal/regulatory context about interest calculation rules (Skattebetalingsloven § 11-5) that the issue directly references. Related work coverage is excellent with the exact issue found plus many epic-related issues, but technical implementation details are sparse - mostly business process focused rather than system architecture or API specifics needed for concrete implementation planning.",
+      "num_search_results": 29,
       "graph_results_found": 0
     },
     {
       "issue_key": "MELOSYS-4302",
       "config_name": "baseline",
       "scores": {
+        "domain_understanding": 4.0,
+        "technical_context": 3.0,
+        "related_work": 5.0,
+        "actionability": 3.0,
+        "noise_ratio": 4.0
+      },
+      "weighted_score": 3.75,
+      "judge_reasoning": "The search results excel at finding the exact issue (MELOSYS-4302) and related SED/exemption processing documentation, providing good domain context about EU/EEA regulation handling and SED types. However, they appear to focus more on business process documentation rather than technical implementation details, limiting immediate actionability for code changes. The results show minimal noise with most documents being highly relevant to SED A001 and exemption processing.",
+      "num_search_results": 30,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-6079",
+      "config_name": "with-wiki",
+      "scores": {
         "domain_understanding": 3.0,
         "technical_context": 2.0,
-        "related_work": 3.0,
+        "related_work": 4.0,
         "actionability": 2.0,
-        "noise_ratio": 3.0
+        "noise_ratio": 4.0
       },
-      "weighted_score": 2.5625,
-      "judge_reasoning": "The search finds relevant SED processing documentation and the target Jira issue, providing good domain context about SED types (A001, A009, A010) and exemption processes. However, results lack technical implementation details like validation logic, code locations, or API specifications needed to fix the MEDFT grunnlagstype filtering issue. While related issues are found, they don't directly address the specific legal basis validation problem, limiting actionability for creating a concrete work plan.",
-      "num_search_results": 30,
+      "weighted_score": 2.875,
+      "judge_reasoning": "The search results provide good coverage of basic domain concepts (medlemskap, trygdeavgift, stegvelger) and excellent related Jira issues addressing similar implementation challenges. However, they lack specific technical implementation details about the stegvelger component and concrete guidance for integrating the legal provisions (§§ 2-1 through 2-5) mentioned in the epic. While most results are relevant, an agent would struggle to create a detailed work plan without more specific architectural and implementation documentation.",
+      "num_search_results": 45,
       "graph_results_found": 0
     },
     {
       "issue_key": "MELOSYS-6432",
-      "config_name": "with-wiki",
-      "scores": {
-        "domain_understanding": 3.0,
-        "technical_context": 3.0,
-        "related_work": 3.0,
-        "actionability": 3.0,
-        "noise_ratio": 3.0
-      },
-      "weighted_score": 3.0,
-      "judge_reasoning": "Judge failed — neutral scores",
-      "num_search_results": 35,
-      "graph_results_found": 0
-    },
-    {
-      "issue_key": "MELOSYS-7219",
-      "config_name": "with-wiki",
-      "scores": {
-        "domain_understanding": 2.0,
-        "technical_context": 1.0,
-        "related_work": 4.0,
-        "actionability": 2.0,
-        "noise_ratio": 2.0
-      },
-      "weighted_score": 2.125,
-      "judge_reasoning": "The search results successfully find multiple related Jira issues within the same epic, providing good context about similar problems with automatic annual settlement processing. However, they completely lack technical documentation about frontend architecture, API integration with Skatteetaten, or implementation details needed to address the GUI display issues. The confluence results are mostly irrelevant business rule examples rather than technical guides or troubleshooting documentation.",
-      "num_search_results": 30,
-      "graph_results_found": 0
-    },
-    {
-      "issue_key": "MELOSYS-4302",
       "config_name": "with-wiki",
       "scores": {
         "domain_understanding": 3.0,
@@ -87,9 +237,204 @@
         "noise_ratio": 3.0
       },
       "weighted_score": 2.75,
-      "judge_reasoning": "The results include relevant SED processing documentation and multiple related issues showing a pattern of A001 validation problems, but lack technical implementation details about validation logic, service architecture, or specific code locations. While domain concepts around SED processing are covered, there's insufficient technical context for an agent to create actionable solutions.",
+      "judge_reasoning": "The search results provide good coverage of related Jira issues and some relevant domain documentation about trygdeavgift calculation, but lack specific technical implementation details like which APIs, services, or code files handle tax calculations. While the business context is well-covered, an AI agent would struggle to create a concrete implementation plan without additional searches for technical artifacts, database schemas, and specific code locations.",
+      "num_search_results": 44,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-6433",
+      "config_name": "with-wiki",
+      "scores": {
+        "domain_understanding": 3.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 3.0
+      },
+      "weighted_score": 2.75,
+      "judge_reasoning": "The search successfully found the exact Jira issue and several related issues about decision templates, providing good context about related work. However, it lacks specific technical implementation details about how decision templates are actually implemented in the Melosys system - missing specific files, APIs, or services that would need to be modified. While domain concepts like medlemskap and folketrygdloven are covered, the results don't specifically focus on decision template implementation details needed for actionable work planning.",
+      "num_search_results": 45,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-7219",
+      "config_name": "with-wiki",
+      "scores": {
+        "domain_understanding": 2.0,
+        "technical_context": 1.0,
+        "related_work": 4.0,
+        "actionability": 1.0,
+        "noise_ratio": 2.0
+      },
+      "weighted_score": 1.9375,
+      "judge_reasoning": "The results show basic domain knowledge about trygdeavgift but miss the specific automated annual settlement process and tax authority integration details. Related Jira issues in the same epic are well-covered, but there's a complete lack of technical documentation about the systems, APIs, and GUI components involved. The high noise ratio and absence of actionable technical details would make it very difficult for an agent to create a concrete work plan.",
+      "num_search_results": 45,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-6593",
+      "config_name": "with-wiki",
+      "scores": {
+        "domain_understanding": 3.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 3.0
+      },
+      "weighted_score": 2.75,
+      "judge_reasoning": "The search results capture basic domain concepts (trygdeavtaler, lovvalg, A001 exceptions) and excel at finding related work within the same epic MELOSYS-6466, but lack crucial technical details about letter generation systems, doksys/dokgen integration, and specific implementation guidance. While the results provide good context about the broader feature area, they don't contain enough actionable information for an agent to create a concrete implementation plan for customizing letter templates.",
+      "num_search_results": 42,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-6494",
+      "config_name": "with-wiki",
+      "scores": {
+        "domain_understanding": 4.0,
+        "technical_context": 3.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 3.0
+      },
+      "weighted_score": 3.25,
+      "judge_reasoning": "The search successfully identified relevant domain documents covering key concepts like lovvalg, trygdeavtaler, and utsendt arbeidstaker, plus found related Jira issues within the same epic. However, all results show [n/a] indicating no accessible content, which severely limits the ability to create actionable implementation plans despite finding topically relevant documents.",
+      "num_search_results": 42,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-5412",
+      "config_name": "with-wiki",
+      "scores": {
+        "domain_understanding": 2.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 2.0
+      },
+      "weighted_score": 2.375,
+      "judge_reasoning": "The search successfully found related Jira issues about error messages (MELOSYS-7428, 7429, 7434, 5545) but failed to retrieve UI/UX design system documentation, frontend architecture details, or technical implementation guides needed for error message patterns. Most confluence and wiki results were irrelevant domain documents, creating significant noise.",
+      "num_search_results": 45,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-7081",
+      "config_name": "with-wiki",
+      "scores": {
+        "domain_understanding": 2.0,
+        "technical_context": 1.0,
+        "related_work": 3.0,
+        "actionability": 1.0,
+        "noise_ratio": 2.0
+      },
+      "weighted_score": 1.75,
+      "judge_reasoning": "Search results provide some related work context and domain-adjacent documents but lack critical technical debugging information and specific domain concept explanations needed for this flaky test issue. The results would not enable effective problem-solving without significant additional research.",
+      "num_search_results": 34,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-4151",
+      "config_name": "with-wiki",
+      "scores": {
+        "domain_understanding": 2.0,
+        "technical_context": 2.0,
+        "related_work": 3.0,
+        "actionability": 1.0,
+        "noise_ratio": 4.0
+      },
+      "weighted_score": 2.25,
+      "judge_reasoning": "While the search finds relevant domain documents about BUC, SED, EESSI, and country handling, all content shows '[n/a]' making them unusable for understanding concepts or implementation details. The search successfully locates the exact Jira issue and some related work, but without accessible content, an agent cannot create any concrete work plan or identify specific files/services to modify.",
+      "num_search_results": 45,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-5310",
+      "config_name": "with-wiki",
+      "scores": {
+        "domain_understanding": 2.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 3.0
+      },
+      "weighted_score": 2.5,
+      "judge_reasoning": "The search results excel at finding related API work within the same epic but lack specific domain knowledge about DTO structures, type generation, and frontend-backend integration patterns needed for this issue. While API-related documentation exists (melosys-api.md), it doesn't provide the technical details required to implement type generation from Java DTOs to TypeScript definitions.",
+      "num_search_results": 31,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-2832",
+      "config_name": "with-wiki",
+      "scores": {
+        "domain_understanding": 2.0,
+        "technical_context": 1.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 2.0
+      },
+      "weighted_score": 2.125,
+      "judge_reasoning": "The search successfully found the exact MELOSYS-2832 issue and several related button activation bugs, showing good pattern matching. However, it completely failed to retrieve technical documentation about frontend components, form validation, or UI architecture needed to fix the bug. The domain context is superficial, not explaining what '11.4 Bosted-steg' specifically entails, and most results are generic regulatory docs rather than actionable technical content.",
+      "num_search_results": 38,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-1171",
+      "config_name": "with-wiki",
+      "scores": {
+        "domain_understanding": 2.0,
+        "technical_context": 2.0,
+        "related_work": 3.0,
+        "actionability": 2.0,
+        "noise_ratio": 2.0
+      },
+      "weighted_score": 2.1875,
+      "judge_reasoning": "The search found some relevant documents like the original issue MELOSYS-1171 and related MELOSYS-1727, plus MELOSYS-1003 about faktaavklaring data models, but lacks comprehensive domain explanation of faktaavklaring concepts and business context. Technical implementation guidance is very limited with no clear API patterns or codebase structure information. Many results appear irrelevant (like legal frameworks and OEBS integration docs) creating significant noise, though the core related issues were successfully retrieved.",
       "num_search_results": 39,
       "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-5159",
+      "config_name": "with-wiki",
+      "scores": {
+        "domain_understanding": 3.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 4.0
+      },
+      "weighted_score": 2.875,
+      "judge_reasoning": "The search results provide good coverage of general trygdeavgift domain concepts and successfully find the exact Jira issue plus related work, but critically lack specific technical implementation details about interest calculation algorithms and legal/regulatory requirements from Skattebetalingsloven. While the noise level is low with most results being relevant, an AI agent would struggle to create a concrete implementation plan without more specific technical documentation about where and how to implement interest calculations in the system architecture.",
+      "num_search_results": 43,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-4302",
+      "config_name": "with-wiki",
+      "scores": {
+        "domain_understanding": 3.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 4.0
+      },
+      "weighted_score": 2.875,
+      "judge_reasoning": "The search results identify relevant domain documents (SED processing, EESSI, Trygdeforordningen) and related Jira issues, but lack technical implementation details and specific file/service references needed for actionable analysis. While the document titles suggest good domain coverage, the absence of content visibility limits assessment of actual domain concept explanations, and there's insufficient technical architecture context for concrete implementation planning.",
+      "num_search_results": 42,
+      "graph_results_found": 0
+    },
+    {
+      "issue_key": "MELOSYS-6079",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 3.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 3.0
+      },
+      "weighted_score": 2.75,
+      "judge_reasoning": "The search successfully found domain documentation and many related Jira issues, providing good context about mandatory membership work. However, it lacks technical implementation details and specific code/API guidance needed for concrete action planning.",
+      "num_search_results": 45,
+      "graph_results_found": 2
     },
     {
       "issue_key": "MELOSYS-6432",
@@ -97,28 +442,178 @@
       "scores": {
         "domain_understanding": 4.0,
         "technical_context": 3.0,
-        "related_work": 4.0,
+        "related_work": 5.0,
         "actionability": 3.0,
         "noise_ratio": 4.0
       },
-      "weighted_score": 3.5625,
-      "judge_reasoning": "Strong domain coverage with key business rules and calculation methods found, plus excellent related work discovery. However, technical implementation details are limited, and while business context supports planning, specific code/API references needed for implementation are missing.",
-      "num_search_results": 35,
+      "weighted_score": 3.75,
+      "judge_reasoning": "Results show strong domain coverage with key documents on trygdeavgift calculation, tax rates, and billing processes, plus excellent identification of related Jira issues and the parent epic. Technical context appears adequate but may lack implementation specifics needed for concrete development tasks. Most results are relevant with low noise ratio.",
+      "num_search_results": 44,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-6433",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 3.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 3.0
+      },
+      "weighted_score": 2.75,
+      "judge_reasoning": "The search successfully found the target issue and related vedtaksmal issues in the same epic, plus some relevant domain concepts like membership and law choice. However, it lacks technical implementation details about where decision templates are stored, which services handle them, or how the template generation system works. The confluence results contain significant noise with many tangentially related documents, while Jira results are highly relevant.",
+      "num_search_results": 45,
       "graph_results_found": 1
     },
     {
       "issue_key": "MELOSYS-7219",
       "config_name": "full-knowledge",
       "scores": {
+        "domain_understanding": 2.0,
+        "technical_context": 1.0,
+        "related_work": 5.0,
+        "actionability": 2.0,
+        "noise_ratio": 2.0
+      },
+      "weighted_score": 2.3125,
+      "judge_reasoning": "The jira-issues collection excellently finds the exact issue and related annual settlement problems within the epic, providing strong related work context. However, domain understanding is limited to issue descriptions without deeper concept explanations, technical context is almost completely missing (no architecture docs, GUI components, or integration details), actionability is poor due to lack of specific technical components or file references, and noise ratio is low with about 2/3 of results being irrelevant general tax concepts rather than the specific automatic settlement display issue.",
+      "num_search_results": 45,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-6593",
+      "config_name": "full-knowledge",
+      "scores": {
         "domain_understanding": 3.0,
-        "technical_context": 3.0,
-        "related_work": 3.0,
-        "actionability": 3.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
         "noise_ratio": 3.0
       },
-      "weighted_score": 3.0,
-      "judge_reasoning": "Judge failed — neutral scores",
-      "num_search_results": 30,
+      "weighted_score": 2.75,
+      "judge_reasoning": "Results provide good coverage of related issues and basic domain concepts around exemptions, but lack critical technical implementation details about letter systems and regulatory framework differences needed for actual development work.",
+      "num_search_results": 42,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-6494",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 3.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 4.0
+      },
+      "weighted_score": 2.875,
+      "judge_reasoning": "The search results provide adequate domain coverage with relevant documents about lovvalg, trygdeavtaler, and EU/EEA regulations, and excellent related work discovery including the epic and related issues. However, they lack technical implementation details like specific code files, APIs, or configuration that need modification, making it difficult for an agent to create a concrete work plan despite understanding the business context.",
+      "num_search_results": 42,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-5412",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 2.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 2.0
+      },
+      "weighted_score": 2.375,
+      "judge_reasoning": "Search successfully found related Jira issues and epic connections, but failed to retrieve relevant UX/design documentation, technical implementation patterns, or actionable guidance for standardizing error messages. High noise ratio with many irrelevant domain documents mixed in with the few relevant results.",
+      "num_search_results": 45,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-7081",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 2.0,
+        "technical_context": 1.0,
+        "related_work": 3.0,
+        "actionability": 1.0,
+        "noise_ratio": 2.0
+      },
+      "weighted_score": 1.75,
+      "judge_reasoning": "The search results provide minimal domain context for key concepts like 'YrkesaktivFtrlVedtak', 'manglende innbetaling', and the replication mechanism. Technical context is virtually absent - no architecture docs, testing infrastructure details, or CI/CD troubleshooting guides. Related work is moderately successful, finding the issue itself and epic connections, but lacks similar flaky test cases. Actionability is very low with no specific files, services, or concrete investigation steps identified. The noise ratio is poor due to many irrelevant confluence results and lack of content snippets to assess relevance.",
+      "num_search_results": 34,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-4151",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 3.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 4.0
+      },
+      "weighted_score": 2.875,
+      "judge_reasoning": "The search results show good coverage of related Jira issues and domain concepts like BUC/SED/EESSI, but lack specific technical implementation details needed for actionable guidance. While the domain topics are relevant, without content visibility it's unclear if they provide sufficient depth for understanding country code validation logic and the technical changes needed in journalføring and SED exchange flows.",
+      "num_search_results": 45,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-5310",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 2.0,
+        "technical_context": 2.0,
+        "related_work": 3.0,
+        "actionability": 1.0,
+        "noise_ratio": 2.0
+      },
+      "weighted_score": 2.0,
+      "judge_reasoning": "The search results largely miss the core technical question about generating TypeScript types from Java DTOs. While some API-related Jira issues were found, they address different concerns (journalføring, access control) rather than frontend-backend type sharing. The results lack concrete guidance on implementation approaches, tools, or existing patterns for this type generation challenge.",
+      "num_search_results": 31,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-2832",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 2.0,
+        "technical_context": 1.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 3.0
+      },
+      "weighted_score": 2.25,
+      "judge_reasoning": "Good coverage of related button activation issues in Jira, but missing critical technical implementation details and specific domain context for the 11.4 residence step. Results show the problem pattern but lack actionable technical guidance.",
+      "num_search_results": 38,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-1171",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 2.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 3.0
+      },
+      "weighted_score": 2.5,
+      "judge_reasoning": "The search successfully found related Jira issues including MELOSYS-1727 and MELOSYS-1003 about faktaavklaring data models, but lacks domain explanations of key concepts like 'avklartefakta' and 'behandling'. Technical implementation context is poor - no API architecture docs, service locations, or database schemas found. Results provide insufficient actionable information for implementing the specific REST endpoints described in the issue.",
+      "num_search_results": 39,
+      "graph_results_found": 1
+    },
+    {
+      "issue_key": "MELOSYS-5159",
+      "config_name": "full-knowledge",
+      "scores": {
+        "domain_understanding": 2.0,
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 4.0
+      },
+      "weighted_score": 2.625,
+      "judge_reasoning": "Good coverage of related work and trygdeavgift domain basics, but critically missing legal framework documentation about interest calculations and technical implementation details. An agent would struggle to create actionable implementation plans for the interest calculation requirements.",
+      "num_search_results": 43,
       "graph_results_found": 1
     },
     {
@@ -126,14 +621,14 @@
       "config_name": "full-knowledge",
       "scores": {
         "domain_understanding": 3.0,
-        "technical_context": 3.0,
-        "related_work": 3.0,
-        "actionability": 3.0,
-        "noise_ratio": 3.0
+        "technical_context": 2.0,
+        "related_work": 4.0,
+        "actionability": 2.0,
+        "noise_ratio": 4.0
       },
-      "weighted_score": 3.0,
-      "judge_reasoning": "Judge failed — neutral scores",
-      "num_search_results": 39,
+      "weighted_score": 2.875,
+      "judge_reasoning": "The search results provide adequate domain context with relevant SED processing docs and insurance regulation materials, but lack specific explanation of 'Grunnlagstype MEDFT' and the folketrygloven vs EU/EEA distinction. Technical context is weak - while SED handling docs were found, there are no specific implementation details about period selection, Medl integration, or filtering logic needed to fix the issue. Related work coverage is strong with the exact issue and multiple related SED processing bugs found.",
+      "num_search_results": 42,
       "graph_results_found": 1
     }
   ]
