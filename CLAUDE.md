@@ -51,11 +51,27 @@ Collections live in `data/collections/`. Source documents live in `data/sources/
 |---|---|---|
 | `melosys-confluence-v3` | `./data/sources/melosys-confluence` | `^\.excluded/.*` `^fetch_metadata\.json$` |
 | `jira-issues` | `./data/sources/jira-issues` | `^\.excluded/.*` |
+| `capra-notion-v9` | `./data/sources/capra-notion` | — |
 | `nav-wiki` | `./huginn-nav/wiki` | `index\.md` `log\.md` `CLAUDE\.md` |
 
 ### Verify after re-indexing
 
 Check `data/collections/<name>/manifest.json` — confirm `numberOfDocuments` matches expectations and `excludePatterns` show single backslashes in JSON (e.g. `"^\\.excluded/.*"`, not `"^\\\\.excluded/.*"`).
+
+## LLM entity extraction (knowledge graph)
+
+Extract entities and relationships from a collection using a local Ollama model. Outputs a `*_llm_graph.json` used for query expansion and graph context enrichment at search time.
+
+```sh
+uv run scripts/knowledge_graph/extract_entities_llm.py --collection <collection-name>
+uv run scripts/knowledge_graph/extract_entities_llm.py --collection <collection-name> --limit 20  # test run
+```
+
+- Requires Ollama running locally with `qwen3.5:latest` (or pass `--model`)
+- Incremental: uses a `.cache.json` file, safe to stop and resume
+- Output auto-routes to private sub-repos: NAV collections → `huginn-nav/scripts/knowledge_graph/`, others → `huginn-jarvis/scripts/knowledge_graph/`
+- The API server auto-loads all `*_llm_graph.json` files from those paths at startup
+- See `docs/graph-enhanced-rag.html` for full architecture documentation
 
 ## Development
 
