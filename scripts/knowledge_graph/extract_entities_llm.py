@@ -104,6 +104,10 @@ def build_graph(all_extractions: list[dict], doc_titles: dict[str, str]) -> dict
             continue
 
         for ent in extraction.get("entities", []):
+            if isinstance(ent, str):
+                ent = {"name": ent}
+            elif not isinstance(ent, dict):
+                continue
             name = normalize_entity_name(ent.get("name", ""))
             etype = ent.get("type", "Concept")
             if not name or len(name) < 2:
@@ -113,6 +117,8 @@ def build_graph(all_extractions: list[dict], doc_titles: dict[str, str]) -> dict
             entity_sources[name].add(doc_id)
 
         for rel in extraction.get("relationships", []):
+            if not isinstance(rel, dict):
+                continue
             src = normalize_entity_name(rel.get("source", ""))
             tgt = normalize_entity_name(rel.get("target", ""))
             rtype = rel.get("type", "related_to")
@@ -182,7 +188,7 @@ def main():
     parser = argparse.ArgumentParser(description="Extract knowledge graph using LLM")
     parser.add_argument("--collection", required=True, help="Collection name")
     parser.add_argument("--data-path", default="./data/collections", help="Base data path")
-    parser.add_argument("--model", default="qwen3.5:latest", help="Ollama model name")
+    parser.add_argument("--model", default="qwen3.6:35b-a3b-coding-nvfp4", help="Ollama model name")
     parser.add_argument("--output", default=None, help="Output JSON path (default: auto)")
     parser.add_argument("--limit", type=int, default=0, help="Max documents to process (0=all)")
     parser.add_argument("--min-text-length", type=int, default=100, help="Skip documents shorter than this")
