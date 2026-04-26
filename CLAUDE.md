@@ -49,10 +49,11 @@ Collections live in `data/collections/`. Source documents live in `data/sources/
 
 | Collection | Source path | Exclude patterns |
 |---|---|---|
-| `melosys-confluence-v3` | `./data/sources/melosys-confluence` | `^\.excluded/.*` `^fetch_metadata\.json$` |
+| `melosys-confluence-v3` | `./data/sources/melosys-confluence` | `^\.excluded/.*` `^fetch_metadata\.json$` (+ a path-specific exclude — see manifest) |
 | `jira-issues` | `./data/sources/jira-issues` | `^\.excluded/.*` |
 | `capra-notion-v9` | `./data/sources/capra-notion` | — |
 | `nav-wiki` | `./huginn-nav/wiki` | `index\.md` `log\.md` `CLAUDE\.md` |
+| `wiki` | `./huginn-jarvis/data/wiki` | `^index\.md$` `^log\.md$` `^CLAUDE\.md$` `^plans/.*` |
 
 ### Verify after re-indexing
 
@@ -75,6 +76,7 @@ uv run scripts/knowledge_graph/extract_entities_llm.py --collection <collection-
 
 ## Development
 
-- Python venv at `.venv/` — always use `.venv/bin/python`
+- Python venv at `.venv/` — always use `.venv/bin/python` for entry points
+- `uv` is also configured (`pyproject.toml` + `uv.lock`); `uv run <script>` works for ad-hoc scripts (e.g. the LLM extractor above)
 - Tests: `.venv/bin/python -m pytest tests/`
 - Detailed docs in `docs/` — check there for design decisions, architecture, and plans
