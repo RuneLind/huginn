@@ -257,6 +257,8 @@ User: "Hva er reglene for grensearbeidere?"
 
 ### Step 1b: Knowledge Graph Enhancement
 
+> 📚 For the operational side — *which* collections should be enriched by which kind of graph (LLM-extracted vs hand-curated wikilinks), and when to re-run the extractor — see [`knowledge-graph-when-to-use-what.md`](knowledge-graph-when-to-use-what.md). For the alternative pattern of building a hand-curated wiki collection, see [`wiki-collection-pattern.md`](wiki-collection-pattern.md).
+
 Before vector search, the query is analyzed against the knowledge graph (built by LLM entity extraction):
 
 ```python

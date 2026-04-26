@@ -258,6 +258,8 @@ KNOWLEDGE_GRAPH_PATH=./my_graph.json JIRA_GRAPH_PATH=./my_jira_graph.json \
 
 Write your own graph extractors for domain-specific entity extraction.
 
+> **When to run the LLM extractor (and when not to)** — see [`docs/knowledge-graph-when-to-use-what.md`](docs/knowledge-graph-when-to-use-what.md) for the asymmetry between hand-curated wiki collections (don't run it) and raw-chunk collections (do run it), plus the cache-invalidation gotcha when you swap models. For the alternative pattern of building a hand-curated wiki collection instead of relying on machine extraction, see [`docs/wiki-collection-pattern.md`](docs/wiki-collection-pattern.md).
+
 ## Document Tagging
 
 Tag documents with LLM-generated topic tags from constrained taxonomies:
