@@ -68,7 +68,7 @@ uv run scripts/knowledge_graph/extract_entities_llm.py --collection <collection-
 uv run scripts/knowledge_graph/extract_entities_llm.py --collection <collection-name> --limit 20  # test run
 ```
 
-- Requires Ollama running locally with `qwen3.5:latest` (or pass `--model`)
+- Requires Ollama running locally with `qwen3.6:35b-a3b-coding-nvfp4` (or pass `--model`)
 - Incremental: uses a `.cache.json` file, safe to stop and resume
 - Output auto-routes to private sub-repos: NAV collections → `huginn-nav/scripts/knowledge_graph/`, others → `huginn-jarvis/scripts/knowledge_graph/`
 - The API server auto-loads all `*_llm_graph.json` files from those paths at startup
@@ -80,3 +80,11 @@ uv run scripts/knowledge_graph/extract_entities_llm.py --collection <collection-
 - `uv` is also configured (`pyproject.toml` + `uv.lock`); `uv run <script>` works for ad-hoc scripts (e.g. the LLM extractor above)
 - Tests: `.venv/bin/python -m pytest tests/`
 - Detailed docs in `docs/` — check there for design decisions, architecture, and plans
+
+## Running the API server
+
+Local dev uses a personal `start.sh` (gitignored) that launches `knowledge_api_server.py` with the user's full set of collections and `KNOWLEDGE_GRAPH_PATH` / `JIRA_GRAPH_PATH` env vars. It's the canonical record of which collections are live and which graph JSONs auto-load. To run a slimmer subset manually:
+
+```sh
+uv run knowledge_api_server.py --collections <name> [<name> ...] --port 8321
+```

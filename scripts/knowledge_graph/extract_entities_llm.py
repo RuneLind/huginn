@@ -8,7 +8,7 @@ JSON file compatible with KnowledgeGraph.
 
 Usage:
     uv run scripts/knowledge_graph/extract_entities_llm.py --collection youtube-summaries
-    uv run scripts/knowledge_graph/extract_entities_llm.py --collection youtube-summaries --model qwen3.5:35b
+    uv run scripts/knowledge_graph/extract_entities_llm.py --collection youtube-summaries --model qwen3.6:35b-a3b-coding-nvfp4
     uv run scripts/knowledge_graph/extract_entities_llm.py --collection youtube-summaries --limit 10  # test run
 """
 
@@ -30,13 +30,29 @@ Focus on named things: specific technologies, tools, people, companies, and key 
 Skip generic terms like "system", "method", "approach" unless they have a specific name.
 
 Return ONLY valid JSON in this exact format:
-{"entities": [{"name": "...", "type": "Technology|Person|Concept|Organization|Product"}], "relationships": [{"source": "...", "target": "...", "type": "uses|built_by|part_of|related_to|alternative_to|created_by|improves"}]}
+{"entities": [{"name": "...", "type": "Technology|Person|Concept|Organization|Product"}], "relationships": [{"source": "...", "target": "...", "type": "uses|built_by|part_of|contains|related_to|alternative_to|created_by|improves|responds_to|precedes|succeeds|closes|invalidates|triggered_by"}]}
 
 Rules:
 - Entity names should be specific and canonical (e.g. "FAISS" not "faiss library")
 - Limit to the 5-15 most important entities per document
 - Only include relationships you are confident about
-- Merge near-duplicates (e.g. "Claude" and "Claude AI" -> "Claude")"""
+- Merge near-duplicates (e.g. "Claude" and "Claude AI" -> "Claude")
+
+Direction rules for relationships — the order of source and target matters:
+- "X part_of Y" means X is contained within Y. The container goes second.
+  Correct: "chapter part_of book", "A001 part_of LA_BUC_01"
+  Wrong:   "book part_of chapter", "LA_BUC_01 part_of A001"
+- "X contains Y" is the inverse of part_of. The container goes first.
+- "X uses Y" means X depends on Y. The consumer goes first.
+- "X responds_to Y" means X is a reply or response to Y (messages, callbacks, follow-ups).
+- "X precedes Y" / "X succeeds Y" — use only when the text states an explicit sequence.
+- "X closes Y", "X invalidates Y", "X triggered_by Y" — use only when the text states this directly.
+
+Canonical naming for short identifiers:
+- When an entity has a short identifier (e.g. acronym + number) AND a descriptive title in the text, use only the bare identifier as the entity name. Put descriptive context elsewhere; do not concatenate it.
+  Correct: name="ISO-8601", name="LA_BUC_01", name="A009"
+  Wrong:   name="ISO-8601 Date Format", name="LA_BUC_01 Søknad om unntak", name="A009 — Forespørsel om tilleggsopplysninger"
+- Do NOT append descriptive suffixes such as "_Subprocess", "– Close Case", "- Module" to the bare identifier."""
 
 USER_PROMPT_TEMPLATE = """Extract entities and relationships from this document:
 
@@ -58,7 +74,7 @@ def call_ollama(model: str, text: str, title: str, timeout: int = 300) -> dict |
         "stream": False,
         "think": False,
         "format": "json",
-        "options": {"temperature": 0, "num_predict": 1500},
+        "options": {"temperature": 0, "num_predict": 3000},
     }).encode()
 
     req = urllib.request.Request(
