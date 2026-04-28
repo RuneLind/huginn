@@ -3,6 +3,7 @@
 **Date:** 2026-04-10
 **Status:** Complete. Changes shipped.
 **Scope:** Improving Jira article analysis quality using expanded knowledge base, knowledge graph, and iterative evaluation
+**Follow-up:** `~/source/private/muninn/benchmarks/jira-analysis-benchmark-plan-v2.md` — analysis-quality benchmark (one level up: measures the report, not the search).
 
 ---
 
