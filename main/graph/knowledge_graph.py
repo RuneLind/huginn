@@ -59,24 +59,40 @@ class KnowledgeGraph:
 
     # --- Entity detection ---
 
-    def detect_entities(self, text: str) -> list[str]:
-        """Detect known graph entities in text. Returns deduplicated list of node IDs."""
+    def detect_entities(self, text: str, with_spans: bool = False):
+        """Detect known graph entities in text.
+
+        Args:
+            text: input string to scan.
+            with_spans: if True, return list of (node_id, matched_span_text) tuples.
+                Default False returns the bare node IDs (existing behavior).
+
+        Returns:
+            Deduplicated list of node IDs, or list of (id, span) tuples if with_spans.
+        """
         found = []
+        spans: dict[str, str] = {}  # node_id → first matched span
+
+        def _add(node_id, span):
+            found.append(node_id)
+            if node_id not in spans:
+                spans[node_id] = span
+
         # BUC: LA_BUC_02, LA BUC 02, etc.
         for m in re.finditer(r'LA[_ ]?BUC[_ ]?(\d{1,2})', text, re.IGNORECASE):
             node_id = f"buc:LA_BUC_{m.group(1).zfill(2)}"
             if node_id in self.nodes:
-                found.append(node_id)
+                _add(node_id, m.group(0))
         # A-SED: A003, A001, a003
         for m in re.finditer(r'\b(A\d{3})\b', text, re.IGNORECASE):
             node_id = f"sed:{m.group(1).upper()}"
             if node_id in self.nodes:
-                found.append(node_id)
+                _add(node_id, m.group(0))
         # X-SED: X001, X007, x001
         for m in re.finditer(r'\b(X\d{3})\b', text, re.IGNORECASE):
             node_id = f"sed:{m.group(1).upper()}"
             if node_id in self.nodes:
-                found.append(node_id)
+                _add(node_id, m.group(0))
         # Artikkel: artikkel 13, art. 13 nr. 1, art 13.1
         for m in re.finditer(r'art(?:ikkel)?\.?\s*(\d{1,2})(?:\s*(?:nr\.?\s*)?(\d+))?', text, re.IGNORECASE):
             art_num = m.group(1)
@@ -84,31 +100,35 @@ class KnowledgeGraph:
             if sub_num:
                 sub_id = f"artikkel:{art_num}.{sub_num}"
                 if sub_id in self.nodes:
-                    found.append(sub_id)
+                    _add(sub_id, m.group(0))
             art_id = f"artikkel:{art_num}"
             if art_id in self.nodes:
-                found.append(art_id)
+                _add(art_id, m.group(0))
         # Forordning: 883/2004, forordning 987/2009
         for m in re.finditer(r'(?:forordning\s+)?(\d{3}/\d{4})\b', text, re.IGNORECASE):
             node_id = f"forordning:{m.group(1)}"
             if node_id in self.nodes:
-                found.append(node_id)
+                _add(node_id, m.group(0))
         # Jira issue keys: PROJECT-1234, TEAM-567, etc.
         for m in re.finditer(r'\b([A-Z][A-Z0-9]+-\d+)\b', text):
             key = m.group(1)
             issue_id = f"issue:{key}"
             epic_id = f"epic:{key}"
             if issue_id in self.nodes:
-                found.append(issue_id)
+                _add(issue_id, m.group(0))
             elif epic_id in self.nodes:
-                found.append(epic_id)
+                _add(epic_id, m.group(0))
         # LLM-extracted entities: match by label (case-insensitive word boundary)
         if self._entity_patterns:
             text_lower = text.lower()
             for label_lower, node_id in self._entity_patterns:
                 if label_lower in text_lower:
-                    found.append(node_id)
-        return list(dict.fromkeys(found))  # deduplicate, preserve order
+                    _add(node_id, label_lower)
+
+        deduped = list(dict.fromkeys(found))  # preserve insertion order
+        if with_spans:
+            return [(node_id, spans[node_id]) for node_id in deduped]
+        return deduped
 
     # --- Query expansion ---
 
