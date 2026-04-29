@@ -144,11 +144,16 @@ If `return_breakdown` is unset, the function returns its old 2-tuple unchanged �
 
 ## Muninn integration (Phase 1)
 
-No Muninn schema changes needed. The Huginn MCP adapter's tool result is already serialized into `attributes.output` of the tool span (per Muninn's `message-processor.ts:163–177`). When `trace` is set in the request, the entire `trace` object rides along inside that JSON blob.
+The MCP adapters embed the trace differently depending on transport:
 
-The existing waterfall span-detail viewer at `src/dashboard/views/components/traces-waterfall.ts:232–240` dumps attributes as JSON, so operators can see it immediately. To make it nicer, we'd later add a custom renderer keyed on `attributes.output.trace.schemaVersion`, but that's not blocking.
+- **HTTP-wrapper MCP** (`knowledge_api_mcp_adapter.py`) — appends a fenced `\`\`\`huginn-trace\n{json}\n\`\`\`` block at the end of the markdown tool result.
+- **In-process multi-collection MCP** (`multi_collection_search_mcp_adapter.py`) — already returns JSON, so attaches the trace under a top-level `trace` field in the result dict.
 
-To turn it on globally for Muninn, set `HUGINN_TRACE_DEFAULT=true` on the dev API server, or have Muninn's Huginn tool wrapper always pass `trace: true` (cheap, only Muninn consumes it).
+Both adapters check the same env var `HUGINN_TRACE_DEFAULT=1`. Set it on the MCP server's environment when Muninn launches the stdio process.
+
+**Recommended Muninn behavior**: parse out the trace blob from the tool result, store it on the tool span (`attributes.searchTrace` is the convention) so the existing waterfall span-detail viewer renders it, and **strip the trace from the text the LLM sees** so it doesn't pollute context.
+
+The existing span-detail viewer at `src/dashboard/views/components/traces-waterfall.ts` already dumps attributes as JSON, so once the trace is in `attributes.searchTrace`, operators can inspect it immediately. A custom renderer keyed on `searchTrace.schemaVersion === 1` is a Phase 2 polish.
 
 ## Rollout
 

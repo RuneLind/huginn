@@ -10,6 +10,7 @@ Usage:
 """
 import json
 import argparse
+import os
 import sys
 import logging
 
@@ -18,9 +19,15 @@ from mcp.server.fastmcp import FastMCP
 from main.persisters.disk_persister import DiskPersister
 from main.indexes.indexer_factory import detect_faiss_index, create_embedder, load_search_indexer, create_reranker
 from main.core.documents_collection_searcher import DocumentCollectionSearcher
+from main.core.search_trace import create_trace
 from main.utils.logger import setup_root_logger
 
 setup_root_logger()
+
+# When set, attach a per-search trace to the JSON tool result. Orchestrators (e.g.
+# Muninn) read result.trace, store it for the inspector UI, and strip it before
+# showing the result to the model.
+TRACE_DEFAULT = os.environ.get("HUGINN_TRACE_DEFAULT", "").lower() in ("1", "true", "yes")
 
 # Redirect logging to stderr
 try:
@@ -96,13 +103,18 @@ Each document contains 'url' field - always include it in responses when citing 
     def create_search_function(searcher_instance, coll_name):
         def search_fn(query: str) -> str:
             logging.info(f"Searching in {coll_name}: {query}")
+            trace = create_trace(TRACE_DEFAULT)
+            trace.set_query_raw(query)
             search_results = searcher_instance.search(
-                query, 
-                max_number_of_chunks=args['maxNumberOfChunks'], 
+                query,
+                max_number_of_chunks=args['maxNumberOfChunks'],
                 max_number_of_documents=args['maxNumberOfDocuments'],
                 include_text_content=args['includeFullText'],
-                include_matched_chunks_content=not args['includeFullText']
+                include_matched_chunks_content=not args['includeFullText'],
+                trace=trace,
             )
+            if TRACE_DEFAULT:
+                search_results["trace"] = trace.to_dict()
             return json.dumps(search_results, indent=2, ensure_ascii=False)
         return search_fn
     
