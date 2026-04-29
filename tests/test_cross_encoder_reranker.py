@@ -1,17 +1,6 @@
 import numpy as np
-from unittest.mock import MagicMock, patch
 
-from main.indexes.reranking.cross_encoder_reranker import CrossEncoderReranker
-
-
-def _make_reranker(predict_scores):
-    """Create a CrossEncoderReranker with a mocked model that returns given scores."""
-    with patch.object(CrossEncoderReranker, '__init__', lambda self, **kwargs: None):
-        reranker = CrossEncoderReranker.__new__(CrossEncoderReranker)
-        reranker._model_name = "mock-reranker"
-        reranker.model = MagicMock()
-        reranker.model.predict.return_value = np.array(predict_scores, dtype=np.float32)
-        return reranker
+from tests.conftest import make_mock_reranker as _make_reranker
 
 
 class TestCrossEncoderReranker:

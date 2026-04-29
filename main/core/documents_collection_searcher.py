@@ -7,6 +7,7 @@ import time
 import numpy as np
 
 from main.core.search_trace import NULL_TRACE
+from main.utils.performance import delta_ms
 
 try:
     from langdetect import detect, DetectorFactory
@@ -16,10 +17,6 @@ except ImportError:
     _langdetect_available = False
 
 logger = logging.getLogger(__name__)
-
-
-def _ms(start, end):
-    return int((end - start) * 1000)
 
 
 class DocumentCollectionSearcher:
@@ -50,13 +47,7 @@ class DocumentCollectionSearcher:
         if trace is None:
             trace = NULL_TRACE
 
-        skip_reason = None
-        if not self.reranker:
-            skip_reason = "no_reranker"
-        elif skip_reranker:
-            skip_reason = "caller_opted_out"
-        elif self._should_skip_reranker(text):
-            skip_reason = "english_query"
+        skip_reason = self._reranker_skip_reason(text, skip_reranker)
         use_reranker = skip_reason is None
         if skip_reason:
             trace.set_reranker_skipped(True, reason=skip_reason)
@@ -72,8 +63,7 @@ class DocumentCollectionSearcher:
             fetch_k=fetch_k,
         )
 
-        # `is True` (not just truthy) so MagicMock test indexers don't accidentally opt in.
-        capture_breakdown = coll_trace.enabled and getattr(self.indexer, "supports_breakdown", False) is True
+        capture_breakdown = coll_trace.enabled and getattr(self.indexer, "supports_breakdown", False)
 
         t0 = time.monotonic()
         if capture_breakdown:
@@ -97,13 +87,13 @@ class DocumentCollectionSearcher:
             t_rerank = time.monotonic()
             logger.info(
                 f"Search '{self.collection_name}' ({len(chunk_texts)} candidates): "
-                f"index={_ms(t0, t_index)}ms, chunks={_ms(t_index, t_chunks)}ms, "
-                f"rerank={_ms(t_chunks, t_rerank)}ms"
+                f"index={delta_ms(t0, t_index)}ms, chunks={delta_ms(t_index, t_chunks)}ms, "
+                f"rerank={delta_ms(t_chunks, t_rerank)}ms"
             )
         else:
             t_chunks = t_index
             t_rerank = t_index
-            logger.info(f"Search '{self.collection_name}' (no rerank): index={_ms(t0, t_index)}ms")
+            logger.info(f"Search '{self.collection_name}' (no rerank): index={delta_ms(t0, t_index)}ms")
 
         scores, indexes = self._apply_title_boost(text, scores, indexes, coll_trace)
         t_boost = time.monotonic()
@@ -138,16 +128,30 @@ class DocumentCollectionSearcher:
 
         t_end = time.monotonic()
         coll_trace.set_timings(
-            indexFetch=_ms(t0, t_index),
-            chunkLoad=_ms(t_index, t_chunks),
-            rerank=_ms(t_chunks, t_rerank),
-            titleBoost=_ms(t_rerank, t_boost),
-            assembly=_ms(t_boost, t_end),
-            total=_ms(t_start, t_end),
+            indexFetch=delta_ms(t0, t_index),
+            chunkLoad=delta_ms(t_index, t_chunks),
+            rerank=delta_ms(t_chunks, t_rerank),
+            titleBoost=delta_ms(t_rerank, t_boost),
+            assembly=delta_ms(t_boost, t_end),
+            total=delta_ms(t_start, t_end),
         )
 
-        logger.info(f"Search '{self.collection_name}' total: {_ms(t_start, t_end)}ms")
+        logger.info(f"Search '{self.collection_name}' total: {delta_ms(t_start, t_end)}ms")
         return response
+
+    def _reranker_skip_reason(self, text, caller_skip_reranker):
+        if not self.reranker:
+            return "no_reranker"
+        if caller_skip_reranker:
+            return "caller_opted_out"
+        if self._should_skip_reranker(text):
+            return "english_query"
+        return None
+
+    @staticmethod
+    def _doc_title_from_entry(entry):
+        doc_path = entry.get("documentPath", "")
+        return doc_path.rsplit("/", 1)[-1].replace(".json", "")
 
     @staticmethod
     def _record_index_breakdown(coll_trace, breakdown):
@@ -165,9 +169,11 @@ class DocumentCollectionSearcher:
             coll_trace.record_stage("final", chunk_id=cid, rank=rank, score=float(scores[0][rank]))
             entry = mapping.get(str(cid))
             if entry:
-                doc_path = entry.get("documentPath", "")
-                title = doc_path.rsplit("/", 1)[-1].replace(".json", "")
-                coll_trace.annotate_candidate(cid, document_id=entry["documentId"], doc_title=title)
+                coll_trace.annotate_candidate(
+                    cid,
+                    document_id=entry["documentId"],
+                    doc_title=self._doc_title_from_entry(entry),
+                )
 
     def _apply_confidence_filtering(self, response):
         results = response["results"]
@@ -218,9 +224,7 @@ class DocumentCollectionSearcher:
                 continue
             doc_id = entry["documentId"]
             if doc_id not in doc_boosts:
-                # Extract title from documentPath (last component without extension)
-                doc_path = entry.get("documentPath", "")
-                title = doc_path.rsplit("/", 1)[-1].replace(".json", "").replace("-", " ").replace("_", " ")
+                title = self._doc_title_from_entry(entry).replace("-", " ").replace("_", " ")
                 title_tokens = set(re.findall(r'\w+', title.lower()))
                 overlap = len(query_tokens & title_tokens)
                 doc_boosts[doc_id] = max(boost_per_term * overlap, boost_cap) if overlap > 0 else 0.0

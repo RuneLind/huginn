@@ -13,6 +13,8 @@ See docs/search-tracing-plan.md for the schema this produces.
 
 import time
 
+from main.utils.performance import delta_ms
+
 SCHEMA_VERSION = 1
 
 VALID_STAGES = ("faiss", "bm25", "rrf", "ce", "final")
@@ -44,7 +46,6 @@ class SearchTrace:
 
     def set_query_raw(self, text):
         self._query["raw"] = text
-        # `expanded` defaults to raw until set_expansion() overrides it.
         self._query["expanded"] = text
 
     def set_expansion(self, expanded_text, expansion_terms):
@@ -75,7 +76,7 @@ class SearchTrace:
         return {
             "query": dict(self._query),
             "collections": [c.to_dict() for c in self._collections],
-            "totalMs": int((time.monotonic() - self._t_start) * 1000),
+            "totalMs": delta_ms(self._t_start, time.monotonic()),
             "schemaVersion": SCHEMA_VERSION,
         }
 
@@ -89,9 +90,9 @@ class CollectionTrace:
         self._name = name
         self._indexer = indexer
         self._fetch_k = fetch_k
-        # Keyed by chunk_id; lazily created on first stage record.
         self._candidates = {}
-        # Title boost is recorded per-document (one delta affects all chunks of a doc).
+        # Keyed by document_id, not chunk_id: a title-match delta is applied to
+        # every chunk of that doc, so we record it once and broadcast on output.
         self._title_boosts = {}
         self._confidence = None
         self._timings = {}
@@ -152,7 +153,6 @@ class CollectionTrace:
             self._timings[k] = int(v)
 
     def to_dict(self):
-        # Apply per-doc title boosts onto each candidate's stage dict for output.
         candidates = []
         for c in self._candidates.values():
             out = dict(c)

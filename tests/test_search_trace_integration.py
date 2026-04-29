@@ -10,42 +10,26 @@ Exercises the new tracing paths in:
 import json
 import numpy as np
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from main.core.documents_collection_searcher import DocumentCollectionSearcher
 from main.core.search_trace import SearchTrace, create_trace
 from main.indexes.indexers.hybrid_search_indexer import HybridSearchIndexer
-from main.indexes.reranking.cross_encoder_reranker import CrossEncoderReranker
+from tests.conftest import FakeIndexer, make_mock_reranker as _make_reranker
 
 
 # --- Hybrid indexer: return_breakdown ---
 
 
-class _FakeIndexer:
-    def __init__(self, results):
-        self._results = results
-
-    def search(self, text, number_of_results=10):
-        items = self._results[:number_of_results]
-        if not items:
-            return np.array([[]], dtype=np.float32), np.array([[]], dtype=np.int64)
-        ids = np.array([[r[0] for r in items]], dtype=np.int64)
-        scores = np.array([[r[1] for r in items]], dtype=np.float32)
-        return scores, ids
-
-    def get_size(self):
-        return len(self._results)
-
-
 class TestHybridReturnBreakdown:
     def test_default_returns_two_tuple(self):
-        hybrid = HybridSearchIndexer(_FakeIndexer([(1, 0.1)]), _FakeIndexer([(1, -1.0)]))
+        hybrid = HybridSearchIndexer(FakeIndexer([(1, 0.1)]), FakeIndexer([(1, -1.0)]))
         out = hybrid.search("q", number_of_results=5)
         assert len(out) == 2  # backward compatible
 
     def test_breakdown_includes_all_three_stages(self):
-        faiss = _FakeIndexer([(1, 0.1), (2, 0.2), (3, 0.3)])
-        bm25 = _FakeIndexer([(2, 8.0), (4, 5.0), (1, 2.0)])
+        faiss = FakeIndexer([(1, 0.1), (2, 0.2), (3, 0.3)])
+        bm25 = FakeIndexer([(2, 8.0), (4, 5.0), (1, 2.0)])
         hybrid = HybridSearchIndexer(faiss, bm25)
 
         scores, ids, breakdown = hybrid.search("q", number_of_results=5, return_breakdown=True)
@@ -60,28 +44,19 @@ class TestHybridReturnBreakdown:
         assert [e[0] for e in breakdown["rrf"]] == ids[0].tolist()
 
     def test_breakdown_skips_negative_ids(self):
-        faiss = _FakeIndexer([(1, 0.1), (-1, 0.0)])
-        bm25 = _FakeIndexer([(1, -1.0)])
+        faiss = FakeIndexer([(1, 0.1), (-1, 0.0)])
+        bm25 = FakeIndexer([(1, -1.0)])
         hybrid = HybridSearchIndexer(faiss, bm25)
         _, _, breakdown = hybrid.search("q", return_breakdown=True)
         assert all(e[0] != -1 for e in breakdown["faiss"])
 
     def test_empty_breakdown_shape(self):
-        hybrid = HybridSearchIndexer(_FakeIndexer([]), _FakeIndexer([]))
+        hybrid = HybridSearchIndexer(FakeIndexer([]), FakeIndexer([]))
         scores, ids, breakdown = hybrid.search("q", return_breakdown=True)
         assert breakdown == {"faiss": [], "bm25": [], "rrf": []}
 
 
 # --- Cross-encoder: return_ce_scores ---
-
-
-def _make_reranker(predict_scores):
-    with patch.object(CrossEncoderReranker, "__init__", lambda self, **kwargs: None):
-        reranker = CrossEncoderReranker.__new__(CrossEncoderReranker)
-        reranker._model_name = "mock"
-        reranker.model = MagicMock()
-        reranker.model.predict.return_value = np.array(predict_scores, dtype=np.float32)
-        return reranker
 
 
 class TestRerankerReturnCEScores:
@@ -213,9 +188,10 @@ def _make_e2e_setup(reranker=None):
         raise FileNotFoundError(path)
     persister.read_text_file.side_effect = read_text
 
-    indexer = MagicMock()
+    # spec= so the mock doesn't auto-create `supports_breakdown` and trip
+    # the trace-on capture path (which expects a HybridSearchIndexer).
+    indexer = MagicMock(spec=["search", "get_name", "get_size"])
     indexer.get_name.return_value = "test_indexer"
-    # No rrf_k attribute → searcher won't try to capture index breakdown
     indexer.search.return_value = (
         np.array([[0.5, 1.0, 1.5]], dtype=np.float32),
         np.array([[0, 1, 2]], dtype=np.int64),

@@ -4,8 +4,6 @@ import numpy as np
 class HybridSearchIndexer:
     """Search-time wrapper combining FAISS and BM25 results via Reciprocal Rank Fusion."""
 
-    # Set to True so callers can opt into the per-stage `return_breakdown` API
-    # without having to import this class for an isinstance check.
     supports_breakdown = True
 
     def __init__(self, faiss_indexer, bm25_indexer, rrf_k=60):
