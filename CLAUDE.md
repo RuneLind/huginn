@@ -52,7 +52,7 @@ Collections live in `data/collections/`. Source documents live in `data/sources/
 | `melosys-confluence-v3` | `./data/sources/melosys-confluence` | `^\.excluded/.*` `^fetch_metadata\.json$` (+ a path-specific exclude — see manifest) |
 | `jira-issues` | `./data/sources/jira-issues` | `^\.excluded/.*` |
 | `capra-notion-v9` | `./data/sources/capra-notion` | — |
-| `nav-wiki` | `./huginn-nav/wiki` | `index\.md` `log\.md` `CLAUDE\.md` |
+| `nav-wiki` | `./huginn-nav/wiki` | `index\.md` `log\.md` `CLAUDE\.md` `^\.obsidian/.*` |
 | `wiki` | `./huginn-jarvis/data/wiki` | `^index\.md$` `^log\.md$` `^CLAUDE\.md$` `^plans/.*` |
 
 ### Verify after re-indexing

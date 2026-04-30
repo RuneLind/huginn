@@ -12,6 +12,9 @@ Environment:
     KNOWLEDGE_API_URL       Base URL of the Knowledge API Server (default: http://localhost:8321)
     KNOWLEDGE_COLLECTIONS   Comma-separated list of allowed collections (default: all)
     KNOWLEDGE_DESCRIPTION   Human-readable description of what this knowledge base contains
+    HUGINN_TRACE_DEFAULT    "1"/"true"/"yes" to embed a per-search trace in tool results.
+                            Only enable when an orchestrator (e.g. Muninn) strips the trace
+                            block before the LLM sees it. See docs/search-tracing-plan.md.
 """
 import json
 import logging
@@ -21,6 +24,8 @@ from pathlib import Path
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+
+from main.utils.env import env_bool
 
 # Redirect logging to stderr (stdout is reserved for MCP JSON-RPC)
 logging.basicConfig(
@@ -37,10 +42,10 @@ ALLOWED_COLLECTIONS = [
 
 KNOWLEDGE_DESCRIPTION = os.environ.get("KNOWLEDGE_DESCRIPTION", "")
 
-# When set, ask the API server for a trace and append it to the tool result as a
-# fenced ```huginn-trace block. Orchestrators (e.g. Muninn) parse, store, and strip
-# this block before showing the result to the model.
-TRACE_DEFAULT = os.environ.get("HUGINN_TRACE_DEFAULT", "").lower() in ("1", "true", "yes")
+# Only enable when an orchestrator (e.g. Muninn) is wired to strip the trace
+# block before the LLM sees it — otherwise the full trace lands in model context.
+# See docs/search-tracing-plan.md.
+TRACE_DEFAULT = env_bool("HUGINN_TRACE_DEFAULT")
 
 def _detect_feature(allowed_collections: list[str] | None, keyword: str) -> bool:
     """Check if a feature keyword matches any allowed collection name (or all if None)."""
