@@ -39,13 +39,23 @@ class DocumentCollectionSearcher:
                include_all_chunks_content=False,
                include_matched_chunks_content=False,
                skip_reranker=False,
-               trace=None):
+               trace=None,
+               title_boost_query=None):
+        """Search the collection.
+
+        title_boost_query: query string used for title-boost token matching.
+            Defaults to `text`. Pass the raw user query when `text` is graph-expanded
+            so title-boost doesn't reward documents whose titles happen to overlap
+            with expansion terms instead of the user's actual intent.
+        """
         t_start = time.monotonic()
         self._doc_cache = {}
         self._mapping_cache = None
 
         if trace is None:
             trace = NULL_TRACE
+        if title_boost_query is None:
+            title_boost_query = text
 
         skip_reason = self._reranker_skip_reason(text, skip_reranker)
         use_reranker = skip_reason is None
@@ -95,7 +105,7 @@ class DocumentCollectionSearcher:
             t_rerank = t_index
             logger.info(f"Search '{self.collection_name}' (no rerank): index={delta_ms(t0, t_index)}ms")
 
-        scores, indexes = self._apply_title_boost(text, scores, indexes, coll_trace)
+        scores, indexes = self._apply_title_boost(title_boost_query, scores, indexes, coll_trace)
         t_boost = time.monotonic()
 
         if coll_trace.enabled:
