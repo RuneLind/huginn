@@ -401,6 +401,7 @@ def search(
             include_matched_chunks_content=True,
             skip_reranker=skip_reranker,
             trace=trace_obj,
+            title_boost_query=q,
         )
         if search_result.get("lowConfidence"):
             any_low_confidence = True

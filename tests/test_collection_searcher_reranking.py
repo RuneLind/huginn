@@ -503,6 +503,69 @@ class TestTitleBoost:
         # doc-A should stay first (no title match for either)
         assert result["results"][0]["id"] == "doc-A"
 
+    def test_title_boost_uses_title_boost_query_when_provided(self):
+        """When title_boost_query is provided, title-boost ignores `text` and matches on the raw query.
+
+        Regression: graph-expanded queries were leaking expansion terms into title-boost,
+        causing docs with expansion-token overlap (but no raw-query match) to outrank
+        the actually requested document.
+        """
+        mapping = {}
+        mapping.update(_make_mapping(0, "doc-A", 0, doc_path="col/documents/MELOSYS-7714.json"))
+        mapping.update(_make_mapping(1, "doc-B", 0, doc_path="col/documents/MELOSYS-7631_årsavregning_POPP_pensjonsopptjening.json"))
+        mapping.update(_make_mapping(2, "doc-C", 0, doc_path="col/documents/unrelated.json"))
+
+        doc_a = _make_document("doc-A", [{"indexedData": "issue 7714"}])
+        doc_b = _make_document("doc-B", [{"indexedData": "issue 7631"}])
+        doc_c = _make_document("doc-C", [{"indexedData": "irrelevant"}])
+
+        persister = MagicMock()
+        def read_text(path):
+            if "index_document_mapping" in path:
+                return json.dumps(mapping)
+            if "MELOSYS-7714" in path:
+                return json.dumps(doc_a)
+            if "MELOSYS-7631" in path:
+                return json.dumps(doc_b)
+            if "unrelated" in path:
+                return json.dumps(doc_c)
+            raise FileNotFoundError(path)
+        persister.read_text_file.side_effect = read_text
+
+        indexer = MagicMock()
+        indexer.get_name.return_value = "test_indexer"
+        indexer.search.return_value = (
+            np.array([[0.5, 1.0, 1.5]], dtype=np.float32),
+            np.array([[0, 1, 2]], dtype=np.int64),
+        )
+
+        # CE: doc-A wins narrowly over doc-B; doc-C trails far behind to widen
+        # the score range so title-boost (scaled to range) can plausibly flip A/B.
+        # Mirrors the real h10-v2 trace where 7714 had CE 0.95 and 7631 had CE 0.78.
+        reranker = MagicMock()
+        reranker.rerank.return_value = (
+            np.array([[-0.95, -0.78, -0.10]], dtype=np.float32),
+            np.array([[0, 1, 2]], dtype=np.int64),
+        )
+
+        searcher = DocumentCollectionSearcher("col", indexer, persister, reranker=reranker)
+
+        # Default behavior: title_boost runs on `text` (the expanded query).
+        # doc-B's title contains "årsavregning popp pensjonsopptjening" which all overlap
+        # with the expanded query → bigger boost → doc-B incorrectly wins despite weaker CE.
+        expanded = "MELOSYS 7714 årsavregning POPP pensjonsopptjening"
+        result_default = searcher.search(expanded, max_number_of_chunks=3)
+        assert result_default["results"][0]["id"] == "doc-B", \
+            "expanded-query title-boost should incorrectly favor doc-B (the bug being fixed)"
+
+        # With title_boost_query=raw: title-boost only sees raw tokens.
+        # doc-A title contains "MELOSYS 7714" → bigger overlap with raw → doc-A wins.
+        result_fixed = searcher.search(
+            expanded, max_number_of_chunks=3, title_boost_query="MELOSYS-7714"
+        )
+        assert result_fixed["results"][0]["id"] == "doc-A", \
+            "raw-query title-boost should correctly favor the issue-key match"
+
     def test_title_boost_applied_without_reranker(self):
         """Title boost is applied even without reranker (FAISS L2 scores)."""
         mapping = {}
