@@ -537,3 +537,63 @@ class TestSearchSchemaVariants:
         adapter._search_with_tags("test", tags="foo,bar")
         call_params = mock_get.call_args[1]["params"] if "params" in mock_get.call_args[1] else mock_get.call_args[0][1]
         assert call_params["tags"] == "foo,bar"
+
+
+class TestTraceForwarding:
+    @patch.object(adapter, "ALLOWED_COLLECTIONS", None)
+    @patch.object(adapter, "TRACE_DEFAULT", False)
+    @patch.object(adapter, "_api_get")
+    def test_trace_off_omits_param(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"results": []}
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        adapter.search_knowledge("test")
+        params = mock_get.call_args.kwargs["params"]
+        assert "trace" not in params
+
+    @patch.object(adapter, "ALLOWED_COLLECTIONS", None)
+    @patch.object(adapter, "TRACE_DEFAULT", True)
+    @patch.object(adapter, "_api_get")
+    def test_trace_on_forwards_param(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"results": [], "trace": {"schemaVersion": 1}}
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        adapter.search_knowledge("test")
+        params = mock_get.call_args.kwargs["params"]
+        assert params["trace"] == "true"
+
+    @patch.object(adapter, "ALLOWED_COLLECTIONS", None)
+    @patch.object(adapter, "TRACE_DEFAULT", True)
+    @patch.object(adapter, "_api_get")
+    def test_trace_appended_as_fenced_block(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "results": [{
+                "collection": "c", "id": "d1", "title": "T", "url": "u",
+                "matchedChunks": [{"content": "x"}],
+            }],
+            "trace": {"schemaVersion": 1, "query": {"raw": "test"}},
+        }
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        out = adapter.search_knowledge("test")
+        assert "```huginn-trace" in out
+        assert '"schemaVersion": 1' in out
+        assert out.rstrip().endswith("```")
+
+    @patch.object(adapter, "ALLOWED_COLLECTIONS", None)
+    @patch.object(adapter, "TRACE_DEFAULT", True)
+    @patch.object(adapter, "_api_get")
+    def test_no_trace_block_when_response_has_no_trace(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"results": []}
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        out = adapter.search_knowledge("test")
+        assert "huginn-trace" not in out

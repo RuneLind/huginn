@@ -4,6 +4,8 @@ import numpy as np
 class HybridSearchIndexer:
     """Search-time wrapper combining FAISS and BM25 results via Reciprocal Rank Fusion."""
 
+    supports_breakdown = True
+
     def __init__(self, faiss_indexer, bm25_indexer, rrf_k=60):
         self.faiss_indexer = faiss_indexer
         self.bm25_indexer = bm25_indexer
@@ -12,7 +14,7 @@ class HybridSearchIndexer:
     def get_name(self):
         return "hybrid_FAISS_BM25"
 
-    def search(self, text, number_of_results=10):
+    def search(self, text, number_of_results=10, return_breakdown=False):
         # Fetch more candidates from each retriever to improve fusion quality
         fetch_k = number_of_results * 3
 
@@ -21,28 +23,46 @@ class HybridSearchIndexer:
 
         # Build RRF score map: score = sum(1 / (k + rank)) across retrievers
         rrf_scores = {}
+        faiss_breakdown = []
+        bm25_breakdown = []
 
         for rank, doc_id in enumerate(faiss_ids[0]):
             doc_id = int(doc_id)
             if doc_id < 0:
                 continue
             rrf_scores[doc_id] = rrf_scores.get(doc_id, 0) + 1.0 / (self.rrf_k + rank)
+            if return_breakdown:
+                faiss_breakdown.append((doc_id, rank, float(faiss_scores[0][rank])))
 
         for rank, doc_id in enumerate(bm25_ids[0]):
             doc_id = int(doc_id)
             if doc_id < 0:
                 continue
             rrf_scores[doc_id] = rrf_scores.get(doc_id, 0) + 1.0 / (self.rrf_k + rank)
+            if return_breakdown:
+                bm25_breakdown.append((doc_id, rank, float(bm25_scores[0][rank])))
 
         # Sort by RRF score descending, take top-k
         sorted_items = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)[:number_of_results]
 
         if not sorted_items:
-            return np.array([[]], dtype=np.float32), np.array([[]], dtype=np.int64)
+            empty_scores = np.array([[]], dtype=np.float32)
+            empty_ids = np.array([[]], dtype=np.int64)
+            if return_breakdown:
+                return empty_scores, empty_ids, {"faiss": faiss_breakdown, "bm25": bm25_breakdown, "rrf": []}
+            return empty_scores, empty_ids
 
         result_ids = np.array([[item[0] for item in sorted_items]], dtype=np.int64)
         # Negate RRF scores so lower = better (consistent with L2 convention)
         result_scores = np.array([[-item[1] for item in sorted_items]], dtype=np.float32)
+
+        if return_breakdown:
+            rrf_breakdown = [(doc_id, rank, score) for rank, (doc_id, score) in enumerate(sorted_items)]
+            return result_scores, result_ids, {
+                "faiss": faiss_breakdown,
+                "bm25": bm25_breakdown,
+                "rrf": rrf_breakdown,
+            }
 
         return result_scores, result_ids
 

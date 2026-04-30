@@ -13,6 +13,7 @@ Environment:
     KNOWLEDGE_COLLECTIONS   Comma-separated list of allowed collections (default: all)
     KNOWLEDGE_DESCRIPTION   Human-readable description of what this knowledge base contains
 """
+import json
 import logging
 import os
 import sys
@@ -35,6 +36,11 @@ ALLOWED_COLLECTIONS = [
 ] or None  # None means all collections
 
 KNOWLEDGE_DESCRIPTION = os.environ.get("KNOWLEDGE_DESCRIPTION", "")
+
+# When set, ask the API server for a trace and append it to the tool result as a
+# fenced ```huginn-trace block. Orchestrators (e.g. Muninn) parse, store, and strip
+# this block before showing the result to the model.
+TRACE_DEFAULT = os.environ.get("HUGINN_TRACE_DEFAULT", "").lower() in ("1", "true", "yes")
 
 def _detect_feature(allowed_collections: list[str] | None, keyword: str) -> bool:
     """Check if a feature keyword matches any allowed collection name (or all if None)."""
@@ -211,6 +217,8 @@ def _search_knowledge_impl(
             params["git_branch"] = git_branch
         if tags:
             params["tags"] = tags
+        if TRACE_DEFAULT:
+            params["trace"] = "true"
         resp = _api_get("/api/search", params=params)
         resp.raise_for_status()
         data = resp.json()
@@ -275,7 +283,10 @@ def _search_knowledge_impl(
                         chunk_lines.append(f"*{meta_str}*")
             parts.append(header + "\n\n" + "\n\n".join(chunk_lines))
 
-    return "\n\n".join(parts)
+    text = "\n\n".join(parts)
+    if TRACE_DEFAULT and data.get("trace") is not None:
+        text += f"\n\n```huginn-trace\n{json.dumps(data['trace'], ensure_ascii=False)}\n```"
+    return text
 
 
 def get_document(collection: str, doc_id: str) -> str:

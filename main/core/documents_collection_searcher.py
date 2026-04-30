@@ -6,6 +6,9 @@ import time
 
 import numpy as np
 
+from main.core.search_trace import NULL_TRACE
+from main.utils.performance import delta_ms
+
 try:
     from langdetect import detect, DetectorFactory
     DetectorFactory.seed = 0
@@ -14,10 +17,6 @@ except ImportError:
     _langdetect_available = False
 
 logger = logging.getLogger(__name__)
-
-
-def _ms(start, end):
-    return int((end - start) * 1000)
 
 
 class DocumentCollectionSearcher:
@@ -39,37 +38,68 @@ class DocumentCollectionSearcher:
                include_text_content=False,
                include_all_chunks_content=False,
                include_matched_chunks_content=False,
-               skip_reranker=False):
+               skip_reranker=False,
+               trace=None):
         t_start = time.monotonic()
         self._doc_cache = {}
         self._mapping_cache = None
 
-        use_reranker = bool(self.reranker) and not skip_reranker and not self._should_skip_reranker(text)
+        if trace is None:
+            trace = NULL_TRACE
+
+        skip_reason = self._reranker_skip_reason(text, skip_reranker)
+        use_reranker = skip_reason is None
+        if skip_reason:
+            trace.set_reranker_skipped(True, reason=skip_reason)
 
         # Overfetch to compensate for dedup/confidence filtering reducing result count
         dedup_buffer = max(3, max_number_of_chunks // 3)
         effective_chunks = max_number_of_chunks + dedup_buffer
 
-        if use_reranker:
-            fetch_k = int(effective_chunks * 1.5)
-            t0 = time.monotonic()
+        fetch_k = int(effective_chunks * 1.5) if use_reranker else effective_chunks
+        coll_trace = trace.start_collection(
+            name=self.collection_name,
+            indexer=self.indexer.get_name(),
+            fetch_k=fetch_k,
+        )
+
+        capture_breakdown = coll_trace.enabled and getattr(self.indexer, "supports_breakdown", False)
+
+        t0 = time.monotonic()
+        if capture_breakdown:
+            scores, indexes, breakdown = self.indexer.search(text, fetch_k, return_breakdown=True)
+            self._record_index_breakdown(coll_trace, breakdown)
+        else:
             scores, indexes = self.indexer.search(text, fetch_k)
-            t_index = time.monotonic()
+        t_index = time.monotonic()
+
+        if use_reranker:
             chunk_texts = self._get_chunk_texts(indexes)
             t_chunks = time.monotonic()
-            scores, indexes = self.reranker.rerank(text, scores, indexes, chunk_texts, effective_chunks)
+            if coll_trace.enabled:
+                scores, indexes, ce_breakdown = self.reranker.rerank(
+                    text, scores, indexes, chunk_texts, effective_chunks, return_ce_scores=True
+                )
+                for rank, (chunk_id, ce_score) in enumerate(ce_breakdown):
+                    coll_trace.record_stage("ce", chunk_id=chunk_id, rank=rank, score=ce_score)
+            else:
+                scores, indexes = self.reranker.rerank(text, scores, indexes, chunk_texts, effective_chunks)
             t_rerank = time.monotonic()
             logger.info(
                 f"Search '{self.collection_name}' ({len(chunk_texts)} candidates): "
-                f"index={_ms(t0, t_index)}ms, chunks={_ms(t_index, t_chunks)}ms, "
-                f"rerank={_ms(t_chunks, t_rerank)}ms"
+                f"index={delta_ms(t0, t_index)}ms, chunks={delta_ms(t_index, t_chunks)}ms, "
+                f"rerank={delta_ms(t_chunks, t_rerank)}ms"
             )
         else:
-            t0 = time.monotonic()
-            scores, indexes = self.indexer.search(text, effective_chunks)
-            logger.info(f"Search '{self.collection_name}' (no rerank): index={_ms(t0, time.monotonic())}ms")
+            t_chunks = t_index
+            t_rerank = t_index
+            logger.info(f"Search '{self.collection_name}' (no rerank): index={delta_ms(t0, t_index)}ms")
 
-        scores, indexes = self._apply_title_boost(text, scores, indexes)
+        scores, indexes = self._apply_title_boost(text, scores, indexes, coll_trace)
+        t_boost = time.monotonic()
+
+        if coll_trace.enabled:
+            self._record_final_and_annotate(coll_trace, scores, indexes)
 
         results = self.__build_results(scores, indexes, include_text_content, include_all_chunks_content, include_matched_chunks_content)
         if max_number_of_documents:
@@ -82,11 +112,68 @@ class DocumentCollectionSearcher:
             "reranked": use_reranker,
         }
 
+        results_before_filter = len(results)
         if use_reranker and results:
             response = self._apply_confidence_filtering(response)
+        if coll_trace.enabled:
+            filtered = response["results"]
+            best = self._best_chunk_score(filtered[0]) if filtered else None
+            coll_trace.set_confidence(
+                low_confidence=response.get("lowConfidence", False),
+                best_score=best,
+                low_confidence_threshold=self.LOW_CONFIDENCE_THRESHOLD,
+                noise_threshold=self.NOISE_THRESHOLD,
+                filtered_count=results_before_filter - len(filtered),
+            )
 
-        logger.info(f"Search '{self.collection_name}' total: {_ms(t_start, time.monotonic())}ms")
+        t_end = time.monotonic()
+        coll_trace.set_timings(
+            indexFetch=delta_ms(t0, t_index),
+            chunkLoad=delta_ms(t_index, t_chunks),
+            rerank=delta_ms(t_chunks, t_rerank),
+            titleBoost=delta_ms(t_rerank, t_boost),
+            assembly=delta_ms(t_boost, t_end),
+            total=delta_ms(t_start, t_end),
+        )
+
+        logger.info(f"Search '{self.collection_name}' total: {delta_ms(t_start, t_end)}ms")
         return response
+
+    def _reranker_skip_reason(self, text, caller_skip_reranker):
+        if not self.reranker:
+            return "no_reranker"
+        if caller_skip_reranker:
+            return "caller_opted_out"
+        if self._should_skip_reranker(text):
+            return "english_query"
+        return None
+
+    @staticmethod
+    def _doc_title_from_entry(entry):
+        doc_path = entry.get("documentPath", "")
+        return doc_path.rsplit("/", 1)[-1].replace(".json", "")
+
+    @staticmethod
+    def _record_index_breakdown(coll_trace, breakdown):
+        for chunk_id, rank, score in breakdown.get("faiss", []):
+            coll_trace.record_stage("faiss", chunk_id=chunk_id, rank=rank, score=score)
+        for chunk_id, rank, score in breakdown.get("bm25", []):
+            coll_trace.record_stage("bm25", chunk_id=chunk_id, rank=rank, score=score)
+        for chunk_id, rank, score in breakdown.get("rrf", []):
+            coll_trace.record_stage("rrf", chunk_id=chunk_id, rank=rank, score=score)
+
+    def _record_final_and_annotate(self, coll_trace, scores, indexes):
+        mapping = self._load_mapping()
+        for rank, chunk_id in enumerate(indexes[0]):
+            cid = int(chunk_id)
+            coll_trace.record_stage("final", chunk_id=cid, rank=rank, score=float(scores[0][rank]))
+            entry = mapping.get(str(cid))
+            if entry:
+                coll_trace.annotate_candidate(
+                    cid,
+                    document_id=entry["documentId"],
+                    doc_title=self._doc_title_from_entry(entry),
+                )
 
     def _apply_confidence_filtering(self, response):
         results = response["results"]
@@ -108,7 +195,7 @@ class DocumentCollectionSearcher:
     def _best_chunk_score(doc):
         return min(chunk["score"] for chunk in doc["matchedChunks"])
 
-    def _apply_title_boost(self, query, scores, indexes):
+    def _apply_title_boost(self, query, scores, indexes, coll_trace=None):
         """Boost scores for documents whose title matches query terms.
 
         Boost magnitude scales with the score spread so it works across
@@ -137,15 +224,18 @@ class DocumentCollectionSearcher:
                 continue
             doc_id = entry["documentId"]
             if doc_id not in doc_boosts:
-                # Extract title from documentPath (last component without extension)
-                doc_path = entry.get("documentPath", "")
-                title = doc_path.rsplit("/", 1)[-1].replace(".json", "").replace("-", " ").replace("_", " ")
+                title = self._doc_title_from_entry(entry).replace("-", " ").replace("_", " ")
                 title_tokens = set(re.findall(r'\w+', title.lower()))
                 overlap = len(query_tokens & title_tokens)
                 doc_boosts[doc_id] = max(boost_per_term * overlap, boost_cap) if overlap > 0 else 0.0
             if doc_boosts[doc_id] != 0.0:
                 boosted_scores[i] += doc_boosts[doc_id]
                 any_boost = True
+
+        if coll_trace is not None and coll_trace.enabled:
+            for doc_id, delta in doc_boosts.items():
+                if delta != 0.0:
+                    coll_trace.record_title_boost(doc_id, delta)
 
         if not any_boost:
             return scores, indexes

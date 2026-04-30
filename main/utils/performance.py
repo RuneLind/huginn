@@ -1,6 +1,12 @@
 import time
 import logging
 
+
+def delta_ms(start, end):
+    """Milliseconds between two `time.monotonic()` samples, rounded down."""
+    return int((end - start) * 1000)
+
+
 def execute_and_measure_duration(func):
     start_time = time.time()
 

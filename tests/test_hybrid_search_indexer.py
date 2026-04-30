@@ -1,25 +1,5 @@
-import numpy as np
-
 from main.indexes.indexers.hybrid_search_indexer import HybridSearchIndexer
-
-
-class FakeIndexer:
-    """Minimal indexer stub for testing hybrid search."""
-
-    def __init__(self, results):
-        """results: list of (id, score) tuples, sorted by relevance."""
-        self._results = results
-
-    def search(self, text, number_of_results=10):
-        items = self._results[:number_of_results]
-        if not items:
-            return np.array([[]], dtype=np.float32), np.array([[]], dtype=np.int64)
-        ids = np.array([[r[0] for r in items]], dtype=np.int64)
-        scores = np.array([[r[1] for r in items]], dtype=np.float32)
-        return scores, ids
-
-    def get_size(self):
-        return len(self._results)
+from tests.conftest import FakeIndexer
 
 
 class TestHybridSearch:

@@ -32,6 +32,7 @@ import uvicorn
 from main.persisters.disk_persister import DiskPersister
 from main.indexes.indexer_factory import detect_faiss_index, create_embedder, load_search_indexer, create_reranker
 from main.core.documents_collection_searcher import DocumentCollectionSearcher
+from main.core.search_trace import create_trace
 from main.sources.notion.notion_document_reader import NotionDocumentReader
 from main.utils.logger import setup_root_logger
 from main.utils.filename import sanitize_filename
@@ -344,6 +345,7 @@ def search(
     project: str = Query(None, description="Filter by project metadata"),
     git_branch: str = Query(None, description="Filter by gitBranch metadata"),
     tags: str = Query(None, description="Filter by tags (comma-separated, matches any)"),
+    trace: bool = Query(False, description="Return per-stage search trace (entities, scores, timings) for debugging"),
 ):
     if collection:
         for c in collection:
@@ -357,17 +359,35 @@ def search(
     # Reranking: explicit param > brief default (skip for brief) > always rerank
     skip_reranker = not rerank if rerank is not None else brief
 
+    trace_enabled = trace or os.environ.get("HUGINN_TRACE_DEFAULT", "").lower() in ("1", "true", "yes")
+    trace_obj = create_trace(trace_enabled)
+    trace_obj.set_query_raw(q)
+
     # Graph-enhanced search: entity detection + query expansion
     search_q = q
     graph_answer = None
     detected_entities = []
     if store.graph:
-        detected_entities = store.graph.detect_entities(q)
+        if trace_enabled:
+            entity_pairs = store.graph.detect_entities(q, with_spans=True)
+            detected_entities = [eid for eid, _ in entity_pairs]
+            for eid, span in entity_pairs:
+                node = store.graph.nodes.get(eid, {})
+                trace_obj.add_detected_entity(
+                    entity_id=eid,
+                    entity_type=node.get("type", ""),
+                    label=node.get("label", ""),
+                    matched_span=span,
+                )
+        else:
+            detected_entities = store.graph.detect_entities(q)
         if detected_entities:
             graph_answer = store.graph.answer_graph_query(detected_entities, q)
+            trace_obj.set_graph_answered(graph_answer is not None)
             expansion_terms = store.graph.get_expansion_terms(detected_entities)[:5]
             if expansion_terms:
                 search_q = q + " " + " ".join(expansion_terms)
+                trace_obj.set_expansion(search_q, expansion_terms)
                 logger.debug(f"Graph-expanded query: {search_q[:200]}")
 
     all_results = []
@@ -379,6 +399,7 @@ def search(
             max_number_of_documents=limit * (3 if has_filters else 1),
             include_matched_chunks_content=True,
             skip_reranker=skip_reranker,
+            trace=trace_obj,
         )
         if search_result.get("lowConfidence"):
             any_low_confidence = True
@@ -519,6 +540,8 @@ def search(
         response["graph_answer"] = graph_answer
     if any_low_confidence:
         response["lowConfidence"] = True
+    if trace_enabled:
+        response["trace"] = trace_obj.to_dict()
     return response
 
 
