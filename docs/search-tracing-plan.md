@@ -151,7 +151,23 @@ The MCP adapters embed the trace differently depending on transport:
 
 Both adapters check the same env var `HUGINN_TRACE_DEFAULT=1`. Set it on the MCP server's environment when Muninn launches the stdio process.
 
-**Recommended Muninn behavior**: parse out the trace blob from the tool result, store it on the tool span (`attributes.searchTrace` is the convention) so the existing waterfall span-detail viewer renders it, and **strip the trace from the text the LLM sees** so it doesn't pollute context.
+> **Footgun:** if `HUGINN_TRACE_DEFAULT=1` is set but the orchestrator isn't wired to strip the block, the full trace (50–150 KB worst case) lands in the LLM's context on every search. Ship the orchestrator-side parser before flipping the env on.
+
+### Wire format (parser-grade)
+
+For the HTTP-wrapper adapter, the trace is the final block of the tool result text. Parse with:
+
+- regex (DOTALL): `\n*```huginn-trace\n(.+?)\n```\s*$`
+- the captured group is single-line JSON (`json.dumps(..., ensure_ascii=False)` — no `indent`)
+- fence opener is exactly `` ```huginn-trace `` (no surrounding spaces, no language alias)
+- the block always appears at end-of-text — never embedded mid-result
+- absent block → `data` had no `trace` field; treat as no-trace, not as a parse error
+
+For the in-process adapter, the tool result is JSON; check for a top-level `trace` key and peel it off.
+
+### Recommended Muninn behavior
+
+Parse out the trace blob from the tool result, store it on the tool span (`attributes.searchTrace` is the convention) so the existing waterfall span-detail viewer renders it, and **strip the trace from the text the LLM sees** so it doesn't pollute context.
 
 The existing span-detail viewer at `src/dashboard/views/components/traces-waterfall.ts` already dumps attributes as JSON, so once the trace is in `attributes.searchTrace`, operators can inspect it immediately. A custom renderer keyed on `searchTrace.schemaVersion === 1` is a Phase 2 polish.
 

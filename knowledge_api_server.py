@@ -33,6 +33,7 @@ from main.persisters.disk_persister import DiskPersister
 from main.indexes.indexer_factory import detect_faiss_index, create_embedder, load_search_indexer, create_reranker
 from main.core.documents_collection_searcher import DocumentCollectionSearcher
 from main.core.search_trace import create_trace
+from main.utils.env import env_bool
 from main.sources.notion.notion_document_reader import NotionDocumentReader
 from main.utils.logger import setup_root_logger
 from main.utils.filename import sanitize_filename
@@ -359,7 +360,7 @@ def search(
     # Reranking: explicit param > brief default (skip for brief) > always rerank
     skip_reranker = not rerank if rerank is not None else brief
 
-    trace_enabled = trace or os.environ.get("HUGINN_TRACE_DEFAULT", "").lower() in ("1", "true", "yes")
+    trace_enabled = trace or env_bool("HUGINN_TRACE_DEFAULT")
     trace_obj = create_trace(trace_enabled)
     trace_obj.set_query_raw(q)
 

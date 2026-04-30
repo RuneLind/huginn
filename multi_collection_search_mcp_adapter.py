@@ -7,10 +7,15 @@ Usage:
     uv run multi_collection_search_mcp_adapter.py \
         --collections my-confluence my-jira my-docs \
         --maxNumberOfChunks 50
+
+Environment:
+    HUGINN_TRACE_DEFAULT    "1"/"true"/"yes" to attach a per-search trace under
+                            result.trace in the JSON tool result. Only enable when
+                            an orchestrator (e.g. Muninn) strips the field before
+                            the LLM sees it. See docs/search-tracing-plan.md.
 """
 import json
 import argparse
-import os
 import sys
 import logging
 
@@ -20,14 +25,15 @@ from main.persisters.disk_persister import DiskPersister
 from main.indexes.indexer_factory import detect_faiss_index, create_embedder, load_search_indexer, create_reranker
 from main.core.documents_collection_searcher import DocumentCollectionSearcher
 from main.core.search_trace import create_trace
+from main.utils.env import env_bool
 from main.utils.logger import setup_root_logger
 
 setup_root_logger()
 
-# When set, attach a per-search trace to the JSON tool result. Orchestrators (e.g.
-# Muninn) read result.trace, store it for the inspector UI, and strip it before
-# showing the result to the model.
-TRACE_DEFAULT = os.environ.get("HUGINN_TRACE_DEFAULT", "").lower() in ("1", "true", "yes")
+# Only enable when an orchestrator (e.g. Muninn) is wired to strip the trace
+# field before the LLM sees it — otherwise the full trace lands in model context.
+# See docs/search-tracing-plan.md.
+TRACE_DEFAULT = env_bool("HUGINN_TRACE_DEFAULT")
 
 # Redirect logging to stderr
 try:
