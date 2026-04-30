@@ -191,20 +191,19 @@ class TestConfidenceFiltering:
         assert len(result["results"]) == 3
 
     def test_noise_results_filtered_out(self):
-        """Results above noise threshold (-0.01) are filtered."""
+        """Results above noise threshold (-0.10) are filtered."""
         searcher = self._setup([-0.5, -0.008, -0.002])
         result = searcher.search("test", max_number_of_chunks=3)
         assert len(result["results"]) == 1
         assert result["results"][0]["id"] == "doc-A"
         assert "lowConfidence" not in result
 
-    def test_low_confidence_flagged(self):
-        """Best result above low-confidence threshold → flag set."""
-        searcher = self._setup([-0.05, -0.008, -0.002])
+    def test_results_near_noise_threshold_filtered(self):
+        """Results just above NOISE_THRESHOLD (-0.10) are filtered, even if close."""
+        searcher = self._setup([-0.099, -0.05, -0.01])
         result = searcher.search("test", max_number_of_chunks=3)
+        assert len(result["results"]) == 0
         assert result["lowConfidence"] is True
-        # doc-A kept (-0.05 < -0.01), doc-B and doc-C filtered
-        assert len(result["results"]) == 1
 
     def test_all_noise_returns_empty_with_flag(self):
         """All results are noise → empty results with lowConfidence."""
