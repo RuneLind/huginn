@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 class DocumentCollectionSearcher:
     # Cross-encoder reranker score thresholds (negative scores, more negative = more relevant)
     LOW_CONFIDENCE_THRESHOLD = -0.10   # Best result above this → flag response
-    NOISE_THRESHOLD = -0.01            # Individual results above this → filter out
+    NOISE_THRESHOLD = -0.10            # Individual results above this → filter out
 
     def __init__(self, collection_name, indexer, persister, reranker=None):
         self.collection_name = collection_name
