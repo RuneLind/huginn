@@ -15,6 +15,13 @@ Environment:
     HUGINN_TRACE_DEFAULT    "1"/"true"/"yes" to embed a per-search trace in tool results.
                             Only enable when an orchestrator (e.g. Muninn) strips the trace
                             block before the LLM sees it. See docs/search-tracing-plan.md.
+    HUGINN_TRACE_POINTER    "1"/"true"/"yes" to emit a `huginn-trace-url: <url>` pointer
+                            line instead of inlining the full trace JSON. The orchestrator
+                            fetches the trace via that URL (TTL ~5 min on the server side).
+                            Avoids blowing past MCP-stdio output-size limits when traces are
+                            large. URL is built from KNOWLEDGE_API_URL so the pointer is
+                            self-contained — orchestrator does not need to know Huginn's
+                            location separately.
 """
 import json
 import logging
@@ -25,7 +32,7 @@ from pathlib import Path
 import httpx
 from mcp.server.fastmcp import FastMCP
 
-from main.utils.env import env_bool
+from main.core.trace_store import any_trace_enabled
 
 # Redirect logging to stderr (stdout is reserved for MCP JSON-RPC)
 logging.basicConfig(
@@ -43,9 +50,9 @@ ALLOWED_COLLECTIONS = [
 KNOWLEDGE_DESCRIPTION = os.environ.get("KNOWLEDGE_DESCRIPTION", "")
 
 # Only enable when an orchestrator (e.g. Muninn) is wired to strip the trace
-# block before the LLM sees it — otherwise the full trace lands in model context.
-# See docs/search-tracing-plan.md.
-TRACE_DEFAULT = env_bool("HUGINN_TRACE_DEFAULT")
+# block (or pointer URL) before the LLM sees it — otherwise the full trace
+# lands in model context. See docs/search-tracing-plan.md.
+TRACE_DEFAULT = any_trace_enabled()
 
 def _detect_feature(allowed_collections: list[str] | None, keyword: str) -> bool:
     """Check if a feature keyword matches any allowed collection name (or all if None)."""
@@ -289,8 +296,12 @@ def _search_knowledge_impl(
             parts.append(header + "\n\n" + "\n\n".join(chunk_lines))
 
     text = "\n\n".join(parts)
-    if TRACE_DEFAULT and data.get("trace") is not None:
-        text += f"\n\n```huginn-trace\n{json.dumps(data['trace'], ensure_ascii=False)}\n```"
+    if TRACE_DEFAULT:
+        trace_id = data.get("traceId")
+        if trace_id:
+            text += f"\n\nhuginn-trace-url: {API_URL}/api/trace/{trace_id}\n"
+        elif data.get("trace") is not None:
+            text += f"\n\n```huginn-trace\n{json.dumps(data['trace'], ensure_ascii=False)}\n```"
     return text
 
 

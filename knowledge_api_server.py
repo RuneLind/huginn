@@ -33,7 +33,7 @@ from main.persisters.disk_persister import DiskPersister
 from main.indexes.indexer_factory import detect_faiss_index, create_embedder, load_search_indexer, create_reranker
 from main.core.documents_collection_searcher import DocumentCollectionSearcher
 from main.core.search_trace import create_trace
-from main.utils.env import env_bool
+from main.core.trace_store import any_trace_enabled, default_trace_store, pointer_mode_enabled
 from main.sources.notion.notion_document_reader import NotionDocumentReader
 from main.utils.logger import setup_root_logger
 from main.utils.filename import sanitize_filename
@@ -360,7 +360,7 @@ def search(
     # Reranking: explicit param > brief default (skip for brief) > always rerank
     skip_reranker = not rerank if rerank is not None else brief
 
-    trace_enabled = trace or env_bool("HUGINN_TRACE_DEFAULT")
+    trace_enabled = trace or any_trace_enabled()
     trace_obj = create_trace(trace_enabled)
     trace_obj.set_query_raw(q)
 
@@ -543,8 +543,21 @@ def search(
     if any_low_confidence:
         response["lowConfidence"] = True
     if trace_enabled:
-        response["trace"] = trace_obj.to_dict()
+        trace_dict = trace_obj.to_dict()
+        if pointer_mode_enabled():
+            response["traceId"] = default_trace_store().put(trace_dict)
+        else:
+            response["trace"] = trace_dict
     return response
+
+
+@app.get("/api/trace/{trace_id}")
+def get_search_trace(trace_id: str):
+    """Fetch a stored search trace by ID. 404 once expired (TTL ~5 min)."""
+    trace = default_trace_store().get(trace_id)
+    if trace is None:
+        raise HTTPException(status_code=404, detail="trace not found or expired")
+    return trace
 
 
 @app.get("/api/graph/{node_id:path}")
