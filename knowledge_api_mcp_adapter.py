@@ -15,6 +15,12 @@ Environment:
     HUGINN_TRACE_DEFAULT    "1"/"true"/"yes" to embed a per-search trace in tool results.
                             Only enable when an orchestrator (e.g. Muninn) strips the trace
                             block before the LLM sees it. See docs/search-tracing-plan.md.
+    HUGINN_TRACE_POINTER    "1"/"true"/"yes" to emit a `huginn-trace-id: <id>` pointer
+                            line instead of inlining the full trace JSON. The orchestrator
+                            fetches the trace via `GET /api/trace/<id>` (TTL ~5 min). Avoids
+                            blowing past MCP-stdio output-size limits when traces are large.
+                            Requires HUGINN_TRACE_DEFAULT=1 (or per-call ?trace=true) on the
+                            API server side too.
 """
 import json
 import logging
@@ -45,7 +51,10 @@ KNOWLEDGE_DESCRIPTION = os.environ.get("KNOWLEDGE_DESCRIPTION", "")
 # Only enable when an orchestrator (e.g. Muninn) is wired to strip the trace
 # block before the LLM sees it — otherwise the full trace lands in model context.
 # See docs/search-tracing-plan.md.
-TRACE_DEFAULT = env_bool("HUGINN_TRACE_DEFAULT")
+# `HUGINN_TRACE_POINTER` implies `HUGINN_TRACE_DEFAULT` from the adapter's POV: in
+# pointer mode the server needs to know it should record a trace, which it only
+# does when the request carries `?trace=true`.
+TRACE_DEFAULT = env_bool("HUGINN_TRACE_DEFAULT") or env_bool("HUGINN_TRACE_POINTER")
 
 def _detect_feature(allowed_collections: list[str] | None, keyword: str) -> bool:
     """Check if a feature keyword matches any allowed collection name (or all if None)."""
@@ -289,8 +298,12 @@ def _search_knowledge_impl(
             parts.append(header + "\n\n" + "\n\n".join(chunk_lines))
 
     text = "\n\n".join(parts)
-    if TRACE_DEFAULT and data.get("trace") is not None:
-        text += f"\n\n```huginn-trace\n{json.dumps(data['trace'], ensure_ascii=False)}\n```"
+    if TRACE_DEFAULT:
+        trace_id = data.get("traceId")
+        if trace_id:
+            text += f"\n\nhuginn-trace-id: {trace_id}\n"
+        elif data.get("trace") is not None:
+            text += f"\n\n```huginn-trace\n{json.dumps(data['trace'], ensure_ascii=False)}\n```"
     return text
 
 

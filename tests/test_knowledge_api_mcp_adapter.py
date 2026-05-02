@@ -597,3 +597,42 @@ class TestTraceForwarding:
 
         out = adapter.search_knowledge("test")
         assert "huginn-trace" not in out
+
+    @patch.object(adapter, "ALLOWED_COLLECTIONS", None)
+    @patch.object(adapter, "TRACE_DEFAULT", True)
+    @patch.object(adapter, "_api_get")
+    def test_pointer_line_emitted_when_response_has_trace_id(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "results": [{
+                "collection": "c", "id": "d1", "title": "T", "url": "u",
+                "matchedChunks": [{"content": "x"}],
+            }],
+            "traceId": "a3f8b21c4e9d0a55",
+        }
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        out = adapter.search_knowledge("test")
+        assert "huginn-trace-id: a3f8b21c4e9d0a55" in out
+        assert "```huginn-trace" not in out
+
+    @patch.object(adapter, "ALLOWED_COLLECTIONS", None)
+    @patch.object(adapter, "TRACE_DEFAULT", True)
+    @patch.object(adapter, "_api_get")
+    def test_pointer_takes_precedence_over_inline_trace(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "results": [{
+                "collection": "c", "id": "d1", "title": "T", "url": "u",
+                "matchedChunks": [{"content": "x"}],
+            }],
+            "trace": {"schemaVersion": 1, "query": {"raw": "test"}},
+            "traceId": "a3f8b21c4e9d0a55",
+        }
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        out = adapter.search_knowledge("test")
+        assert "huginn-trace-id: a3f8b21c4e9d0a55" in out
+        assert "```huginn-trace" not in out

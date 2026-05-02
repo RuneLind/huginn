@@ -1,8 +1,8 @@
 # Search Tracing — Plan
 
-Status: Phase 1 implemented (opt-in flat trace blob); see "Rollout" for next steps
+Status: Phase 1 implemented (opt-in flat trace blob); Phase 2 pointer-mode added (opt-in via `HUGINN_TRACE_POINTER`); see "Rollout" for next steps
 Author: Rune (drafted with Claude)
-Last updated: 2026-04-29
+Last updated: 2026-05-02
 
 ## Why
 
@@ -90,7 +90,7 @@ A single optional `trace` object on the `/api/search` response. Field names use 
 
 Notes:
 
-- `candidates` is bounded — we only emit chunks that survived to at least the RRF stage, capped at `fetchK` (~25 for default queries). Worst case ~3 KB per collection.
+- `candidates` carries every chunk seen by any stage (FAISS, BM25, RRF, CE, final). The recorder de-dupes by `chunkId`, but `HybridSearchIndexer.search()` internally over-fetches `number_of_results * 3` from each of FAISS and BM25 — so for a request with `fetchK=60` the trace can hold ~360 candidate entries per collection (after FAISS↔BM25 overlap, ~250 in practice). Each candidate is ~400 bytes, so a 3-collection search produces ~150–200 KB of trace JSON. The earlier "~3 KB per collection" estimate was based on the user-facing `fetchK`, not the indexer-internal over-fetch — it was wrong. See "Pointer mode" below for the keep-it-out-of-tool-result fix.
 - `stages.<x>.score` is the raw value from that stage in the convention each stage uses (FAISS L2: lower better, BM25: higher better, RRF: negated lower better, CE: cross-encoder logit higher better). `stages.final.score` is the post-title-boost value going into result assembly.
 - `dropReason` is one of: `"noise"`, `"dedup"`, `"missingDoc"`, `"perDocCap"`, `"metadataFilter"`, `null`.
 - `schemaVersion` so Muninn can tolerate field changes without breaking.
@@ -100,8 +100,39 @@ Notes:
 - HTTP: new query param `trace=true` (default false).
 - MCP: new optional bool argument `trace` on the `search_knowledge` tool.
 - Env: `HUGINN_TRACE_DEFAULT=true` to flip the default for a dev server (so local debugging doesn't need to set it every call).
+- Env: `HUGINN_TRACE_POINTER=true` enables Phase-2 pointer mode (server returns a short ID, orchestrator fetches the trace by ID — see "Pointer mode" below). Implies tracing is on; no need to also set `HUGINN_TRACE_DEFAULT`.
+- Env: `HUGINN_TRACE_TTL_SECONDS=300` (default) — how long pointer-mode traces live in the in-memory store before they are evicted.
 
 When `trace=false`, zero overhead — the candidate-tracking dict isn't allocated.
+
+## Pointer mode (Phase 2)
+
+The fenced-block delivery (Phase 1) put the full trace JSON inside the MCP tool result text. Once trace size grew past ~25 KB, Claude CLI's `MAX_MCP_OUTPUT_TOKENS` divert kicked in: the runtime spilled the whole tool result to disk and handed the model a 1 KB error placeholder instead. The model never saw the search results, and answers regressed to confabulation.
+
+`HUGINN_TRACE_POINTER=1` switches `/api/search` and the HTTP-wrapper MCP adapter to a pointer pattern that keeps the tool result small.
+
+**Server side (`/api/search`):**
+- Records the trace as before.
+- Stores the trace dict in an in-memory TTL store (`main/core/trace_store.py`, default 300 s).
+- Response body carries `traceId: "<16-hex>"` instead of `trace: {...}`.
+- New endpoint `GET /api/trace/<id>` returns the same JSON shape that the inline `trace` field used to. 404 once expired or unknown.
+
+**Adapter side (`knowledge_api_mcp_adapter.py`):**
+- Forwards `?trace=true` whenever either `HUGINN_TRACE_DEFAULT` or `HUGINN_TRACE_POINTER` is set.
+- When the response carries `traceId`, the adapter appends a single line:
+  ```
+  
+  huginn-trace-id: a3f8b21c4e9d0a55
+  ```
+  (blank line, fixed prefix, 16 hex chars, trailing newline) — `~50` bytes regardless of trace size. The orchestrator parses the line, fetches the trace via `GET /api/trace/<id>`, and stores it on the tool span as before.
+- Falls back to the Phase-1 fenced block when the response carries `trace` but no `traceId` — both modes can run side-by-side during a transition.
+
+**Trace ID format:** `secrets.token_hex(8)` → 16 lowercase hex chars. Collision-free within a TTL window without UUID overhead.
+
+**Failure modes (orchestrator side):**
+- 404 / network error / Huginn down → orchestrator stores the span without `searchTrace`. Tool result text is still intact (the pointer line is just discarded), so the user-visible flow never depends on trace fetch succeeding. Trace fetch is pure observability.
+
+**Out of scope here:** `multi_collection_search_mcp_adapter.py` is in-process and has no HTTP surface, so pointer mode does not apply. It keeps the Phase-1 inline JSON `trace` field. If we later need pointer mode there, a sidecar HTTP endpoint inside the adapter is the path.
 
 ## Insertion points
 
@@ -174,9 +205,9 @@ The existing span-detail viewer at `src/dashboard/views/components/traces-waterf
 ## Rollout
 
 1. ✅ **Land the recorder plumbing + schema, gated off by default.** Done — `main/core/search_trace.py`, threaded through `documents_collection_searcher.py`, `hybrid_search_indexer.py`, `cross_encoder_reranker.py`, `knowledge_graph.py`, exposed via `?trace=true` on `/api/search`. 506 tests pass; null path is a no-op singleton. *Open: per-chunk drop reasons (`noise`, `dedup`, `metadataFilter`) not yet recorded — `kept` defaults true. Listed under future improvements.*
-2. Flip `HUGINN_TRACE_DEFAULT=true` on the local dev API server only.
-3. Use it for two weeks on real ERA / EØS queries; iterate on the schema (it's cheap, schemaVersion=1).
-4. Once stable, point Muninn's Huginn tool wrapper at `trace=true` so every Muninn → Huginn search is inspectable in the waterfall.
+2. ✅ **Pointer mode (Phase 2).** Done — `main/core/trace_store.py`, `GET /api/trace/<id>`, `HUGINN_TRACE_POINTER=1` switches `/api/search` and `knowledge_api_mcp_adapter.py` to emit a `huginn-trace-id: <id>` line instead of inlining the trace JSON. Keeps tool-result text under MCP-stdio limits. Phase-1 fenced-block fallback retained for transition. 527 tests pass.
+3. Flip `HUGINN_TRACE_POINTER=true` on the local dev API server, pilot on a single bot (jarvis is simplest — no parallel traffic), verify in `/traces` waterfall that `searchTrace` still populates via fetch and tool-result-on-span is `~22 KB` instead of `232 KB`.
+4. Roll out to remaining bots (capra, melosys) once jarvis is stable for two weeks. Drop the Phase-1 fence path from the adapter and orchestrator once all bots are on pointer mode.
 
 ## Validation
 

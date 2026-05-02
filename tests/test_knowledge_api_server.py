@@ -244,6 +244,21 @@ class TestExtractNotionTitle:
         assert NotionDocumentReader.get_page_title(page) == "Part 1 Part 2"
 
 
+class TestTraceEndpoint:
+    def test_get_trace_unknown_id_404(self):
+        client = TestClient(app)
+        response = client.get("/api/trace/0000000000000000")
+        assert response.status_code == 404
+
+    def test_get_trace_returns_stored_payload(self):
+        from main.core.trace_store import default_trace_store
+        tid = default_trace_store().put({"schemaVersion": 1, "query": {"raw": "hi"}})
+        client = TestClient(app)
+        response = client.get(f"/api/trace/{tid}")
+        assert response.status_code == 200
+        assert response.json() == {"schemaVersion": 1, "query": {"raw": "hi"}}
+
+
 class TestPathTraversal:
     def test_rejects_dot_dot(self):
         # Even if FastAPI normalizes the path, the handler checks for ".."
