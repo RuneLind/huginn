@@ -122,12 +122,12 @@ The fenced-block delivery (Phase 1) put the full trace JSON inside the MCP tool 
 - When the response carries `traceId`, the adapter appends a single line:
   ```
   
-  huginn-trace-id: a3f8b21c4e9d0a55
+  huginn-trace-url: http://localhost:8321/api/trace/a3f8b21c4e9d0a55
   ```
-  (blank line, fixed prefix, 16 hex chars, trailing newline) — `~50` bytes regardless of trace size. The orchestrator parses the line, fetches the trace via `GET /api/trace/<id>`, and stores it on the tool span as before.
+  (blank line, fixed prefix, full fetch URL, trailing newline) — `~80` bytes regardless of trace size. The URL is built from `KNOWLEDGE_API_URL` (the env the adapter already uses to reach the API server), so the pointer is self-contained: the orchestrator does not need to know Huginn's location separately. It parses the URL, fetches the trace, and stores it on the tool span as before.
 - Falls back to the Phase-1 fenced block when the response carries `trace` but no `traceId` — both modes can run side-by-side during a transition.
 
-**Trace ID format:** `secrets.token_hex(8)` → 16 lowercase hex chars. Collision-free within a TTL window without UUID overhead.
+**Trace ID format:** `secrets.token_hex(8)` → 16 lowercase hex chars. Collision-free within a TTL window without UUID overhead. The URL form embeds this id at the end of the path.
 
 **Failure modes (orchestrator side):**
 - 404 / network error / Huginn down → orchestrator stores the span without `searchTrace`. Tool result text is still intact (the pointer line is just discarded), so the user-visible flow never depends on trace fetch succeeding. Trace fetch is pure observability.

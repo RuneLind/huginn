@@ -15,12 +15,13 @@ Environment:
     HUGINN_TRACE_DEFAULT    "1"/"true"/"yes" to embed a per-search trace in tool results.
                             Only enable when an orchestrator (e.g. Muninn) strips the trace
                             block before the LLM sees it. See docs/search-tracing-plan.md.
-    HUGINN_TRACE_POINTER    "1"/"true"/"yes" to emit a `huginn-trace-id: <id>` pointer
+    HUGINN_TRACE_POINTER    "1"/"true"/"yes" to emit a `huginn-trace-url: <url>` pointer
                             line instead of inlining the full trace JSON. The orchestrator
-                            fetches the trace via `GET /api/trace/<id>` (TTL ~5 min). Avoids
-                            blowing past MCP-stdio output-size limits when traces are large.
-                            Requires HUGINN_TRACE_DEFAULT=1 (or per-call ?trace=true) on the
-                            API server side too.
+                            fetches the trace via that URL (TTL ~5 min on the server side).
+                            Avoids blowing past MCP-stdio output-size limits when traces are
+                            large. URL is built from KNOWLEDGE_API_URL so the pointer is
+                            self-contained — orchestrator does not need to know Huginn's
+                            location separately.
 """
 import json
 import logging
@@ -301,7 +302,7 @@ def _search_knowledge_impl(
     if TRACE_DEFAULT:
         trace_id = data.get("traceId")
         if trace_id:
-            text += f"\n\nhuginn-trace-id: {trace_id}\n"
+            text += f"\n\nhuginn-trace-url: {API_URL}/api/trace/{trace_id}\n"
         elif data.get("trace") is not None:
             text += f"\n\n```huginn-trace\n{json.dumps(data['trace'], ensure_ascii=False)}\n```"
     return text

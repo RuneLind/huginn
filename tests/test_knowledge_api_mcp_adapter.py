@@ -600,6 +600,7 @@ class TestTraceForwarding:
 
     @patch.object(adapter, "ALLOWED_COLLECTIONS", None)
     @patch.object(adapter, "TRACE_DEFAULT", True)
+    @patch.object(adapter, "API_URL", "http://localhost:8321")
     @patch.object(adapter, "_api_get")
     def test_pointer_line_emitted_when_response_has_trace_id(self, mock_get):
         mock_resp = MagicMock()
@@ -614,11 +615,32 @@ class TestTraceForwarding:
         mock_get.return_value = mock_resp
 
         out = adapter.search_knowledge("test")
-        assert "huginn-trace-id: a3f8b21c4e9d0a55" in out
+        assert "huginn-trace-url: http://localhost:8321/api/trace/a3f8b21c4e9d0a55" in out
+        assert "huginn-trace-id:" not in out
         assert "```huginn-trace" not in out
 
     @patch.object(adapter, "ALLOWED_COLLECTIONS", None)
     @patch.object(adapter, "TRACE_DEFAULT", True)
+    @patch.object(adapter, "API_URL", "http://example.invalid:9000")
+    @patch.object(adapter, "_api_get")
+    def test_pointer_url_uses_configured_api_url(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "results": [{
+                "collection": "c", "id": "d1", "title": "T", "url": "u",
+                "matchedChunks": [{"content": "x"}],
+            }],
+            "traceId": "deadbeefcafef00d",
+        }
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        out = adapter.search_knowledge("test")
+        assert "huginn-trace-url: http://example.invalid:9000/api/trace/deadbeefcafef00d" in out
+
+    @patch.object(adapter, "ALLOWED_COLLECTIONS", None)
+    @patch.object(adapter, "TRACE_DEFAULT", True)
+    @patch.object(adapter, "API_URL", "http://localhost:8321")
     @patch.object(adapter, "_api_get")
     def test_pointer_takes_precedence_over_inline_trace(self, mock_get):
         mock_resp = MagicMock()
@@ -634,5 +656,5 @@ class TestTraceForwarding:
         mock_get.return_value = mock_resp
 
         out = adapter.search_knowledge("test")
-        assert "huginn-trace-id: a3f8b21c4e9d0a55" in out
+        assert "huginn-trace-url: http://localhost:8321/api/trace/a3f8b21c4e9d0a55" in out
         assert "```huginn-trace" not in out
