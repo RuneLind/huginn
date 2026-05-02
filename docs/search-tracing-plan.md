@@ -97,13 +97,39 @@ Notes:
 
 ### Opt-in surface
 
-- HTTP: new query param `trace=true` (default false).
-- MCP: new optional bool argument `trace` on the `search_knowledge` tool.
-- Env: `HUGINN_TRACE_DEFAULT=true` to flip the default for a dev server (so local debugging doesn't need to set it every call).
-- Env: `HUGINN_TRACE_POINTER=true` enables Phase-2 pointer mode (server returns a short ID, orchestrator fetches the trace by ID — see "Pointer mode" below). Implies tracing is on; no need to also set `HUGINN_TRACE_DEFAULT`.
-- Env: `HUGINN_TRACE_TTL_SECONDS=300` (default) — how long pointer-mode traces live in the in-memory store before they are evicted.
+- HTTP: per-request query param `trace=true` (default false).
+- MCP: optional bool argument `trace` on the `search_knowledge` tool.
 
 When `trace=false`, zero overhead — the candidate-tracking dict isn't allocated.
+
+### Env vars — which one to set
+
+The tracing knobs are env-driven. **You only need to set one of `HUGINN_TRACE_*` flags** — they OR together, and pointer mode wins when both are set. Pick based on whether your orchestrator can fetch from `/api/trace/<id>`.
+
+| Variable | Effect | When to use |
+| --- | --- | --- |
+| _(unset)_ | Tracing off. `/api/search` returns no `trace` field. | Default. CLI use, evals that do not care about per-stage data. |
+| `HUGINN_TRACE_DEFAULT=1` | Phase-1 inline mode. `/api/search` embeds the full `trace` JSON in the response; the HTTP-wrapper MCP adapter appends it as a fenced ` ```huginn-trace ` block at the end of the tool result. | Local dev with traces small enough to fit. **Risk:** large traces (>25 KB) push past Claude CLI's `MAX_MCP_OUTPUT_TOKENS` and trigger the divert footgun — the model sees a 1 KB error instead of the search results. |
+| `HUGINN_TRACE_POINTER=1` | Phase-2 pointer mode. `/api/search` returns a short `traceId`; the adapter emits `huginn-trace-url: <KNOWLEDGE_API_URL>/api/trace/<id>` so the orchestrator can fetch the trace out-of-band. **Implies tracing on** — no need to also set `HUGINN_TRACE_DEFAULT`. | Production / Muninn orchestration. The right answer once the orchestrator is wired to parse the URL line and fetch. |
+| `HUGINN_TRACE_TTL_SECONDS=300` | How long pointer-mode traces live in the in-memory store before they are evicted. Default 300 (5 min). | Tune up if your orchestrator's fetch can lag behind the tool call (rare). |
+
+**Where to set it.** Both the API server and the MCP adapter read these env vars at process start (Python import time, not per call). To enable pointer mode in a typical Muninn-orchestrated bot setup:
+
+1. Restart the API server with the env exported in the parent shell:
+   ```sh
+   HUGINN_TRACE_POINTER=1 ./start.sh
+   ```
+2. Restart the orchestrator (e.g. Muninn) with the same env exported, so the MCP-adapter stdio process it spawns inherits it. Alternatively, put it directly into the bot's `.mcp.json`:
+   ```json
+   "env": {
+     "KNOWLEDGE_API_URL": "http://localhost:8321",
+     "HUGINN_TRACE_POINTER": "1"
+   }
+   ```
+
+Setting it on only the API server, or only the adapter, will silently produce no trace — the API server skips trace recording when the request does not carry `?trace=true`, and the adapter only forwards `?trace=true` when one of the env flags is on.
+
+**Future direction.** Once Muninn pilot is stable across all bots, pointer mode is expected to become the default and the env-flag opt-in is expected to go away (along with the Phase-1 fence fallback). Tracking under "Rollout" step 4.
 
 ## Pointer mode (Phase 2)
 

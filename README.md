@@ -151,6 +151,10 @@ Use with Claude Code, Cursor, or any MCP-compatible client. Start the API server
 
 The `KNOWLEDGE_DESCRIPTION` tells the AI agent what it's searching, so it knows when to use the tool.
 
+### Search tracing (optional)
+
+Set `HUGINN_TRACE_POINTER=1` on **both** the API server and the MCP adapter to attach a per-search trace (FAISS / BM25 / RRF / cross-encoder ranks, timings, expansion terms) to every tool result via a short `huginn-trace-url:` pointer line. Orchestrators (e.g. Muninn) fetch the full trace from `GET /api/trace/<id>` and render it in their span UI; LLMs never see the trace. See [`docs/search-tracing-plan.md`](docs/search-tracing-plan.md) for the full env-var matrix and rollout plan.
+
 ## Updating Collections
 
 Incremental updates (only fetches new/modified documents):
