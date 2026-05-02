@@ -32,7 +32,7 @@ from pathlib import Path
 import httpx
 from mcp.server.fastmcp import FastMCP
 
-from main.utils.env import env_bool
+from main.core.trace_store import any_trace_enabled
 
 # Redirect logging to stderr (stdout is reserved for MCP JSON-RPC)
 logging.basicConfig(
@@ -50,12 +50,9 @@ ALLOWED_COLLECTIONS = [
 KNOWLEDGE_DESCRIPTION = os.environ.get("KNOWLEDGE_DESCRIPTION", "")
 
 # Only enable when an orchestrator (e.g. Muninn) is wired to strip the trace
-# block before the LLM sees it — otherwise the full trace lands in model context.
-# See docs/search-tracing-plan.md.
-# `HUGINN_TRACE_POINTER` implies `HUGINN_TRACE_DEFAULT` from the adapter's POV: in
-# pointer mode the server needs to know it should record a trace, which it only
-# does when the request carries `?trace=true`.
-TRACE_DEFAULT = env_bool("HUGINN_TRACE_DEFAULT") or env_bool("HUGINN_TRACE_POINTER")
+# block (or pointer URL) before the LLM sees it — otherwise the full trace
+# lands in model context. See docs/search-tracing-plan.md.
+TRACE_DEFAULT = any_trace_enabled()
 
 def _detect_feature(allowed_collections: list[str] | None, keyword: str) -> bool:
     """Check if a feature keyword matches any allowed collection name (or all if None)."""

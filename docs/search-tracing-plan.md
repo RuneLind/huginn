@@ -155,6 +155,8 @@ The fenced-block delivery (Phase 1) put the full trace JSON inside the MCP tool 
 
 **Trace ID format:** `secrets.token_hex(8)` → 16 lowercase hex chars. Collision-free within a TTL window without UUID overhead. The URL form embeds this id at the end of the path.
 
+**Memory envelope.** Steady-state size = put-rate × TTL × per-trace bytes. At 1 search/s × 300 s × ~150 KB ≈ 45 MB; at 10 search/s ≈ 450 MB. The store also enforces a `max_entries` cap (default 10 000) — once the cap is hit, the soonest-to-expire entry is evicted on the next `put()` so memory cannot grow without bound. Tune the cap or the TTL down (`HUGINN_TRACE_TTL_SECONDS`) if a deployment is sustained-high-throughput.
+
 **Failure modes (orchestrator side):**
 - 404 / network error / Huginn down → orchestrator stores the span without `searchTrace`. Tool result text is still intact (the pointer line is just discarded), so the user-visible flow never depends on trace fetch succeeding. Trace fetch is pure observability.
 

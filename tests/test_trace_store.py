@@ -42,8 +42,7 @@ class TestTraceStoreTTL:
         tid = store.put({"x": 1})
         clock.t = 1061.0
         assert store.get(tid) is None
-        # After expiry, GC should have removed it; size goes to zero
-        assert store.size() == 0
+        assert len(store._traces) == 0
 
     def test_entry_alive_just_before_expiry(self):
         clock = FakeClock(t=1000.0)
@@ -65,9 +64,23 @@ class TestTraceStoreTTL:
         store.put({"a": 1})
         store.put({"b": 2})
         clock.t = 11.0
-        # Putting a new one triggers GC of the expired pair
         store.put({"c": 3})
-        assert store.size() == 1
+        assert len(store._traces) == 1
+
+
+class TestTraceStoreMaxEntries:
+    def test_overflow_evicts_soonest_to_expire(self):
+        clock = FakeClock(t=0.0)
+        store = TraceStore(ttl_seconds=100, max_entries=2, clock=clock)
+        clock.t = 0.0
+        first = store.put({"i": 0})  # expires at 100
+        clock.t = 1.0
+        second = store.put({"i": 1})  # expires at 101
+        clock.t = 2.0
+        store.put({"i": 2})  # expires at 102, triggers overflow
+        assert store.get(first) is None
+        assert store.get(second) == {"i": 1}
+        assert len(store._traces) == 2
 
 
 class TestTraceStoreEnv:
