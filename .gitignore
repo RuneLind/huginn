@@ -51,3 +51,6 @@ docs/X_*.md
 benchmarks/FINDINGS.md
 Vipps_*.md
 Møtereferat*
+
+# Local-only Claude Code memory (private LLM-session redirect to mimir wiki repo)
+CLAUDE.local.md
