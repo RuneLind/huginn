@@ -32,3 +32,22 @@ huginn-jarvis/
 
 # Local start script (personal config)
 start.sh
+
+# Working / scratch / customer / internal-research docs belong in the mimir wiki repo.
+# See ../mimir/plans/consolidate-working-docs-into-mimir.md for the policy.
+docs/handover-*.md
+docs/*-followups.md
+docs/*-plan.md
+docs/*-arbeidsplan.md
+docs/*-investigation.md
+docs/*-report.md
+docs/*-fixes.md
+docs/*-races.md
+docs/blog-*.md
+docs/presentasjon-*.md
+docs/melosys-*.md
+docs/vipps-*
+docs/X_*.md
+benchmarks/FINDINGS.md
+Vipps_*.md
+Møtereferat*
