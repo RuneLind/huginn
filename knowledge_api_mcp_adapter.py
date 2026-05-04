@@ -244,7 +244,9 @@ def _search_knowledge_impl(
     results = data.get("results", [])
     if not results and not data.get("graph_answer"):
         low = " (low confidence)" if data.get("lowConfidence") else ""
-        return f"No results found for '{query}'{low}."
+        logger.info(f"No-hit search '{query}'{low}")
+        text = f"No results found for '{query}'{low}."
+        return _append_trace_marker(text, data)
 
     parts = []
     if data.get("graph_answer"):
@@ -296,12 +298,17 @@ def _search_knowledge_impl(
             parts.append(header + "\n\n" + "\n\n".join(chunk_lines))
 
     text = "\n\n".join(parts)
-    if TRACE_DEFAULT:
-        trace_id = data.get("traceId")
-        if trace_id:
-            text += f"\n\nhuginn-trace-url: {API_URL}/api/trace/{trace_id}\n"
-        elif data.get("trace") is not None:
-            text += f"\n\n```huginn-trace\n{json.dumps(data['trace'], ensure_ascii=False)}\n```"
+    return _append_trace_marker(text, data)
+
+
+def _append_trace_marker(text: str, data: dict) -> str:
+    if not TRACE_DEFAULT:
+        return text
+    trace_id = data.get("traceId")
+    if trace_id:
+        return text + f"\n\nhuginn-trace-url: {API_URL}/api/trace/{trace_id}\n"
+    if data.get("trace") is not None:
+        return text + f"\n\n```huginn-trace\n{json.dumps(data['trace'], ensure_ascii=False)}\n```"
     return text
 
 
