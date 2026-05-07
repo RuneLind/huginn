@@ -142,7 +142,7 @@ def _shape_doc(doc, coll_name, is_reranked, brief, max_chunk_chars, max_chunks_p
         }
         chunk_meta = extract_chunk_metadata(raw)
         if chunk_meta:
-            entry["metadata"] = dict(chunk_meta)
+            entry["metadata"] = chunk_meta
         matched_chunks.append(entry)
     if not matched_chunks:
         return None
