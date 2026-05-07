@@ -26,6 +26,7 @@ from main.persisters.disk_persister import DiskPersister
 from main.indexes.indexer_factory import detect_faiss_index, create_embedder, load_search_indexer, create_reranker
 from main.core.documents_collection_searcher import DocumentCollectionSearcher
 from main.core.search_response_formatter import extract_chunk_text, truncate_snippet
+from main.routes.collections import make_collections_router
 from main.routes.graph import make_graph_router
 from main.routes.notion import make_notion_router
 from main.routes.search import make_search_router
@@ -226,101 +227,10 @@ def health():
     }
 
 
-@app.get("/api/collections")
-def list_collections():
-    result = []
-    for name, searcher in store.get_searchers().items():
-        try:
-            manifest_text = store.disk_persister.read_text_file(f"{name}/manifest.json")
-            manifest = json.loads(manifest_text)
-        except FileNotFoundError:
-            manifest = {}
-        result.append({
-            "name": name,
-            "document_count": manifest.get("numberOfDocuments", 0),
-            "chunk_count": manifest.get("numberOfChunks", 0),
-            "embedding_count": searcher.indexer.get_size(),
-            "updatedTime": manifest.get("updatedTime"),
-        })
-    return {"collections": result}
-
-
-@app.get("/api/tags")
-def list_tags(
-    collection: str = Query(None, description="Collection name (all if omitted)"),
-):
-    """Return tag distribution for a collection (or all collections). Cached at startup."""
-    target_names = [collection] if collection else store.collection_names()
-    result = {}
-    for name in target_names:
-        if not store.has_collection(name):
-            raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
-        tags = store.get_tag_counts([name]).get(name, {})
-        result[name] = {
-            "unique_tags": len(tags),
-            "tags": tags,
-        }
-    return result
-
-
 app.include_router(make_search_router(store))
 app.include_router(make_graph_router(store))
 app.include_router(make_notion_router(store))
-
-
-@app.get("/api/collection/{name}/documents")
-def list_collection_documents(name: str):
-    """List all documents in a collection with their IDs and URLs."""
-    if not store.has_collection(name):
-        raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
-
-    # Use index mapping for O(1) lookup instead of reading every document file
-    try:
-        mapping_text = store.disk_persister.read_text_file(
-            f"{name}/indexes/index_document_mapping.json"
-        )
-        mapping = json.loads(mapping_text)
-    except Exception:
-        return {"documents": []}
-
-    seen_ids = set()
-    documents = []
-    docs_prefix = f"{name}/documents/"
-    for entry in mapping.values():
-        doc_id = entry.get("documentId", "")
-        doc_url = entry.get("documentUrl", "")
-        if doc_id in seen_ids or not doc_url:
-            continue
-        seen_ids.add(doc_id)
-        documents.append({"id": doc_id, "url": doc_url})
-
-    return {"documents": documents}
-
-
-@app.get("/api/document/{collection}/{doc_id:path}")
-def get_document(collection: str, doc_id: str):
-    if not store.has_collection(collection):
-        raise HTTPException(status_code=404, detail=f"Collection '{collection}' not found")
-
-    # Prevent absolute paths (actual traversal is caught by realpath check below)
-    if doc_id.startswith("/"):
-        raise HTTPException(status_code=400, detail="Invalid document ID")
-
-    doc_path = f"{collection}/documents/{doc_id}"
-    if not doc_id.endswith(".json"):
-        doc_path += ".json"
-
-    # Validate resolved path stays within collections directory
-    base_dir = os.path.realpath(store.disk_persister.base_path)
-    resolved = os.path.realpath(os.path.join(base_dir, doc_path))
-    if not resolved.startswith(base_dir + os.sep):
-        raise HTTPException(status_code=400, detail="Invalid document ID")
-
-    try:
-        doc_text = store.disk_persister.read_text_file(doc_path)
-        return json.loads(doc_text)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
+app.include_router(make_collections_router(store, run_collection_update))
 
 
 def _find_similar_documents(searcher, query: str, exclude_match) -> list[dict]:
@@ -471,15 +381,6 @@ def jira_ingest(req: JiraIngestRequest, background_tasks: BackgroundTasks):
         "summary": result["summary"],
         "similar": similar,
     }
-
-
-@app.post("/api/collections/{name}/update")
-def update_collection(name: str, background_tasks: BackgroundTasks):
-    if not store.has_collection(name):
-        raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
-
-    background_tasks.add_task(run_collection_update, name)
-    return {"status": "update_started", "collection": name}
 
 
 def main():
