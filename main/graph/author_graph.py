@@ -3,15 +3,25 @@
 Pure compute — caching and HTTP error handling stay in the endpoint.
 
 Public API:
-- ``build_author_graph(scores, sources_path, min_score, min_tweets, min_interactions)``
-  — given pre-loaded author scores and a path to source markdown files,
-  return the response dict in the same node/edge/community format as
-  ``similarity_graph.shape_response``.
+- ``build_author_graph(scores, name, disk_persister, min_score, min_tweets, min_interactions)``
+  — given pre-loaded author scores and the indexed collection (read via
+  ``disk_persister``), return the response dict in the same node/edge/community
+  format as ``similarity_graph.shape_response``.
+
+Iterates the indexed documents (``<name>/documents/*.json``) rather than the
+raw source markdown — the indexed body preserves the original text and the
+filename is preserved as ``doc["id"]``, so the regex extraction works on
+either side. Reading from the indexed collection keeps this code from
+reaching across data layers into ``data/sources/``.
 """
 
+import json
+import logging
 import re
 from collections import defaultdict
-from pathlib import Path
+
+
+logger = logging.getLogger(__name__)
 
 
 _RE_HANDLE = re.compile(r"^\d{4}-\d{2}-\d{2}_(.+?)_\d+\.md$")
@@ -19,13 +29,14 @@ _RE_QUOTED = re.compile(r"> \*\*Quoted @(\w+):")
 _RE_MENTION = re.compile(r"(?<![.\w])@(\w{1,15})(?!\.\w)")
 
 
-def build_author_graph(scores, sources_path, min_score, min_tweets, min_interactions):
-    """Build an author interaction graph from scores + tweet markdown files.
+def build_author_graph(scores, name, disk_persister, min_score, min_tweets, min_interactions):
+    """Build an author interaction graph from scores + indexed documents.
 
     ``scores`` is the loaded ``{handle: info}`` dict from the author-scores
-    JSON. ``sources_path`` is the directory containing ``YYYY-MM-DD_handle_id.md``
-    tweet files. Only authors with at least one interaction edge above
-    ``min_interactions`` are returned (no isolates).
+    JSON. ``name`` is the collection name. ``disk_persister`` provides access
+    to the indexed documents (``<name>/documents/*.json``). Only authors with
+    at least one interaction edge above ``min_interactions`` are returned
+    (no isolates).
     """
     candidates = {
         handle for handle, info in scores.items()
@@ -33,7 +44,7 @@ def build_author_graph(scores, sources_path, min_score, min_tweets, min_interact
         and info.get("tweet_count", 0) >= min_tweets
     }
 
-    interaction_counts = _count_interactions(Path(sources_path), candidates)
+    interaction_counts = _count_interactions(_iter_indexed_documents(name, disk_persister), candidates)
 
     connected = set()
     for (src, tgt), weight in interaction_counts.items():
@@ -63,25 +74,17 @@ def build_author_graph(scores, sources_path, min_score, min_tweets, min_interact
     }
 
 
-def _count_interactions(tweet_dir, candidates):
-    """Walk markdown files and tally (src, tgt) → weighted interaction counts."""
+def _count_interactions(documents, candidates):
+    """Tally (src, tgt) → weighted interaction counts from an iterable of (filename, body)."""
     interaction_counts: dict[tuple[str, str], float] = defaultdict(float)
-    if not tweet_dir.exists():
-        return interaction_counts
 
-    for f in tweet_dir.glob("*.md"):
-        m = _RE_HANDLE.match(f.name)
+    for filename, body in documents:
+        m = _RE_HANDLE.match(filename)
         if not m:
             continue
         src = m.group(1).lower()
         if src not in candidates:
             continue
-        content = f.read_text(encoding="utf-8")
-        body = content
-        if content.startswith("---"):
-            end = content.find("---", 3)
-            if end != -1:
-                body = content[end + 3:]
 
         for qh in _RE_QUOTED.findall(body):
             tgt = qh.lower()
@@ -96,6 +99,33 @@ def _count_interactions(tweet_dir, candidates):
                     interaction_counts[(src, tgt)] += 1.0
 
     return interaction_counts
+
+
+def _iter_indexed_documents(name, disk_persister):
+    """Yield (filename, body) tuples for every indexed document in ``name``.
+
+    ``filename`` is the original source filename (preserved as ``doc["id"]``,
+    e.g. ``2024-03-05_handle_1234.md``). ``body`` is the indexed full text;
+    frontmatter is already stripped by the converter at index time.
+    """
+    docs_dir = f"{name}/documents"
+    try:
+        doc_files = disk_persister.read_folder_files(docs_dir)
+    except Exception:
+        logger.warning(f"Could not list documents for {name}")
+        return
+
+    for doc_file in doc_files:
+        if not doc_file.endswith(".json"):
+            continue
+        try:
+            doc = json.loads(disk_persister.read_text_file(f"{docs_dir}/{doc_file}"))
+        except Exception:
+            continue
+        filename = doc.get("id", "")
+        body = doc.get("text", "")
+        if filename and body:
+            yield filename, body
 
 
 def _make_node(handle, info, comm_remap):

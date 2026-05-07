@@ -441,8 +441,7 @@ def collection_author_graph(
         raise HTTPException(status_code=404, detail=f"No author graph found for '{name}'")
 
     scores = json.loads(scores_path.read_text())
-    sources_path = Path(__file__).parent / "data" / "sources" / name
-    result = build_author_graph(scores, sources_path, min_score, min_tweets, min_interactions)
+    result = build_author_graph(scores, name, store.disk_persister, min_score, min_tweets, min_interactions)
     store._author_graph_cache[name] = result
     return result
 
