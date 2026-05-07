@@ -94,32 +94,8 @@ class KnowledgeStore:
         self._load_knowledge_graph()
 
     def _load_knowledge_graph(self):
-        graph_paths = []
-        eessi_path_str = os.environ.get("KNOWLEDGE_GRAPH_PATH", "")
-        jira_path_str = os.environ.get("JIRA_GRAPH_PATH", "")
-        llm_graph_str = os.environ.get("LLM_GRAPH_PATH", "")
-        if eessi_path_str and Path(eessi_path_str).exists():
-            graph_paths.append(Path(eessi_path_str))
-        if jira_path_str and Path(jira_path_str).exists():
-            graph_paths.append(Path(jira_path_str))
-        if llm_graph_str and Path(llm_graph_str).exists():
-            graph_paths.append(Path(llm_graph_str))
-        # Auto-detect LLM graphs in private repo dirs and fallback to local scripts
-        for search_dir in [
-            Path("./huginn-jarvis/scripts/knowledge_graph"),
-            Path("./huginn-nav/scripts/knowledge_graph"),
-            Path("./scripts/knowledge_graph"),
-        ]:
-            for p in search_dir.glob("*_llm_graph.json"):
-                if p not in graph_paths:
-                    graph_paths.append(p)
-        if graph_paths:
-            from main.graph.knowledge_graph import KnowledgeGraph
-            self.graph = KnowledgeGraph(graph_paths)
-            logger.info(f"Knowledge graph loaded from {len(graph_paths)} file(s): "
-                        f"{self.graph.node_count()} nodes, {self.graph.edge_count()} edges")
-        else:
-            logger.info("No knowledge graph found — graph features disabled")
+        from main.graph.graph_loader import load_default_knowledge_graph
+        self.graph = load_default_knowledge_graph()
 
     def reload_collection(self, collection_name):
         searcher = self._build_searcher(collection_name)
