@@ -1,10 +1,15 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from knowledge_api_server import (
-    app, store, _extract_chunk_text, _extract_chunk_heading,
-    _extract_chunk_metadata, _apply_metadata_filters,
-    _truncate_snippet, _separate_metadata, _normalize_score,
+from knowledge_api_server import app, store
+from main.core.search_response_formatter import (
+    extract_chunk_text as _extract_chunk_text,
+    extract_chunk_heading as _extract_chunk_heading,
+    extract_chunk_metadata as _extract_chunk_metadata,
+    apply_metadata_filters as _apply_metadata_filters,
+    truncate_snippet as _truncate_snippet,
+    separate_metadata as _separate_metadata,
+    normalize_score as _normalize_score,
 )
 from main.sources.notion.notion_document_reader import NotionDocumentReader
 

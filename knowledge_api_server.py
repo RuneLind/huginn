@@ -9,7 +9,6 @@ Usage:
     uv run knowledge_api_server.py --collections my-notion --port 8321
 """
 import json
-import math
 import argparse
 import logging
 import os
@@ -29,6 +28,16 @@ from main.indexes.indexer_factory import detect_faiss_index, create_embedder, lo
 from main.core.documents_collection_searcher import DocumentCollectionSearcher
 from main.core.search_trace import create_trace
 from main.core.trace_store import any_trace_enabled, default_trace_store, pointer_mode_enabled
+from main.core.search_response_formatter import (
+    NON_RERANKED_MAX_RELEVANCE,
+    apply_metadata_filters,
+    extract_chunk_heading,
+    extract_chunk_metadata,
+    extract_chunk_text,
+    normalize_score,
+    separate_metadata,
+    truncate_snippet,
+)
 from main.sources.notion.notion_document_reader import NotionDocumentReader
 from main.utils.logger import setup_root_logger
 from main.ingest.youtube import (
@@ -364,11 +373,11 @@ def search(
             for chunk in doc.get("matchedChunks", []):
                 raw = chunk.get("content", "")
                 entry = {
-                    "content": _extract_chunk_text(raw),
+                    "content": extract_chunk_text(raw),
                     "score": chunk.get("score", 0),
-                    "heading": _extract_chunk_heading(raw),
+                    "heading": extract_chunk_heading(raw),
                 }
-                chunk_meta = _extract_chunk_metadata(raw)
+                chunk_meta = extract_chunk_metadata(raw)
                 if chunk_meta:
                     entry["metadata"] = dict(chunk_meta)
                 matched_chunks.append(entry)
@@ -384,12 +393,12 @@ def search(
             modified_time = doc.get("modifiedTime")
 
             best_score = matched_chunks[0]["score"]
-            relevance = _normalize_score(best_score, is_reranked)
+            relevance = normalize_score(best_score, is_reranked)
 
             # Separate metadata from chunk content, collect breadcrumb
             doc_breadcrumb = None
             for chunk in matched_chunks:
-                clean_content, text_metadata, breadcrumb = _separate_metadata(chunk["content"])
+                clean_content, text_metadata, breadcrumb = separate_metadata(chunk["content"])
                 chunk["content"] = clean_content
                 # Merge: chunk dict metadata (from JSON) + text-parsed metadata (text overrides)
                 merged = {}
@@ -404,7 +413,7 @@ def search(
 
             if brief:
                 best_chunk = matched_chunks[0]
-                snippet = _truncate_snippet(best_chunk["content"])
+                snippet = truncate_snippet(best_chunk["content"])
                 if not snippet and best_chunk.get("metadata"):
                     snippet = " | ".join(f"{k}: {v}" for k, v in best_chunk["metadata"].items())
                 result = {
@@ -433,7 +442,7 @@ def search(
                             chunk["content"] = chunk["content"][:max_chunk_chars] + "…"
                 # Add relevance to each chunk
                 for chunk in matched_chunks:
-                    chunk["relevance"] = round(_normalize_score(chunk["score"], is_reranked), 3)
+                    chunk["relevance"] = round(normalize_score(chunk["score"], is_reranked), 3)
                 result = {
                     "collection": coll_name,
                     "id": doc.get("id"),
@@ -455,16 +464,13 @@ def search(
 
     # Apply metadata filters (post-retrieval)
     if has_filters:
-        all_results = _apply_metadata_filters(all_results, project=project, git_branch=git_branch, tags=tags)
+        all_results = apply_metadata_filters(all_results, project=project, git_branch=git_branch, tags=tags)
 
     # Sort by best chunk score (lower = better: L2 distance for FAISS, negated RRF for hybrid)
     all_results.sort(key=lambda r: r["_score"])
 
     # Override relevance for non-reranked results with rank-based scoring
     # (absolute hybrid/FAISS scores aren't meaningful as relevance values)
-    # Capped at 0.75 because without cross-encoder validation we can't
-    # claim high confidence — avoids inflated scores on irrelevant results
-    NON_RERANKED_MAX_RELEVANCE = 0.75
     for i, r in enumerate(all_results[:limit]):
         if not r.get("_reranked"):
             rank_relevance = round(NON_RERANKED_MAX_RELEVANCE / (1.0 + 0.12 * i), 3)
@@ -1102,7 +1108,7 @@ def _find_similar_documents(searcher, query: str, exclude_match) -> list[dict]:
         snippet = ""
         if chunks:
             raw = chunks[0].get("content", "")
-            snippet = _truncate_snippet(_extract_chunk_text(raw))
+            snippet = truncate_snippet(extract_chunk_text(raw))
         similar.append({
             "title": doc_title,
             "url": doc.get("url", ""),
@@ -1290,129 +1296,6 @@ def _fetch_all_blocks(notion, block_id, depth=0):
             break
         cursor = response.get("next_cursor")
     return blocks
-
-
-def _extract_chunk_text(content):
-    """Extract plain text from chunk content (may be dict with indexedData or plain string)."""
-    if isinstance(content, dict):
-        return content.get("indexedData", str(content))
-    return str(content) if content else ""
-
-
-def _extract_chunk_heading(content):
-    """Extract heading from chunk content if available."""
-    if isinstance(content, dict):
-        return content.get("heading")
-    return None
-
-
-def _extract_chunk_metadata(content):
-    """Extract metadata dict from chunk content if available."""
-    if isinstance(content, dict):
-        return content.get("metadata")
-    return None
-
-
-def _truncate_snippet(text, target=200):
-    """Truncate text at a sentence boundary near target length, falling back to word boundary."""
-    if not text or len(text) <= target:
-        return text
-    # Look for sentence boundary in a window around target
-    window_start = max(target - 40, 0)
-    window_end = min(target + 40, len(text))
-    window = text[window_start:window_end]
-    # Find last sentence-ending punctuation followed by space in the window
-    best = -1
-    for m in re.finditer(r'[.!?]\s', window):
-        best = m.start() + 1  # include the punctuation
-    if best >= 0:
-        cut = window_start + best
-        return text[:cut].rstrip()
-    # Fall back to word boundary
-    cut = text.rfind(' ', 0, target + 20)
-    if cut > target - 40:
-        return text[:cut].rstrip() + "…"
-    return text[:target] + "…"
-
-
-_METADATA_LINE_RE = re.compile(r'^\*\*([^*]+?):\*\*\s*(.+)$')
-
-
-def _separate_metadata(text):
-    """Parse **Key:** Value lines from start of text into a metadata dict.
-
-    Also extracts [Breadcrumb > Path] line for navigation context.
-    Returns (clean_content, metadata_dict, breadcrumb_or_None).
-    """
-    if not text:
-        return "", {}, None
-    lines = text.split('\n')
-    metadata = {}
-    breadcrumb = None
-    content_start = 0
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if not stripped:
-            # Skip blank lines at the start
-            content_start = i + 1
-            continue
-        # Extract breadcrumb line
-        if stripped.startswith('[') and '>' in stripped and stripped.endswith(']'):
-            breadcrumb = stripped[1:-1].strip()
-            content_start = i + 1
-            continue
-        m = _METADATA_LINE_RE.match(stripped)
-        if m:
-            metadata[m.group(1).strip()] = m.group(2).strip()
-            content_start = i + 1
-        else:
-            break
-    clean = '\n'.join(lines[content_start:]).strip()
-    return clean, metadata, breadcrumb
-
-
-def _apply_metadata_filters(results, project=None, git_branch=None, tags=None):
-    """Filter results by metadata fields. Checks document-level and chunk-level metadata."""
-    filtered = []
-    requested_tags = {t.strip() for t in tags.split(",") if t.strip()} if tags else None
-    for r in results:
-        doc_meta = r.get("metadata") or {}
-        # Check chunk-level metadata too (first chunk often has the metadata)
-        chunk_meta = {}
-        for chunk in r.get("matchedChunks", []):
-            if chunk.get("metadata"):
-                chunk_meta.update(chunk["metadata"])
-        merged = {**doc_meta, **chunk_meta}
-
-        if project and merged.get("project") != project:
-            continue
-        if git_branch and merged.get("gitBranch") != git_branch:
-            continue
-        if requested_tags:
-            doc_tags = {t.strip() for t in merged.get("tags", "").split(",") if t.strip()}
-            if not requested_tags & doc_tags:
-                continue
-        filtered.append(r)
-    return filtered
-
-
-def _normalize_score(raw_score, is_reranked=True):
-    """Convert internal score (lower=better) to 0.0-1.0 relevance (higher=better).
-
-    For reranked results: shifted sigmoid calibrated to cross-encoder score range.
-    Maps score -1.0 → ~0.999, -0.5 → ~0.94, -0.15 → ~0.50, -0.01 → ~0.25.
-
-    For non-reranked results: basic sigmoid (rank-based override applied later
-    in the search handler for the final response).
-    """
-    if not is_reranked:
-        # Placeholder — search handler overrides with rank-based relevance
-        return 0.5
-
-    # Shift and scale to spread cross-encoder scores across 0-1 range
-    shifted = (raw_score + 0.15) * 8
-    clamped = max(min(shifted, 500), -500)
-    return 1.0 / (1.0 + math.exp(clamped))
 
 
 def main():
