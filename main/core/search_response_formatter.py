@@ -62,6 +62,11 @@ def separate_metadata(text):
     """
     if not text:
         return "", {}, None
+    # Fast path: most chunks (markdown body text) have no metadata prefix.
+    # Skip the per-line scan when the first non-blank char rules it out.
+    first_non_blank = text.lstrip()
+    if not first_non_blank.startswith(("**", "[")):
+        return text.strip(), {}, None
     lines = text.split('\n')
     metadata = {}
     breadcrumb = None
@@ -160,13 +165,11 @@ def _shape_doc(doc, coll_name, is_reranked, brief, max_chunk_chars, max_chunks_p
     for chunk in matched_chunks:
         clean_content, text_metadata, breadcrumb = separate_metadata(chunk["content"])
         chunk["content"] = clean_content
-        merged = {}
-        if chunk.get("metadata"):
-            merged.update(chunk["metadata"])
-        if text_metadata:
-            merged.update(text_metadata)
-        if merged:
-            chunk["metadata"] = merged
+        chunk_existing = chunk.get("metadata")
+        if text_metadata and chunk_existing:
+            chunk["metadata"] = {**chunk_existing, **text_metadata}
+        elif text_metadata:
+            chunk["metadata"] = text_metadata
         if breadcrumb and not doc_breadcrumb:
             doc_breadcrumb = breadcrumb
 
@@ -221,7 +224,7 @@ def _shape_doc(doc, coll_name, is_reranked, brief, max_chunk_chars, max_chunks_p
     return result
 
 
-def format_search_response(
+def shape_search_results(
     per_collection_results,
     *,
     limit,

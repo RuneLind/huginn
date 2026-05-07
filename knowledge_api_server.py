@@ -30,7 +30,7 @@ from main.core.search_trace import create_trace
 from main.core.trace_store import any_trace_enabled, default_trace_store, pointer_mode_enabled
 from main.core.search_response_formatter import (
     extract_chunk_text,
-    format_search_response,
+    shape_search_results,
     truncate_snippet,
 )
 from main.sources.notion.notion_document_reader import NotionDocumentReader
@@ -361,7 +361,7 @@ def search(
         )
         per_collection.append((coll_name, search_result))
 
-    results, any_low_confidence = format_search_response(
+    results, any_low_confidence = shape_search_results(
         per_collection,
         limit=limit,
         brief=brief,
