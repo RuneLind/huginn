@@ -22,8 +22,6 @@ import datetime as dt
 
 from fastapi import FastAPI, Query, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Optional
 import uvicorn
 
 from main.persisters.disk_persister import DiskPersister
@@ -33,7 +31,6 @@ from main.core.search_trace import create_trace
 from main.core.trace_store import any_trace_enabled, default_trace_store, pointer_mode_enabled
 from main.sources.notion.notion_document_reader import NotionDocumentReader
 from main.utils.logger import setup_root_logger
-from main.utils.filename import sanitize_filename
 from main.ingest.youtube import (
     YouTubeIngestRequest,
     ingest_youtube,
@@ -41,7 +38,7 @@ from main.ingest.youtube import (
     list_categories as _list_youtube_categories,
 )
 from main.ingest.x_articles import XArticleIngestRequest, ingest_x_article
-from main.ingest.jira import JiraIngestRequest, JiraIngestComment, ingest_jira
+from main.ingest.jira import JiraIngestRequest, ingest_jira
 from main.ingest.categories import CATEGORIES
 
 setup_root_logger()

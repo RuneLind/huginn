@@ -40,35 +40,11 @@ class JiraIngestRequest(BaseModel):
     epicLink: Optional[str] = None
 
 
-def _find_existing_jira_file(jira_path: str, issue_key: str) -> Optional[str]:
-    """Find an existing markdown file for a Jira issue key.
-
-    Scans files starting with the issue key (handles both underscore and space
-    filename conventions) and verifies issue_key in frontmatter.
-    """
-    if not os.path.isdir(jira_path):
-        return None
-    prefix = issue_key
-    for filename in os.listdir(jira_path):
-        if not filename.endswith(".md"):
-            continue
-        # Match "PROJECT-1234_..." or "PROJECT-1234 ..." or "PROJECT-1234.md"
-        if filename.startswith(prefix + "_") or filename.startswith(prefix + " ") or filename == prefix + ".md":
-            filepath = os.path.join(jira_path, filename)
-            try:
-                with open(filepath, "r", encoding="utf-8") as f:
-                    head = f.read(500)
-                if f"issue_key: {issue_key}" in head:
-                    return filepath
-            except Exception:
-                pass
-    return None
-
-
 def _read_existing_frontmatter(filepath: str) -> dict:
     """Read YAML frontmatter from an existing markdown file into a dict.
 
     Handles multi-line YAML lists (e.g. labels) by collecting list items.
+    Returns {} on read/parse failure (logged at warning level).
     """
     metadata = {}
     current_list_key = None
@@ -99,9 +75,30 @@ def _read_existing_frontmatter(filepath: str) -> dict:
                     elif key and not value:
                         # Key with no value — likely start of a YAML list
                         current_list_key = key
-    except Exception:
-        pass
+    except (OSError, UnicodeDecodeError) as e:
+        logger.warning(f"Could not read frontmatter from {filepath}: {e}")
     return metadata
+
+
+def _find_existing_jira_file(jira_path: str, issue_key: str) -> tuple[Optional[str], dict]:
+    """Find an existing markdown file for `issue_key`. Returns (filepath, frontmatter) or (None, {}).
+
+    Scans files whose names start with the issue key (handles underscore and
+    space filename conventions) and verifies the parsed `issue_key` matches.
+    """
+    if not os.path.isdir(jira_path):
+        return None, {}
+    prefix = issue_key
+    for filename in os.listdir(jira_path):
+        if not filename.endswith(".md"):
+            continue
+        # Match "PROJECT-1234_..." or "PROJECT-1234 ..." or "PROJECT-1234.md"
+        if filename.startswith(prefix + "_") or filename.startswith(prefix + " ") or filename == prefix + ".md":
+            filepath = os.path.join(jira_path, filename)
+            metadata = _read_existing_frontmatter(filepath)
+            if metadata.get("issue_key") == issue_key:
+                return filepath, metadata
+    return None, {}
 
 
 def _jira_content_to_markdown(req: JiraIngestRequest, existing_metadata: Optional[dict] = None) -> str:
@@ -180,7 +177,7 @@ def _jira_content_to_markdown(req: JiraIngestRequest, existing_metadata: Optiona
     return "\n".join(lines)
 
 
-def ingest_jira(req: JiraIngestRequest, sources_path: str) -> dict:
+def ingest_jira(req: JiraIngestRequest, *, sources_path: str) -> dict:
     """Save a Jira issue as PII-sanitized markdown. Merges metadata if a file already exists.
 
     Returns: {file_path, issue_key, summary}.
@@ -191,8 +188,7 @@ def ingest_jira(req: JiraIngestRequest, sources_path: str) -> dict:
     summary_text = req.summary or req.title or "untitled"
 
     os.makedirs(sources_path, exist_ok=True)
-    existing_filepath = _find_existing_jira_file(sources_path, req.issueKey)
-    existing_metadata = _read_existing_frontmatter(existing_filepath) if existing_filepath else {}
+    existing_filepath, existing_metadata = _find_existing_jira_file(sources_path, req.issueKey)
 
     if existing_metadata:
         logger.info(f"Jira ingest: found existing file for {req.issueKey}, merging metadata")

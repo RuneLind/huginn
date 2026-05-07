@@ -11,9 +11,9 @@ from typing import Optional
 from fastapi import HTTPException
 from pydantic import BaseModel
 
-from main.utils.filename import sanitize_filename
 from main.fetchers.youtube.youtube_transcript_downloader import YouTubeTranscriptDownloader
 from main.ingest.categories import CATEGORIES
+from main.ingest._markdown_writer import write_categorized_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ SUMMARY:
 <your markdown summary>"""
 
 
-def extract_video_id(url_or_id: str) -> str:
+def _extract_video_id(url_or_id: str) -> str:
     """Extract video ID from YouTube URL or return as-is."""
     match = re.search(r'(?:youtube\.com/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]{11})', url_or_id)
     if match:
@@ -77,7 +77,7 @@ def _fetch_youtube_title(video_id: str) -> Optional[str]:
 
 def fetch_transcript(video_id_or_url: str) -> str:
     """Fetch YouTube transcript server-side using YouTubeTranscriptDownloader."""
-    video_id = extract_video_id(video_id_or_url)
+    video_id = _extract_video_id(video_id_or_url)
     downloader = YouTubeTranscriptDownloader(max_retries=3, prefer_languages=["en"])
 
     transcript_data = downloader.download_transcript(video_id)
@@ -143,20 +143,20 @@ def _parse_claude_response(text: str) -> tuple[str, str]:
     return category, summary
 
 
-def ingest_youtube(req: YouTubeIngestRequest, transcripts_path: str) -> dict:
+def ingest_youtube(req: YouTubeIngestRequest, *, transcripts_path: str) -> dict:
     """Ingest a YouTube transcript: resolve title, fetch transcript, summarize via Claude, save markdown.
 
     Returns: {file_path, category, summary, title, url}.
     """
     date = req.date or dt.date.today().isoformat()
 
-    # Validate title — Chrome extension sometimes sends "YouTube" or the URL before page loads
+    # Chrome extension sometimes sends "YouTube" or the URL before page loads
     title = req.title
     title_lower = title.lower().strip()
     is_generic = title_lower in _GENERIC_TITLES
     is_url = "youtube.com/" in title_lower or "youtu.be/" in title_lower
     if is_generic or is_url:
-        video_id = extract_video_id(req.video_id or req.url)
+        video_id = _extract_video_id(req.video_id or req.url)
         real_title = _fetch_youtube_title(video_id)
         if real_title:
             title = real_title
@@ -164,7 +164,7 @@ def ingest_youtube(req: YouTubeIngestRequest, transcripts_path: str) -> dict:
         else:
             raise HTTPException(status_code=400, detail=f"Title '{req.title}' is too generic and couldn't fetch real title from YouTube")
 
-    # If pre-made summary provided (e.g. from javrvis streaming), skip transcript fetch + Claude
+    # Pre-made summary (e.g. from javrvis streaming) skips transcript fetch + Claude
     if req.summary:
         summary = req.summary
         category = req.category or "ai/general"
@@ -188,29 +188,13 @@ def ingest_youtube(req: YouTubeIngestRequest, transcripts_path: str) -> dict:
     frontmatter = f"---\ndate: {date}\nurl: {req.url}\ncategory: {category}\ntags: \"{tags}\"\n---\n\n"
     md_content = frontmatter + summary
 
-    category_dir = os.path.join(transcripts_path, category)
-    os.makedirs(category_dir, exist_ok=True)
-    base_filename = sanitize_filename(title)
-    filename = base_filename + ".md"
-    filepath = os.path.join(category_dir, filename)
-
-    if os.path.exists(filepath):
-        # Same URL → overwrite is fine; different video same title → numeric suffix
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                existing_content = f.read(500)
-            if f"url: {req.url}" not in existing_content:
-                for i in range(2, 100):
-                    filename = f"{base_filename} ({i}).md"
-                    filepath = os.path.join(category_dir, filename)
-                    if not os.path.exists(filepath):
-                        break
-        except Exception:
-            pass
-
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write(md_content)
-    file_rel_path = os.path.join(category, filename)
+    file_rel_path = write_categorized_markdown(
+        root=transcripts_path,
+        category=category,
+        title=title,
+        url=req.url,
+        content=md_content,
+    )
     logger.info(f"YouTube ingest: saved {file_rel_path} (category: {category})")
 
     return {
