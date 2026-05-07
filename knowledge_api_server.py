@@ -323,7 +323,7 @@ def search(
     trace_obj.set_query_raw(q)
 
     augmenter = GraphSearchAugmenter(store.graph)
-    search_q, graph_answer, detected_entities = augmenter.augment_query(q, trace_obj, trace_enabled)
+    search_q, graph_answer, detected_entities = augmenter.augment_query(q, trace_obj)
     if search_q != q:
         logger.debug(f"Graph-expanded query: {search_q[:200]}")
 

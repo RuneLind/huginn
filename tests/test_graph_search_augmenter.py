@@ -40,8 +40,7 @@ class TestAugmentQueryNoGraph:
 
     def test_returns_passthrough_when_graph_is_none(self):
         aug = GraphSearchAugmenter(None)
-        trace = NullSearchTrace()
-        search_q, answer, entities = aug.augment_query("LA_BUC_01", trace, trace_enabled=False)
+        search_q, answer, entities = aug.augment_query("LA_BUC_01", NullSearchTrace())
         assert search_q == "LA_BUC_01"
         assert answer is None
         assert entities == []
@@ -51,8 +50,7 @@ class TestAugmentQueryNoEntitiesDetected:
 
     def test_no_entities_returns_original_query(self, graph):
         aug = GraphSearchAugmenter(graph)
-        trace = NullSearchTrace()
-        search_q, answer, entities = aug.augment_query("hello world", trace, trace_enabled=False)
+        search_q, answer, entities = aug.augment_query("hello world", NullSearchTrace())
         assert search_q == "hello world"
         assert answer is None
         assert entities == []
@@ -62,77 +60,61 @@ class TestAugmentQueryWithEntities:
 
     def test_detects_entities_and_returns_them(self, graph):
         aug = GraphSearchAugmenter(graph)
-        trace = NullSearchTrace()
-        _, _, entities = aug.augment_query("Hva er LA_BUC_01?", trace, trace_enabled=False)
+        _, _, entities = aug.augment_query("Hva er LA_BUC_01?", NullSearchTrace())
         assert "buc:LA_BUC_01" in entities
 
     def test_expands_query_with_neighbor_terms(self, graph):
         aug = GraphSearchAugmenter(graph)
-        trace = NullSearchTrace()
-        search_q, _, _ = aug.augment_query("LA_BUC_01", trace, trace_enabled=False)
-        # Expansion appends neighbor labels — query grows past the original.
+        search_q, _, _ = aug.augment_query("LA_BUC_01", NullSearchTrace())
         assert search_q.startswith("LA_BUC_01 ")
         assert len(search_q) > len("LA_BUC_01")
 
     def test_returns_graph_answer_for_relational_question(self, graph):
         aug = GraphSearchAugmenter(graph)
-        trace = NullSearchTrace()
-        _, answer, _ = aug.augment_query("Hvilke SEDer inneholder LA_BUC_01?", trace, trace_enabled=False)
+        _, answer, _ = aug.augment_query("Hvilke SEDer inneholder LA_BUC_01?", NullSearchTrace())
         assert answer is not None
         assert "A001" in answer
 
     def test_no_graph_answer_for_non_question(self, graph):
         aug = GraphSearchAugmenter(graph)
-        trace = NullSearchTrace()
-        _, answer, _ = aug.augment_query("LA_BUC_01", trace, trace_enabled=False)
+        _, answer, _ = aug.augment_query("LA_BUC_01", NullSearchTrace())
         assert answer is None
 
     def test_expansion_capped_at_term_limit(self, graph):
-        """Expansion is capped at GraphSearchAugmenter.EXPANSION_TERM_LIMIT terms."""
         aug = GraphSearchAugmenter(graph)
-        trace = NullSearchTrace()
-
-        # Make get_expansion_terms return more than the cap so the slice is observable.
         many_terms = [f"term{i}" for i in range(20)]
         graph.get_expansion_terms = lambda ids: many_terms
 
-        search_q, _, _ = aug.augment_query("LA_BUC_01", trace, trace_enabled=False)
+        search_q, _, _ = aug.augment_query("LA_BUC_01", NullSearchTrace())
         appended = search_q.removeprefix("LA_BUC_01 ").split(" ")
         assert appended == many_terms[: GraphSearchAugmenter.EXPANSION_TERM_LIMIT]
 
 
 class TestAugmentQueryTraceMarkers:
 
-    def test_records_detected_entities_when_trace_enabled(self, graph):
+    def test_records_detected_entities(self, graph):
         aug = GraphSearchAugmenter(graph)
         trace = SearchTrace()
-        aug.augment_query("LA_BUC_01", trace, trace_enabled=True)
-        d = trace.to_dict()["query"]
-        assert any(e["id"] == "buc:LA_BUC_01" for e in d["detectedEntities"])
-
-    def test_does_not_record_entities_when_trace_disabled(self, graph):
-        aug = GraphSearchAugmenter(graph)
-        trace = SearchTrace()
-        aug.augment_query("LA_BUC_01", trace, trace_enabled=False)
-        assert trace.to_dict()["query"]["detectedEntities"] == []
+        aug.augment_query("LA_BUC_01", trace)
+        assert any(e["id"] == "buc:LA_BUC_01"
+                   for e in trace.to_dict()["query"]["detectedEntities"])
 
     def test_records_graph_answered_when_question_answered(self, graph):
         aug = GraphSearchAugmenter(graph)
         trace = SearchTrace()
-        aug.augment_query("Hvilke SEDer inneholder LA_BUC_01?", trace, trace_enabled=True)
+        aug.augment_query("Hvilke SEDer inneholder LA_BUC_01?", trace)
         assert trace.to_dict()["query"]["graphAnswered"] is True
 
     def test_records_graph_answered_false_for_non_question(self, graph):
         aug = GraphSearchAugmenter(graph)
         trace = SearchTrace()
-        aug.augment_query("LA_BUC_01", trace, trace_enabled=True)
-        # Entities matched but no relational question → answer is None → graphAnswered stays False.
+        aug.augment_query("LA_BUC_01", trace)
         assert trace.to_dict()["query"]["graphAnswered"] is False
 
     def test_records_expansion_terms(self, graph):
         aug = GraphSearchAugmenter(graph)
         trace = SearchTrace()
-        aug.augment_query("LA_BUC_01", trace, trace_enabled=True)
+        aug.augment_query("LA_BUC_01", trace)
         d = trace.to_dict()["query"]
         assert d["expansionTerms"]
         assert d["expanded"] and d["expanded"] != d["raw"]

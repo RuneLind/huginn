@@ -22,28 +22,26 @@ class GraphSearchAugmenter:
     def __init__(self, graph):
         self.graph = graph
 
-    def augment_query(self, q: str, trace: SearchTrace, trace_enabled: bool):
+    def augment_query(self, q: str, trace: SearchTrace):
         """Detect entities, build expansion, fetch graph answer.
 
         Returns ``(search_q, graph_answer, detected_entities)``. When the graph
-        is unavailable returns ``(q, None, [])``.
+        is unavailable returns ``(q, None, [])``. Trace recording is gated by
+        the trace itself — pass a ``NullSearchTrace`` to skip recording.
         """
         if self.graph is None:
             return q, None, []
 
-        if trace_enabled:
-            entity_pairs = self.graph.detect_entities(q, with_spans=True)
-            detected_entities = [eid for eid, _ in entity_pairs]
-            for eid, span in entity_pairs:
-                node = self.graph.nodes.get(eid, {})
-                trace.add_detected_entity(
-                    entity_id=eid,
-                    entity_type=node.get("type", ""),
-                    label=node.get("label", ""),
-                    matched_span=span,
-                )
-        else:
-            detected_entities = self.graph.detect_entities(q)
+        entity_pairs = self.graph.detect_entities(q, with_spans=True)
+        detected_entities = [eid for eid, _ in entity_pairs]
+        for eid, span in entity_pairs:
+            node = self.graph.nodes.get(eid, {})
+            trace.add_detected_entity(
+                entity_id=eid,
+                entity_type=node.get("type", ""),
+                label=node.get("label", ""),
+                matched_span=span,
+            )
 
         if not detected_entities:
             return q, None, []
