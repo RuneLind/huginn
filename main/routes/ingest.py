@@ -41,6 +41,16 @@ def _find_similar_documents(searcher, query: str, exclude_match) -> list[dict]:
     return similar[:5]
 
 
+def _similar_for_collection(store, collection_name, query, exclude_match) -> list[dict]:
+    """Look up the searcher for a configured collection and run a similarity search."""
+    if not (collection_name and store.has_collection(collection_name)):
+        return []
+    searcher = store.get_searchers([collection_name]).get(collection_name)
+    if not searcher:
+        return []
+    return _find_similar_documents(searcher, query=query, exclude_match=exclude_match)
+
+
 def make_ingest_router(store, run_collection_update) -> APIRouter:
     router = APIRouter()
 
@@ -54,15 +64,12 @@ def make_ingest_router(store, run_collection_update) -> APIRouter:
 
         result = ingest_youtube(req, transcripts_path=yt_path)
 
-        similar = []
+        similar = _similar_for_collection(
+            store, yt_collection,
+            query=result["summary"][:2000],
+            exclude_match=lambda doc: doc.get("url", "") == req.url,
+        )
         if yt_collection and store.has_collection(yt_collection):
-            searcher = store.get_searchers([yt_collection]).get(yt_collection)
-            if searcher:
-                similar = _find_similar_documents(
-                    searcher,
-                    query=result["summary"][:2000],
-                    exclude_match=lambda doc: doc.get("url", "") == req.url,
-                )
             background_tasks.add_task(run_collection_update, yt_collection)
 
         return {
@@ -97,15 +104,12 @@ def make_ingest_router(store, run_collection_update) -> APIRouter:
 
         result = ingest_x_article(req, sources_path=xa_path)
 
-        similar = []
+        similar = _similar_for_collection(
+            store, xa_collection,
+            query=req.summary[:2000],
+            exclude_match=lambda doc: doc.get("url", "") == req.url,
+        )
         if xa_collection and store.has_collection(xa_collection):
-            searcher = store.get_searchers([xa_collection]).get(xa_collection)
-            if searcher:
-                similar = _find_similar_documents(
-                    searcher,
-                    query=req.summary[:2000],
-                    exclude_match=lambda doc: doc.get("url", "") == req.url,
-                )
             background_tasks.add_task(run_collection_update, xa_collection)
 
         return {
@@ -132,18 +136,15 @@ def make_ingest_router(store, run_collection_update) -> APIRouter:
 
         result = ingest_jira(req, sources_path=jira_path)
 
-        similar = []
-        if jira_collection and store.has_collection(jira_collection):
-            searcher = store.get_searchers([jira_collection]).get(jira_collection)
-            if searcher:
-                similar = _find_similar_documents(
-                    searcher,
-                    query=f"{req.issueKey} {result['summary']}",
-                    exclude_match=lambda doc: req.issueKey in doc.get("url", ""),
-                )
+        similar = _similar_for_collection(
+            store, jira_collection,
+            query=f"{req.issueKey} {result['summary']}",
+            exclude_match=lambda doc: req.issueKey in doc.get("url", ""),
+        )
 
         # Automatic reindex skipped — the daily update script handles both
         # collection reindexing and knowledge graph rebuild in one pass.
+        # Use POST /api/collections/{name}/update to trigger manually if needed.
 
         return {
             "status": "ingested",

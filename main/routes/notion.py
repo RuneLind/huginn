@@ -10,6 +10,38 @@ from main.sources.notion.notion_document_reader import NotionDocumentReader
 logger = logging.getLogger(__name__)
 
 
+def _resolve_relation_titles(notion, page):
+    """Resolve relation property IDs to titles for rendering."""
+    for prop in page.get("properties", {}).values():
+        if prop.get("type") != "relation":
+            continue
+        for rel in prop.get("relation", []):
+            if "id" in rel and "title" not in rel:
+                try:
+                    related = notion.pages.retrieve(page_id=rel["id"])
+                    rel["title"] = NotionDocumentReader.get_page_title(related)
+                except Exception:
+                    pass
+
+
+def _fetch_all_blocks(notion, block_id, depth=0):
+    """Recursively fetch all blocks for a page."""
+    if depth > 5:
+        return []
+    blocks = []
+    cursor = None
+    while True:
+        response = notion.blocks.children.list(block_id=block_id, start_cursor=cursor)
+        for block in response.get("results", []):
+            blocks.append(block)
+            if block.get("has_children"):
+                block["children"] = _fetch_all_blocks(notion, block["id"], depth + 1)
+        if not response.get("has_more"):
+            break
+        cursor = response.get("next_cursor")
+    return blocks
+
+
 def make_notion_router(store) -> APIRouter:
     router = APIRouter()
 
@@ -30,36 +62,6 @@ def make_notion_router(store) -> APIRouter:
             }
         except Exception:
             return None
-
-    def _resolve_relation_titles(notion, page):
-        """Resolve relation property IDs to titles for rendering."""
-        for prop in page.get("properties", {}).values():
-            if prop.get("type") != "relation":
-                continue
-            for rel in prop.get("relation", []):
-                if "id" in rel and "title" not in rel:
-                    try:
-                        related = notion.pages.retrieve(page_id=rel["id"])
-                        rel["title"] = NotionDocumentReader.get_page_title(related)
-                    except Exception:
-                        pass
-
-    def _fetch_all_blocks(notion, block_id, depth=0):
-        """Recursively fetch all blocks for a page."""
-        if depth > 5:
-            return []
-        blocks = []
-        cursor = None
-        while True:
-            response = notion.blocks.children.list(block_id=block_id, start_cursor=cursor)
-            for block in response.get("results", []):
-                blocks.append(block)
-                if block.get("has_children"):
-                    block["children"] = _fetch_all_blocks(notion, block["id"], depth + 1)
-            if not response.get("has_more"):
-                break
-            cursor = response.get("next_cursor")
-        return blocks
 
     @router.get("/api/notion/page/{notion_id}")
     def get_notion_page(
