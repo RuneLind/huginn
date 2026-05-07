@@ -1,137 +1,142 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from knowledge_api_server import (
-    app, store, _extract_chunk_text, _extract_chunk_heading,
-    _extract_chunk_metadata, _apply_metadata_filters,
-    _truncate_snippet, _separate_metadata, _normalize_score,
+from knowledge_api_server import app, store
+from main.core.search_response_formatter import (
+    apply_metadata_filters,
+    extract_chunk_heading,
+    extract_chunk_metadata,
+    extract_chunk_text,
+    normalize_score,
+    separate_metadata,
+    truncate_snippet,
 )
 from main.sources.notion.notion_document_reader import NotionDocumentReader
 
 
 class TestExtractChunkText:
     def test_dict_with_indexed_data(self):
-        assert _extract_chunk_text({"indexedData": "hello"}) == "hello"
+        assert extract_chunk_text({"indexedData": "hello"}) == "hello"
 
     def test_dict_without_indexed_data(self):
-        result = _extract_chunk_text({"other": "data"})
+        result = extract_chunk_text({"other": "data"})
         assert "other" in result
 
     def test_plain_string(self):
-        assert _extract_chunk_text("hello") == "hello"
+        assert extract_chunk_text("hello") == "hello"
 
     def test_empty_string(self):
-        assert _extract_chunk_text("") == ""
+        assert extract_chunk_text("") == ""
 
     def test_none(self):
-        assert _extract_chunk_text(None) == ""
+        assert extract_chunk_text(None) == ""
 
 
 class TestExtractChunkMetadata:
     def test_dict_with_metadata(self):
-        assert _extract_chunk_metadata({"metadata": {"wip": "true"}}) == {"wip": "true"}
+        assert extract_chunk_metadata({"metadata": {"wip": "true"}}) == {"wip": "true"}
 
     def test_dict_without_metadata(self):
-        assert _extract_chunk_metadata({"indexedData": "text"}) is None
+        assert extract_chunk_metadata({"indexedData": "text"}) is None
 
     def test_plain_string(self):
-        assert _extract_chunk_metadata("hello") is None
+        assert extract_chunk_metadata("hello") is None
 
     def test_none(self):
-        assert _extract_chunk_metadata(None) is None
+        assert extract_chunk_metadata(None) is None
 
 
 class TestExtractChunkHeading:
     def test_dict_with_heading(self):
-        assert _extract_chunk_heading({"heading": "Overview"}) == "Overview"
+        assert extract_chunk_heading({"heading": "Overview"}) == "Overview"
 
     def test_dict_without_heading(self):
-        assert _extract_chunk_heading({"indexedData": "text"}) is None
+        assert extract_chunk_heading({"indexedData": "text"}) is None
 
     def test_plain_string(self):
-        assert _extract_chunk_heading("hello") is None
+        assert extract_chunk_heading("hello") is None
 
     def test_none(self):
-        assert _extract_chunk_heading(None) is None
+        assert extract_chunk_heading(None) is None
 
 
 class TestTruncateSnippet:
     def test_short_text_unchanged(self):
-        assert _truncate_snippet("Hello world.") == "Hello world."
+        assert truncate_snippet("Hello world.") == "Hello world."
 
     def test_none_returns_none(self):
-        assert _truncate_snippet(None) is None
+        assert truncate_snippet(None) is None
 
     def test_empty_returns_empty(self):
-        assert _truncate_snippet("") == ""
+        assert truncate_snippet("") == ""
 
     def test_cuts_at_sentence_boundary(self):
         text = "First sentence. " + "x" * 200
-        result = _truncate_snippet(text, target=20)
+        result = truncate_snippet(text, target=20)
         assert result == "First sentence."
 
     def test_falls_back_to_word_boundary(self):
         text = "word " * 60  # 300 chars, no sentence endings
-        result = _truncate_snippet(text, target=200)
+        result = truncate_snippet(text, target=200)
         assert result.endswith("…")
         assert len(result) <= 240  # should be near target
 
     def test_hard_cut_no_spaces(self):
         text = "x" * 300
-        result = _truncate_snippet(text, target=200)
+        result = truncate_snippet(text, target=200)
         assert result == "x" * 200 + "…"
 
 
 class TestSeparateMetadata:
     def test_extracts_metadata_lines(self):
         text = "**Status:** Active\n**Priority:** High\n\nActual content here."
-        content, meta, breadcrumb = _separate_metadata(text)
+        content, meta, breadcrumb = separate_metadata(text)
         assert meta == {"Status": "Active", "Priority": "High"}
         assert content == "Actual content here."
         assert breadcrumb is None
 
     def test_extracts_breadcrumb(self):
         text = "[Projects > My Project > Page]\n**Status:** Done\n\nContent."
-        content, meta, breadcrumb = _separate_metadata(text)
+        content, meta, breadcrumb = separate_metadata(text)
         assert meta == {"Status": "Done"}
         assert content == "Content."
         assert breadcrumb == "Projects > My Project > Page"
 
     def test_breadcrumb_only_chunk(self):
         text = "[Folder > Sub > Page]"
-        content, meta, breadcrumb = _separate_metadata(text)
+        content, meta, breadcrumb = separate_metadata(text)
         assert content == ""
         assert meta == {}
         assert breadcrumb == "Folder > Sub > Page"
 
     def test_bracket_without_arrow_not_breadcrumb(self):
         text = "[This is just a note]\nSome content."
-        content, meta, breadcrumb = _separate_metadata(text)
+        content, meta, breadcrumb = separate_metadata(text)
         assert breadcrumb is None
         assert "[This is just a note]" in content
 
     def test_no_metadata(self):
         text = "Just plain content here."
-        content, meta, breadcrumb = _separate_metadata(text)
+        content, meta, breadcrumb = separate_metadata(text)
         assert content == "Just plain content here."
         assert meta == {}
         assert breadcrumb is None
 
     def test_empty_input(self):
-        content, meta, breadcrumb = _separate_metadata("")
+        content, meta, breadcrumb = separate_metadata("")
         assert content == ""
         assert meta == {}
         assert breadcrumb is None
 
     def test_none_input(self):
-        content, meta, breadcrumb = _separate_metadata(None)
+        content, meta, breadcrumb = separate_metadata(None)
         assert content == ""
         assert meta == {}
         assert breadcrumb is None
 
     def test_metadata_with_blank_lines_at_start(self):
         text = "\n\n**Type:** Bug\nSome content."
-        content, meta, breadcrumb = _separate_metadata(text)
+        content, meta, breadcrumb = separate_metadata(text)
         assert meta == {"Type": "Bug"}
         assert content == "Some content."
         assert breadcrumb is None
@@ -142,14 +147,14 @@ class TestSnippetFallback:
 
     def test_empty_content_uses_metadata_as_snippet(self):
         """When chunk content is only metadata (no body text), snippet should show metadata."""
-        # Simulate what the server does: _separate_metadata strips metadata lines,
+        # Simulate what the server does: separate_metadata strips metadata lines,
         # leaving empty content. The snippet fallback should format metadata instead.
-        snippet = _truncate_snippet("")
+        snippet = truncate_snippet("")
         assert snippet == ""
 
         # Simulate the fallback logic from the search endpoint
         best_chunk = {"content": "", "metadata": {"Status": "Active", "Type": "Task"}}
-        snippet = _truncate_snippet(best_chunk["content"])
+        snippet = truncate_snippet(best_chunk["content"])
         if not snippet and best_chunk.get("metadata"):
             snippet = " | ".join(f"{k}: {v}" for k, v in best_chunk["metadata"].items())
         assert snippet == "Status: Active | Type: Task"
@@ -157,7 +162,7 @@ class TestSnippetFallback:
     def test_no_fallback_when_content_exists(self):
         """When content exists, metadata fallback should not trigger."""
         best_chunk = {"content": "Real content here.", "metadata": {"Status": "Active"}}
-        snippet = _truncate_snippet(best_chunk["content"])
+        snippet = truncate_snippet(best_chunk["content"])
         if not snippet and best_chunk.get("metadata"):
             snippet = " | ".join(f"{k}: {v}" for k, v in best_chunk["metadata"].items())
         assert snippet == "Real content here."
@@ -165,7 +170,7 @@ class TestSnippetFallback:
     def test_no_fallback_when_no_metadata(self):
         """When content is empty and no metadata, snippet stays empty."""
         best_chunk = {"content": "", "score": 0}
-        snippet = _truncate_snippet(best_chunk["content"])
+        snippet = truncate_snippet(best_chunk["content"])
         if not snippet and best_chunk.get("metadata"):
             snippet = " | ".join(f"{k}: {v}" for k, v in best_chunk["metadata"].items())
         assert snippet == ""
@@ -174,39 +179,39 @@ class TestSnippetFallback:
 class TestNormalizeScore:
     def test_reranked_zero_score_low_relevance(self):
         # Score 0 with reranker = noise (near threshold), should be low relevance
-        result = _normalize_score(0, is_reranked=True)
+        result = normalize_score(0, is_reranked=True)
         assert result < 0.35
 
     def test_reranked_strong_match(self):
         # Score -1.0 with reranker = strong match → high relevance
-        result = _normalize_score(-1.0, is_reranked=True)
+        result = normalize_score(-1.0, is_reranked=True)
         assert result > 0.95
 
     def test_reranked_medium_match(self):
         # Score -0.3 = medium confidence → mid-range relevance
-        result = _normalize_score(-0.3, is_reranked=True)
+        result = normalize_score(-0.3, is_reranked=True)
         assert 0.5 < result < 0.9
 
     def test_reranked_weak_match(self):
         # Score -0.05 = low confidence → low relevance
-        result = _normalize_score(-0.05, is_reranked=True)
+        result = normalize_score(-0.05, is_reranked=True)
         assert result < 0.5
 
     def test_non_reranked_returns_placeholder(self):
         # Non-reranked returns constant placeholder (overridden with rank-based)
-        assert _normalize_score(0, is_reranked=False) == 0.5
-        assert _normalize_score(-1.0, is_reranked=False) == 0.5
-        assert _normalize_score(5.0, is_reranked=False) == 0.5
+        assert normalize_score(0, is_reranked=False) == 0.5
+        assert normalize_score(-1.0, is_reranked=False) == 0.5
+        assert normalize_score(5.0, is_reranked=False) == 0.5
 
     def test_returns_float_between_0_and_1(self):
         for score in [-10, -1, 0, 1, 10]:
-            result = _normalize_score(score, is_reranked=True)
+            result = normalize_score(score, is_reranked=True)
             assert 0.0 <= result <= 1.0
 
     def test_extreme_scores_no_overflow(self):
         # math.exp(710) would overflow without clamping
-        assert _normalize_score(1000, is_reranked=True) < 0.01
-        assert _normalize_score(-1000, is_reranked=True) > 0.99
+        assert normalize_score(1000, is_reranked=True) < 0.01
+        assert normalize_score(-1000, is_reranked=True) > 0.99
 
 
 class TestExtractNotionTitle:
@@ -297,7 +302,7 @@ class TestApplyMetadataFilters:
             {"title": "b", "metadata": {"project": "other"}},
             {"title": "c", "metadata": {}},
         ]
-        filtered = _apply_metadata_filters(results, project="my-proj")
+        filtered = apply_metadata_filters(results, project="my-proj")
         assert len(filtered) == 1
         assert filtered[0]["title"] == "a"
 
@@ -306,7 +311,7 @@ class TestApplyMetadataFilters:
             {"title": "a", "metadata": {"gitBranch": "main"}},
             {"title": "b", "metadata": {"gitBranch": "feature/x"}},
         ]
-        filtered = _apply_metadata_filters(results, git_branch="main")
+        filtered = apply_metadata_filters(results, git_branch="main")
         assert len(filtered) == 1
         assert filtered[0]["title"] == "a"
 
@@ -316,7 +321,7 @@ class TestApplyMetadataFilters:
             {"title": "b", "metadata": {"project": "p", "gitBranch": "dev"}},
             {"title": "c", "metadata": {"project": "other", "gitBranch": "main"}},
         ]
-        filtered = _apply_metadata_filters(results, project="p", git_branch="main")
+        filtered = apply_metadata_filters(results, project="p", git_branch="main")
         assert len(filtered) == 1
         assert filtered[0]["title"] == "a"
 
@@ -328,7 +333,7 @@ class TestApplyMetadataFilters:
                 "matchedChunks": [{"metadata": {"project": "my-proj"}}],
             },
         ]
-        filtered = _apply_metadata_filters(results, project="my-proj")
+        filtered = apply_metadata_filters(results, project="my-proj")
         assert len(filtered) == 1
 
     def test_chunk_metadata_overrides_doc_metadata(self):
@@ -339,17 +344,17 @@ class TestApplyMetadataFilters:
                 "matchedChunks": [{"metadata": {"project": "new"}}],
             },
         ]
-        filtered = _apply_metadata_filters(results, project="new")
+        filtered = apply_metadata_filters(results, project="new")
         assert len(filtered) == 1
 
     def test_no_filters_returns_all(self):
         results = [{"title": "a"}, {"title": "b"}]
-        filtered = _apply_metadata_filters(results)
+        filtered = apply_metadata_filters(results)
         assert len(filtered) == 2
 
     def test_no_metadata_excluded(self):
         results = [{"title": "a"}]
-        filtered = _apply_metadata_filters(results, project="x")
+        filtered = apply_metadata_filters(results, project="x")
         assert len(filtered) == 0
 
     def test_brief_results_without_matched_chunks(self):
@@ -358,7 +363,7 @@ class TestApplyMetadataFilters:
             {"title": "a", "metadata": {"project": "p"}, "snippet": "..."},
             {"title": "b", "metadata": {"project": "other"}, "snippet": "..."},
         ]
-        filtered = _apply_metadata_filters(results, project="p")
+        filtered = apply_metadata_filters(results, project="p")
         assert len(filtered) == 1
         assert filtered[0]["title"] == "a"
 
