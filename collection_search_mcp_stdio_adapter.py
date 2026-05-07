@@ -20,9 +20,8 @@ from mcp.server.fastmcp import FastMCP
 
 from main.core.mcp_search_tool import build_search_tool_fn
 from main.core.trace_store import TRACE_DEFAULT_ENV
-from main.factories.search_collection_factory import create_collection_searcher
-from main.graph.graph_loader import load_default_knowledge_graph
 from main.graph.graph_search_augmenter import GraphSearchAugmenter
+from main.runtime.knowledge_store import get_store
 from main.utils.env import env_bool
 from main.utils.logger import add_file_handler, route_handlers_to_stderr, setup_root_logger
 
@@ -54,11 +53,14 @@ def main():
     route_handlers_to_stderr()
     add_file_handler(f"huginn-{args['collection']}-mcp.log")
 
-    searcher = create_collection_searcher(
-        collection_name=args['collection'], index_name=args['index']
+    store = get_store()
+    store.load_collections(
+        [args['collection']],
+        faiss_index_name=args['index'],
+        extra_graph_paths=args['graphPaths'],
     )
-    graph = load_default_knowledge_graph(extra_paths=args['graphPaths'])
-    augmenter = GraphSearchAugmenter(graph)
+    searcher = store.get_searchers()[args['collection']]
+    augmenter = GraphSearchAugmenter(store.graph)
 
     mcp = FastMCP("documents-search")
     tool_description = (
