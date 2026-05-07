@@ -1,62 +1,105 @@
 #!/usr/bin/env python3
-import json
+"""Single-collection MCP stdio adapter.
+
+Registers one ``search_<collection>`` tool whose handler runs the shared
+graph-aware search pipeline (knowledge_api_server.py /api/search-equivalent).
+
+Environment:
+    HUGINN_TRACE_DEFAULT    "1"/"true"/"yes" to attach a per-search trace
+                            under result.trace. Only enable when an
+                            orchestrator strips the field before the LLM
+                            sees it.
+    KNOWLEDGE_GRAPH_PATH    Optional graph JSON path; combined with
+    JIRA_GRAPH_PATH         --graphPaths and any auto-detected
+    LLM_GRAPH_PATH          *_llm_graph.json files in the private sub-repo
+                            dirs (huginn-{nav,jarvis}/scripts/...).
+"""
 import argparse
-import sys
 import logging
+import sys
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
+from main.core.mcp_search_tool import build_search_tool_fn
 from main.factories.search_collection_factory import create_collection_searcher
+from main.graph.graph_loader import load_default_knowledge_graph
+from main.graph.graph_search_augmenter import GraphSearchAugmenter
+from main.utils.env import env_bool
 from main.utils.logger import setup_root_logger
+
 
 setup_root_logger()
 
-# Redirect logging to stderr to avoid interfering with MCP protocol on stdout
-try:
-    root_logger = logging.getLogger()
-    for handler in root_logger.handlers:
-        handler.setStream(sys.stderr)
-    
-    # Optionally add file logging (won't break if it fails)
+TRACE_DEFAULT = env_bool("HUGINN_TRACE_DEFAULT")
+
+
+def _redirect_logging_to_stderr():
     try:
-        from pathlib import Path
-        log_file = Path.home() / "logs" / "teessi-confluence-mcp.log"
+        for handler in logging.getLogger().handlers:
+            handler.setStream(sys.stderr)
+    except Exception:
+        pass
+
+
+def _add_file_log_handler(name: str):
+    try:
+        log_file = Path.home() / "logs" / name
         log_file.parent.mkdir(exist_ok=True)
         file_handler = logging.FileHandler(log_file)
         file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-        root_logger.addHandler(file_handler)
+        logging.getLogger().addHandler(file_handler)
     except Exception:
-        pass  # If file logging fails, continue without it
-except Exception:
-    pass  # If anything fails, continue without stderr redirect
+        pass
 
-mcp = FastMCP("documents-search")
 
-ap = argparse.ArgumentParser()
-ap.add_argument("-collection", "--collection", required=True, help="Collection name (will be used as root folder name)")
-ap.add_argument("-index", "--index", required=False, default=None, help="Index that will be used for search (auto-detected if omitted)")
+def _parse_args(argv=None):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("-collection", "--collection", required=True,
+                    help="Collection name (will be used as root folder name)")
+    ap.add_argument("-index", "--index", required=False, default=None,
+                    help="Index that will be used for search (auto-detected if omitted)")
+    ap.add_argument("-maxNumberOfChunks", "--maxNumberOfChunks", required=False, type=int, default=100,
+                    help="Max number of text chunks in result")
+    ap.add_argument("-maxNumberOfDocuments", "--maxNumberOfDocuments", required=False, type=int, default=10,
+                    help="Max number of documents in result (default: 10)")
+    ap.add_argument("-includeFullText", "--includeFullText", action="store_true", required=False, default=False,
+                    help="Include full text content in search results. If passed, reduce --maxNumberOfChunks or set a small --maxNumberOfDocuments to avoid blowing model context.")
+    ap.add_argument("-graphPaths", "--graphPaths", required=False, nargs='*', default=None,
+                    help="Optional knowledge graph JSON paths. Combined with KNOWLEDGE_GRAPH_PATH/JIRA_GRAPH_PATH/LLM_GRAPH_PATH and *_llm_graph.json files auto-detected in the private sub-repo dirs.")
+    return vars(ap.parse_args(argv))
 
-ap.add_argument("-maxNumberOfChunks", "--maxNumberOfChunks", required=False, type=int, default=100, help="Max number of text chunks in result")
-ap.add_argument("-maxNumberOfDocuments", "--maxNumberOfDocuments", required=False, type=int, default=None, help="Max number of documents in result")
 
-ap.add_argument("-includeFullText", "--includeFullText", action="store_true", required=False, default=False, help="If passed - full text content will be included in the search result. By default only matched chunks content is included. If passed, it's better to reduce --maxNumberOfChunks or set small --maxNumberOfDocuments like 10-30 to avoid too big response and breaking AI agent.")
-args = vars(ap.parse_args())
+def main():
+    args = _parse_args()
+    _redirect_logging_to_stderr()
+    _add_file_log_handler(f"huginn-{args['collection']}-mcp.log")
 
-searcher = create_collection_searcher(collection_name=args['collection'], index_name=args['index'])
+    searcher = create_collection_searcher(
+        collection_name=args['collection'], index_name=args['index']
+    )
+    graph = load_default_knowledge_graph(extra_paths=args['graphPaths'])
+    augmenter = GraphSearchAugmenter(graph)
 
-tool_description = """The tool allows searching in collection of documents by vector search. 
-Each document contains 'url' field, if you consider a document as relevant to the query, always include the 'url' field in the response, put it close to the information used from the document"""
+    mcp = FastMCP("documents-search")
+    tool_description = (
+        "The tool allows searching in collection of documents by vector search. "
+        "Each document contains 'url' field; if you consider a document relevant to the query, "
+        "always include the 'url' field in the response, near the cited information."
+    )
+    search_fn = build_search_tool_fn(
+        searcher,
+        args['collection'],
+        augmenter,
+        max_number_of_chunks=args['maxNumberOfChunks'],
+        max_number_of_documents=args['maxNumberOfDocuments'],
+        include_full_text=args['includeFullText'],
+        trace_default=TRACE_DEFAULT,
+    )
+    mcp.tool(name=f"search_{args['collection']}", description=tool_description)(search_fn)
 
-@mcp.tool(name=f"search_{args['collection']}", description=tool_description)
-def search_documents(query: str) -> str:
-    search_results = searcher.search(query, 
-                                     max_number_of_chunks=args['maxNumberOfChunks'], 
-                                     max_number_of_documents=args['maxNumberOfDocuments'],
-                                     include_text_content=args['includeFullText'],
-                                     include_matched_chunks_content=not args['includeFullText'])
+    mcp.run(transport='stdio')
 
-    return json.dumps(search_results, indent=2, ensure_ascii=False)
-    
 
 if __name__ == "__main__":
-    mcp.run(transport='stdio')
+    main()
