@@ -19,14 +19,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import datetime as dt
-import subprocess
-import urllib.request
-import urllib.error
 
 from fastapi import FastAPI, Query, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Optional
 import uvicorn
 
 from main.persisters.disk_persister import DiskPersister
@@ -36,14 +31,18 @@ from main.core.search_trace import create_trace
 from main.core.trace_store import any_trace_enabled, default_trace_store, pointer_mode_enabled
 from main.sources.notion.notion_document_reader import NotionDocumentReader
 from main.utils.logger import setup_root_logger
-from main.utils.filename import sanitize_filename
-from main.fetchers.youtube.youtube_transcript_downloader import YouTubeTranscriptDownloader
-from scripts.jira.sanitizers.pii_sanitizer import PiiSanitizer
+from main.ingest.youtube import (
+    YouTubeIngestRequest,
+    ingest_youtube,
+    fetch_transcript as _fetch_youtube_transcript,
+    list_categories as _list_youtube_categories,
+)
+from main.ingest.x_articles import XArticleIngestRequest, ingest_x_article
+from main.ingest.jira import JiraIngestRequest, ingest_jira
+from main.ingest.categories import CATEGORIES
 
 setup_root_logger()
 logger = logging.getLogger(__name__)
-
-_pii_sanitizer = PiiSanitizer()
 
 
 class KnowledgeStore:
@@ -240,52 +239,6 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
-
-
-class YouTubeIngestRequest(BaseModel):
-    title: str
-    url: str
-    video_id: Optional[str] = None
-    transcript: Optional[str] = None  # if provided, skip fetching
-    summary: Optional[str] = None  # if provided, skip Claude summarization
-    date: Optional[str] = None
-    category: Optional[str] = None  # auto-detected if not provided
-
-
-class XArticleIngestRequest(BaseModel):
-    """X/Twitter article content summarized by the Chrome extension."""
-    title: str
-    url: str
-    author: str  # @handle of the article author
-    summary: str  # pre-made summary from the extension
-    date: Optional[str] = None
-    category: Optional[str] = None  # auto-detected if not provided
-    tags: Optional[list[str]] = None
-
-
-class JiraIngestComment(BaseModel):
-    author: str = "Unknown"
-    date: str = ""
-    body: str = ""
-
-
-class JiraIngestRequest(BaseModel):
-    """Jira issue content scraped from the page DOM by the Chrome extension."""
-    issueKey: str  # e.g., "PROJECT-1234"
-    url: Optional[str] = None
-    title: Optional[str] = None
-    summary: Optional[str] = None
-    status: Optional[str] = None
-    type: Optional[str] = None
-    priority: Optional[str] = None
-    assignee: Optional[str] = None
-    reporter: Optional[str] = None
-    labels: Optional[list[str]] = None
-    description: Optional[str] = None
-    comments: Optional[list[JiraIngestComment]] = None
-    created: Optional[str] = None
-    updated: Optional[str] = None
-    epicLink: Optional[str] = None
 
 
 @app.get("/health")
@@ -1129,128 +1082,33 @@ def get_notion_page(
         raise HTTPException(status_code=502, detail=f"Notion API error: {e}")
 
 
-CATEGORIES = [
-    "ai/claude-code", "ai/claude", "ai/openclaw", "ai/general", "ai/rag",
-    "health", "tech", "career", "parenting", "entertainment", "coding",
-]
+def _find_similar_documents(searcher, query: str, exclude_match) -> list[dict]:
+    """Run a similarity search and return up to 5 {title, url, snippet} results.
 
-SUMMARIZE_PROMPT = """Summarize this YouTube video transcript into structured key insights.
-
-Format rules:
-- Use ### for section headers that group related points
-- Use numbered lists or bullet points with emoji prefixes for each insight
-- Use **bold** for key terms, concepts, and important data points
-- Keep it concise but capture all important points and actionable takeaways
-- Each point should be self-contained and informative
-
-Also pick the single best category from this list: {categories}
-
-Video title: {title}
-
-Transcript:
-{transcript}
-
-Respond in this exact format:
-CATEGORY: <one category from the list>
-
-SUMMARY:
-<your markdown summary>"""
-
-
-_GENERIC_TITLES = {"youtube", "youtube.com", "(1) youtube", "(2) youtube", "(3) youtube", ""}
-
-
-def _fetch_youtube_title(video_id: str) -> str | None:
-    """Fetch the real video title from YouTube's oembed API."""
-    try:
-        url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            data = json.loads(resp.read())
-            return data.get("title")
-    except Exception as e:
-        logger.warning(f"Failed to fetch YouTube title for {video_id}: {e}")
-        return None
-
-
-def _extract_video_id(url_or_id: str) -> str:
-    """Extract video ID from YouTube URL or return as-is."""
-    match = re.search(r'(?:youtube\.com/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]{11})', url_or_id)
-    if match:
-        return match.group(1)
-    if len(url_or_id) == 11 and re.match(r'^[a-zA-Z0-9_-]+$', url_or_id):
-        return url_or_id
-    raise HTTPException(status_code=400, detail=f"Invalid YouTube URL or video ID: {url_or_id}")
-
-
-def _fetch_youtube_transcript(video_id_or_url: str) -> str:
-    """Fetch YouTube transcript server-side using existing YouTubeTranscriptDownloader."""
-    video_id = _extract_video_id(video_id_or_url)
-    downloader = YouTubeTranscriptDownloader(max_retries=3, prefer_languages=["en"])
-
-    transcript_data = downloader.download_transcript(video_id)
-    if not transcript_data or not transcript_data.get("available"):
-        raise HTTPException(status_code=422, detail=f"No transcript available for video {video_id}")
-
-    text = downloader.format_transcript_plain(transcript_data["segments"])
-    if not text.strip():
-        raise HTTPException(status_code=422, detail="Transcript is empty")
-
-    logger.info(f"Fetched transcript for {video_id}: {len(text)} chars")
-    return text
-
-
-def _call_claude_headless(prompt: str, model: str = None) -> str:
-    """Call Claude Code CLI in headless mode (uses Max subscription, no API key needed).
-
-    Passes prompt via stdin (not CLI arg) to avoid OS ARG_MAX limits with long transcripts.
+    exclude_match is called on each result; truthy means skip (e.g. self-link).
     """
-    model = model or os.environ.get("CLAUDE_MODEL", "sonnet")
-    cmd = ["claude", "-p", "-", "--output-format", "json", "--model", model]
-
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=180,
-            input=prompt,
-        )
-    except FileNotFoundError:
-        raise HTTPException(status_code=503, detail="Claude CLI not found. Install Claude Code first.")
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="Claude CLI timed out after 180s")
-
-    if proc.returncode != 0:
-        stderr = proc.stderr.strip()[:500] if proc.stderr else "unknown error"
-        raise HTTPException(status_code=502, detail=f"Claude CLI error: {stderr}")
-
-    # Parse JSON output — result text is in the "result" field
-    try:
-        result = json.loads(proc.stdout)
-        return result.get("result", proc.stdout)
-    except json.JSONDecodeError:
-        # Fallback: raw stdout is the response text
-        return proc.stdout.strip()
-
-
-def _parse_claude_response(text: str) -> tuple[str, str]:
-    """Parse CATEGORY and SUMMARY from Claude's response."""
-    category = "ai/general"
-    summary = text
-
-    if "CATEGORY:" in text and "SUMMARY:" in text:
-        parts = text.split("SUMMARY:", 1)
-        cat_line = parts[0].strip()
-        summary = parts[1].strip()
-        # Extract category
-        for line in cat_line.split("\n"):
-            if line.startswith("CATEGORY:"):
-                cat = line.replace("CATEGORY:", "").strip()
-                if cat in CATEGORIES:
-                    category = cat
-                break
-
-    return category, summary
+    search_result = searcher.search(
+        query,
+        max_number_of_chunks=30,
+        max_number_of_documents=5,
+        include_matched_chunks_content=True,
+    )
+    similar = []
+    for doc in search_result.get("results", []):
+        if exclude_match(doc):
+            continue
+        doc_title = doc.get("path", "").rsplit("/", 1)[-1].replace(".json", "")
+        chunks = doc.get("matchedChunks", [])
+        snippet = ""
+        if chunks:
+            raw = chunks[0].get("content", "")
+            snippet = _truncate_snippet(_extract_chunk_text(raw))
+        similar.append({
+            "title": doc_title,
+            "url": doc.get("url", ""),
+            "snippet": snippet,
+        })
+    return similar[:5]
 
 
 @app.post("/api/youtube/ingest")
@@ -1261,113 +1119,25 @@ def youtube_ingest(req: YouTubeIngestRequest, background_tasks: BackgroundTasks)
     if not yt_path:
         raise HTTPException(status_code=503, detail="YouTube transcripts path not configured")
 
-    date = req.date or dt.date.today().isoformat()
+    result = ingest_youtube(req, transcripts_path=yt_path)
 
-    # Validate title — Chrome extension sometimes sends "YouTube" or the URL before page loads
-    title = req.title
-    title_lower = title.lower().strip()
-    is_generic = title_lower in _GENERIC_TITLES
-    is_url = "youtube.com/" in title_lower or "youtu.be/" in title_lower
-    if is_generic or is_url:
-        video_id = _extract_video_id(req.video_id or req.url)
-        real_title = _fetch_youtube_title(video_id)
-        if real_title:
-            title = real_title
-            logger.info(f"Replaced generic title '{req.title}' with '{real_title}'")
-        else:
-            raise HTTPException(status_code=400, detail=f"Title '{req.title}' is too generic and couldn't fetch real title from YouTube")
-
-    # If pre-made summary provided (e.g. from javrvis streaming), skip transcript fetch + Claude
-    if req.summary:
-        summary = req.summary
-        category = req.category or "ai/general"
-    else:
-        # Fetch transcript server-side if not provided
-        transcript = req.transcript
-        if not transcript:
-            transcript = _fetch_youtube_transcript(req.video_id or req.url)
-
-        # Call Claude to summarize + categorize
-        prompt = SUMMARIZE_PROMPT.format(
-            categories=", ".join(CATEGORIES),
-            title=title,
-            transcript=transcript[:100000],
-        )
-        claude_response = _call_claude_headless(prompt)
-        auto_category, summary = _parse_claude_response(claude_response)
-        category = req.category or auto_category
-    if category not in CATEGORIES:
-        raise HTTPException(status_code=400, detail=f"Invalid category '{category}'. Must be one of: {', '.join(CATEGORIES)}")
-    tags = ", ".join(category.split("/"))
-
-    # Build markdown content
-    frontmatter = f"---\ndate: {date}\nurl: {req.url}\ncategory: {category}\ntags: \"{tags}\"\n---\n\n"
-    md_content = frontmatter + summary
-
-    # Save file (detect duplicates by checking existing file's URL in frontmatter)
-    category_dir = os.path.join(yt_path, category)
-    os.makedirs(category_dir, exist_ok=True)
-    base_filename = sanitize_filename(title)
-    filename = base_filename + ".md"
-    filepath = os.path.join(category_dir, filename)
-
-    if os.path.exists(filepath):
-        # Check if it's the same video (same URL) — overwrite is fine
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                existing_content = f.read(500)
-            if f"url: {req.url}" not in existing_content:
-                # Different video, same title — add numeric suffix
-                for i in range(2, 100):
-                    filename = f"{base_filename} ({i}).md"
-                    filepath = os.path.join(category_dir, filename)
-                    if not os.path.exists(filepath):
-                        break
-        except Exception:
-            pass
-
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write(md_content)
-    file_rel_path = os.path.join(category, filename)
-    logger.info(f"YouTube ingest: saved {file_rel_path} (category: {category})")
-
-    # Search for similar videos
     similar = []
     if yt_collection and store.has_collection(yt_collection):
         searcher = store.get_searchers([yt_collection]).get(yt_collection)
         if searcher:
-            search_result = searcher.search(
-                summary[:2000],
-                max_number_of_chunks=30,
-                max_number_of_documents=5,
-                include_matched_chunks_content=True,
+            similar = _find_similar_documents(
+                searcher,
+                query=result["summary"][:2000],
+                exclude_match=lambda doc: doc.get("url", "") == req.url,
             )
-            for doc in search_result.get("results", []):
-                doc_url = doc.get("url", "")
-                if doc_url == req.url:
-                    continue
-                doc_title = doc.get("path", "").rsplit("/", 1)[-1].replace(".json", "")
-                chunks = doc.get("matchedChunks", [])
-                snippet = ""
-                if chunks:
-                    raw = chunks[0].get("content", "")
-                    snippet = _truncate_snippet(_extract_chunk_text(raw))
-                similar.append({
-                    "title": doc_title,
-                    "url": doc_url,
-                    "snippet": snippet,
-                })
-
-    # Trigger background reindex
-    if yt_collection and store.has_collection(yt_collection):
         background_tasks.add_task(run_collection_update, yt_collection)
 
     return {
         "status": "ingested",
-        "file_path": file_rel_path,
-        "category": category,
-        "summary": summary,
-        "similar": similar[:5],
+        "file_path": result["file_path"],
+        "category": result["category"],
+        "summary": result["summary"],
+        "similar": similar,
     }
 
 
@@ -1384,15 +1154,7 @@ def youtube_categories():
     yt_path = app.state.youtube_transcripts_path
     if not yt_path:
         raise HTTPException(status_code=503, detail="YouTube transcripts path not configured")
-    categories = []
-    for root, dirs, files in os.walk(yt_path):
-        dirs[:] = [d for d in dirs if not d.startswith(".") and d != "project-notes"]
-        rel = os.path.relpath(root, yt_path)
-        md_count = sum(1 for f in files if f.endswith(".md"))
-        if md_count > 0 and rel != ".":
-            categories.append({"name": rel, "count": md_count})
-    categories.sort(key=lambda c: c["name"])
-    return {"categories": categories}
+    return {"categories": _list_youtube_categories(yt_path)}
 
 
 # ── X article ingest ──────────────────────────────────────────────────────
@@ -1406,246 +1168,30 @@ def x_article_ingest(req: XArticleIngestRequest, background_tasks: BackgroundTas
     if not xa_path:
         raise HTTPException(status_code=503, detail="X articles sources path not configured (--x-articles-sources-path)")
 
-    date = req.date or dt.date.today().isoformat()
+    result = ingest_x_article(req, sources_path=xa_path)
 
-    # Validate / auto-detect category
-    category = req.category or "ai/general"
-    if category not in CATEGORIES:
-        raise HTTPException(status_code=400, detail=f"Invalid category '{category}'. Must be one of: {', '.join(CATEGORIES)}")
-
-    # Build tags from explicit tags + category parts
-    tag_parts = list(category.split("/"))
-    if req.tags:
-        for t in req.tags:
-            if t not in tag_parts:
-                tag_parts.append(t)
-    tags = ", ".join(tag_parts)
-
-    # Build markdown content
-    frontmatter = (
-        f"---\n"
-        f"date: {date}\n"
-        f"url: {req.url}\n"
-        f"author: {req.author}\n"
-        f"category: {category}\n"
-        f"tags: \"{tags}\"\n"
-        f"---\n\n"
-    )
-    md_content = frontmatter + req.summary
-
-    # Save file under category subdirectory
-    category_dir = os.path.join(xa_path, category)
-    os.makedirs(category_dir, exist_ok=True)
-    base_filename = sanitize_filename(req.title)
-    filename = base_filename + ".md"
-    filepath = os.path.join(category_dir, filename)
-
-    if os.path.exists(filepath):
-        # Check if it's the same article (same URL) — overwrite is fine
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                existing_content = f.read(500)
-            if f"url: {req.url}" not in existing_content:
-                for i in range(2, 100):
-                    filename = f"{base_filename} ({i}).md"
-                    filepath = os.path.join(category_dir, filename)
-                    if not os.path.exists(filepath):
-                        break
-        except Exception:
-            pass
-
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write(md_content)
-    file_rel_path = os.path.join(category, filename)
-    logger.info(f"X article ingest: saved {file_rel_path} (author: {req.author}, category: {category})")
-
-    # Search for similar articles
     similar = []
     if xa_collection and store.has_collection(xa_collection):
         searcher = store.get_searchers([xa_collection]).get(xa_collection)
         if searcher:
-            search_result = searcher.search(
-                req.summary[:2000],
-                max_number_of_chunks=30,
-                max_number_of_documents=5,
-                include_matched_chunks_content=True,
+            similar = _find_similar_documents(
+                searcher,
+                query=req.summary[:2000],
+                exclude_match=lambda doc: doc.get("url", "") == req.url,
             )
-            for doc in search_result.get("results", []):
-                doc_url = doc.get("url", "")
-                if doc_url == req.url:
-                    continue
-                doc_title = doc.get("path", "").rsplit("/", 1)[-1].replace(".json", "")
-                chunks = doc.get("matchedChunks", [])
-                snippet = ""
-                if chunks:
-                    raw = chunks[0].get("content", "")
-                    snippet = _truncate_snippet(_extract_chunk_text(raw))
-                similar.append({
-                    "title": doc_title,
-                    "url": doc_url,
-                    "snippet": snippet,
-                })
-
-    # Trigger background reindex
-    if xa_collection and store.has_collection(xa_collection):
         background_tasks.add_task(run_collection_update, xa_collection)
 
     return {
         "status": "ingested",
-        "file_path": file_rel_path,
-        "author": req.author,
-        "category": category,
-        "summary": req.summary,
-        "similar": similar[:5],
+        "file_path": result["file_path"],
+        "author": result["author"],
+        "category": result["category"],
+        "summary": result["summary"],
+        "similar": similar,
     }
 
 
 # ── Jira ingest ────────────────────────────────────────────────────────────
-
-
-def _find_existing_jira_file(jira_path: str, issue_key: str) -> Optional[str]:
-    """Find an existing markdown file for a Jira issue key.
-
-    Scans files starting with the issue key (handles both underscore and space
-    filename conventions) and verifies issue_key in frontmatter.
-    """
-    if not os.path.isdir(jira_path):
-        return None
-    prefix = issue_key
-    for filename in os.listdir(jira_path):
-        if not filename.endswith(".md"):
-            continue
-        # Match "PROJECT-1234_..." or "PROJECT-1234 ..." or "PROJECT-1234.md"
-        if filename.startswith(prefix + "_") or filename.startswith(prefix + " ") or filename == prefix + ".md":
-            filepath = os.path.join(jira_path, filename)
-            try:
-                with open(filepath, "r", encoding="utf-8") as f:
-                    head = f.read(500)
-                if f"issue_key: {issue_key}" in head:
-                    return filepath
-            except Exception:
-                pass
-    return None
-
-
-def _read_existing_frontmatter(filepath: str) -> dict:
-    """Read YAML frontmatter from an existing markdown file into a dict.
-
-    Handles multi-line YAML lists (e.g. labels) by collecting list items.
-    """
-    metadata = {}
-    current_list_key = None
-    try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            in_fm = False
-            for line in f:
-                if line.strip() == "---" and not in_fm:
-                    in_fm = True
-                    continue
-                if line.strip() == "---" and in_fm:
-                    break
-                if not in_fm:
-                    continue
-                # List item (e.g. "  - frontend")
-                stripped = line.strip()
-                if stripped.startswith("- ") and current_list_key:
-                    item = stripped[2:].strip()
-                    existing = metadata.get(current_list_key, "")
-                    metadata[current_list_key] = (existing + "," + item) if existing else item
-                    continue
-                current_list_key = None
-                if ":" in line:
-                    key, _, value = line.partition(":")
-                    key = key.strip()
-                    value = value.strip().strip('"')
-                    if key and value:
-                        metadata[key] = value
-                    elif key and not value:
-                        # Key with no value — likely start of a YAML list
-                        current_list_key = key
-    except Exception:
-        pass
-    return metadata
-
-
-def _jira_content_to_markdown(req: "JiraIngestRequest", existing_metadata: Optional[dict] = None) -> str:
-    """Convert DOM-scraped Jira issue content to markdown with frontmatter.
-
-    If existing_metadata is provided, preserves fields the Chrome extension
-    doesn't capture (epic_summary, project, modifiedTime).
-    """
-    key = req.issueKey
-    summary = req.summary or req.title or ""
-    existing = existing_metadata or {}
-
-    def _yaml_escape(val: str) -> str:
-        """Wrap value in quotes and escape internal quotes for safe YAML."""
-        return '"' + val.replace('\\', '\\\\').replace('"', '\\"') + '"'
-
-    # Frontmatter — use fresh data from extension, fall back to existing
-    lines = ["---"]
-    lines.append(f"title: {_yaml_escape(summary)}")
-    lines.append(f"issue_key: {key}")
-    lines.append(f"summary: {_yaml_escape(summary)}")
-    lines.append(f"status: {_yaml_escape(req.status or existing.get('status', ''))}")
-    lines.append(f"issue_type: {_yaml_escape(req.type or existing.get('issue_type', ''))}")
-    lines.append(f"priority: {_yaml_escape(req.priority or existing.get('priority', ''))}")
-    lines.append(f"created: {_yaml_escape(req.created or existing.get('created', ''))}")
-    updated = req.updated or existing.get('updated', '')
-    lines.append(f"updated: {_yaml_escape(updated)}")
-    lines.append(f"modifiedTime: {_yaml_escape(updated)}")
-    lines.append(f"assignee: {_yaml_escape(req.assignee or existing.get('assignee', ''))}")
-    lines.append(f"reporter: {_yaml_escape(req.reporter or existing.get('reporter', ''))}")
-
-    # Labels — write as comma-separated string (not YAML list) for parser compatibility
-    if req.labels:
-        labels_str = ", ".join(req.labels)
-        lines.append(f"labels: {_yaml_escape(labels_str)}")
-    elif existing.get('labels'):
-        lines.append(f"labels: {_yaml_escape(existing['labels'])}")
-    else:
-        lines.append(f"labels: {_yaml_escape('')}")
-
-    # Epic — preserve existing epic_summary if extension doesn't provide it
-    epic_link = req.epicLink or existing.get('epic_link', '')
-    epic_summary = existing.get('epic_summary', '')
-    lines.append(f"epic_link: {_yaml_escape(epic_link)}")
-    lines.append(f"epic_summary: {_yaml_escape(epic_summary)}")
-
-    # Project — extension doesn't provide, preserve from existing
-    project = existing.get('project', key.split('-')[0] if '-' in key else '')
-    lines.append(f"project: {_yaml_escape(project)}")
-
-    if req.url:
-        lines.append(f"url: {_yaml_escape(req.url)}")
-    elif existing.get('url'):
-        lines.append(f"url: {_yaml_escape(existing['url'])}")
-    lines.append("---\n")
-
-    # Title
-    lines.append(f"# {key}: {summary}\n")
-
-    # Epic context in body (if we have it)
-    if epic_link and epic_summary:
-        base_url = existing.get('url', '').rsplit('/browse/', 1)[0] if existing.get('url') else ''
-        if base_url:
-            lines.append(f"**Epic:** [{epic_link}]({base_url}/browse/{epic_link}) - {epic_summary}\n")
-        else:
-            lines.append(f"**Epic:** {epic_link} - {epic_summary}\n")
-
-    # Description
-    if req.description:
-        lines.append("## Description\n")
-        lines.append(req.description + "\n")
-
-    # Comments
-    if req.comments:
-        lines.append("## Comments\n")
-        for comment in req.comments:
-            lines.append(f"### {comment.author} ({comment.date})\n")
-            lines.append(comment.body + "\n")
-
-    return "\n".join(lines)
 
 
 @app.post("/api/jira/ingest")
@@ -1661,84 +1207,17 @@ def jira_ingest(req: JiraIngestRequest, background_tasks: BackgroundTasks):
     if not jira_path:
         raise HTTPException(status_code=503, detail="Jira sources path not configured (--jira-sources-path)")
 
-    # Validate issue key format
-    if not re.match(r"^[A-Z][A-Z0-9]+-\d+$", req.issueKey):
-        raise HTTPException(status_code=400, detail=f"Invalid Jira issue key: {req.issueKey}")
+    result = ingest_jira(req, sources_path=jira_path)
 
-    summary_text = req.summary or req.title or "untitled"
-
-    # Check for existing file (any filename convention) to preserve metadata
-    os.makedirs(jira_path, exist_ok=True)
-    existing_filepath = _find_existing_jira_file(jira_path, req.issueKey)
-    existing_metadata = _read_existing_frontmatter(existing_filepath) if existing_filepath else {}
-
-    if existing_metadata:
-        logger.info(f"Jira ingest: found existing file for {req.issueKey}, merging metadata")
-
-    # Convert to markdown, merging with existing metadata
-    md_content = _jira_content_to_markdown(req, existing_metadata)
-
-    # Sanitize PII before writing
-    _sanitize_result = _pii_sanitizer.sanitize(md_content)
-    if _sanitize_result.has_pii:
-        cats = {}
-        for _f in _sanitize_result.findings:
-            cats[_f.category] = cats.get(_f.category, 0) + 1
-        logger.info(f"Jira ingest PII redacted in {req.issueKey}: "
-                    + ", ".join(f"{c}:{n}" for c, n in cats.items()))
-        md_content = _sanitize_result.sanitized_text
-
-    # Use existing filename if found, otherwise create new one using underscore convention
-    if existing_filepath:
-        filepath = existing_filepath
-        filename = os.path.basename(filepath)
-    else:
-        safe_title = re.sub(r'[<>:"/\\|?*]', '', summary_text)
-        safe_title = re.sub(r'[-\s]+', '_', safe_title)[:100].strip('_')
-        filename = f"{req.issueKey}_{safe_title}.md"
-        filepath = os.path.join(jira_path, filename)
-
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write(md_content)
-
-    # Set file mtime to issue updated time for correct incremental updates
-    updated = req.updated or existing_metadata.get('updated', '')
-    if updated:
-        try:
-            ts = dt.datetime.fromisoformat(updated).timestamp()
-            os.utime(filepath, (ts, ts))
-        except (ValueError, OSError):
-            pass
-
-    logger.info(f"Jira ingest: saved {filename}")
-
-    # Search for similar issues
     similar = []
     if jira_collection and store.has_collection(jira_collection):
         searcher = store.get_searchers([jira_collection]).get(jira_collection)
         if searcher:
-            search_q = f"{req.issueKey} {summary_text}"
-            search_result = searcher.search(
-                search_q,
-                max_number_of_chunks=30,
-                max_number_of_documents=5,
-                include_matched_chunks_content=True,
+            similar = _find_similar_documents(
+                searcher,
+                query=f"{req.issueKey} {result['summary']}",
+                exclude_match=lambda doc: req.issueKey in doc.get("url", ""),
             )
-            for doc in search_result.get("results", []):
-                doc_url = doc.get("url", "")
-                if req.issueKey in doc_url:
-                    continue
-                doc_title = doc.get("path", "").rsplit("/", 1)[-1].replace(".json", "")
-                chunks = doc.get("matchedChunks", [])
-                snippet = ""
-                if chunks:
-                    raw = chunks[0].get("content", "")
-                    snippet = _truncate_snippet(_extract_chunk_text(raw))
-                similar.append({
-                    "title": doc_title,
-                    "url": doc_url,
-                    "snippet": snippet,
-                })
 
     # Skip automatic reindex — the daily update script handles both
     # collection reindexing and knowledge graph rebuild in one pass.
@@ -1746,10 +1225,10 @@ def jira_ingest(req: JiraIngestRequest, background_tasks: BackgroundTasks):
 
     return {
         "status": "ingested",
-        "issue_key": req.issueKey,
-        "file_path": filename,
-        "summary": summary_text,
-        "similar": similar[:5],
+        "issue_key": result["issue_key"],
+        "file_path": result["file_path"],
+        "summary": result["summary"],
+        "similar": similar,
     }
 
 
