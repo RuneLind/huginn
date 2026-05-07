@@ -1085,6 +1085,35 @@ def get_notion_page(
         raise HTTPException(status_code=502, detail=f"Notion API error: {e}")
 
 
+def _find_similar_documents(searcher, query: str, exclude_match) -> list[dict]:
+    """Run a similarity search and return up to 5 {title, url, snippet} results.
+
+    exclude_match is called on each result; truthy means skip (e.g. self-link).
+    """
+    search_result = searcher.search(
+        query,
+        max_number_of_chunks=30,
+        max_number_of_documents=5,
+        include_matched_chunks_content=True,
+    )
+    similar = []
+    for doc in search_result.get("results", []):
+        if exclude_match(doc):
+            continue
+        doc_title = doc.get("path", "").rsplit("/", 1)[-1].replace(".json", "")
+        chunks = doc.get("matchedChunks", [])
+        snippet = ""
+        if chunks:
+            raw = chunks[0].get("content", "")
+            snippet = _truncate_snippet(_extract_chunk_text(raw))
+        similar.append({
+            "title": doc_title,
+            "url": doc.get("url", ""),
+            "snippet": snippet,
+        })
+    return similar[:5]
+
+
 @app.post("/api/youtube/ingest")
 def youtube_ingest(req: YouTubeIngestRequest, background_tasks: BackgroundTasks):
     """Ingest a YouTube transcript: summarize via Claude, auto-categorize, save, index, return similar."""
@@ -1099,27 +1128,11 @@ def youtube_ingest(req: YouTubeIngestRequest, background_tasks: BackgroundTasks)
     if yt_collection and store.has_collection(yt_collection):
         searcher = store.get_searchers([yt_collection]).get(yt_collection)
         if searcher:
-            search_result = searcher.search(
-                result["summary"][:2000],
-                max_number_of_chunks=30,
-                max_number_of_documents=5,
-                include_matched_chunks_content=True,
+            similar = _find_similar_documents(
+                searcher,
+                query=result["summary"][:2000],
+                exclude_match=lambda doc: doc.get("url", "") == req.url,
             )
-            for doc in search_result.get("results", []):
-                doc_url = doc.get("url", "")
-                if doc_url == req.url:
-                    continue
-                doc_title = doc.get("path", "").rsplit("/", 1)[-1].replace(".json", "")
-                chunks = doc.get("matchedChunks", [])
-                snippet = ""
-                if chunks:
-                    raw = chunks[0].get("content", "")
-                    snippet = _truncate_snippet(_extract_chunk_text(raw))
-                similar.append({
-                    "title": doc_title,
-                    "url": doc_url,
-                    "snippet": snippet,
-                })
         background_tasks.add_task(run_collection_update, yt_collection)
 
     return {
@@ -1127,7 +1140,7 @@ def youtube_ingest(req: YouTubeIngestRequest, background_tasks: BackgroundTasks)
         "file_path": result["file_path"],
         "category": result["category"],
         "summary": result["summary"],
-        "similar": similar[:5],
+        "similar": similar,
     }
 
 
@@ -1164,27 +1177,11 @@ def x_article_ingest(req: XArticleIngestRequest, background_tasks: BackgroundTas
     if xa_collection and store.has_collection(xa_collection):
         searcher = store.get_searchers([xa_collection]).get(xa_collection)
         if searcher:
-            search_result = searcher.search(
-                req.summary[:2000],
-                max_number_of_chunks=30,
-                max_number_of_documents=5,
-                include_matched_chunks_content=True,
+            similar = _find_similar_documents(
+                searcher,
+                query=req.summary[:2000],
+                exclude_match=lambda doc: doc.get("url", "") == req.url,
             )
-            for doc in search_result.get("results", []):
-                doc_url = doc.get("url", "")
-                if doc_url == req.url:
-                    continue
-                doc_title = doc.get("path", "").rsplit("/", 1)[-1].replace(".json", "")
-                chunks = doc.get("matchedChunks", [])
-                snippet = ""
-                if chunks:
-                    raw = chunks[0].get("content", "")
-                    snippet = _truncate_snippet(_extract_chunk_text(raw))
-                similar.append({
-                    "title": doc_title,
-                    "url": doc_url,
-                    "snippet": snippet,
-                })
         background_tasks.add_task(run_collection_update, xa_collection)
 
     return {
@@ -1193,7 +1190,7 @@ def x_article_ingest(req: XArticleIngestRequest, background_tasks: BackgroundTas
         "author": result["author"],
         "category": result["category"],
         "summary": result["summary"],
-        "similar": similar[:5],
+        "similar": similar,
     }
 
 
@@ -1219,28 +1216,11 @@ def jira_ingest(req: JiraIngestRequest, background_tasks: BackgroundTasks):
     if jira_collection and store.has_collection(jira_collection):
         searcher = store.get_searchers([jira_collection]).get(jira_collection)
         if searcher:
-            search_q = f"{req.issueKey} {result['summary']}"
-            search_result = searcher.search(
-                search_q,
-                max_number_of_chunks=30,
-                max_number_of_documents=5,
-                include_matched_chunks_content=True,
+            similar = _find_similar_documents(
+                searcher,
+                query=f"{req.issueKey} {result['summary']}",
+                exclude_match=lambda doc: req.issueKey in doc.get("url", ""),
             )
-            for doc in search_result.get("results", []):
-                doc_url = doc.get("url", "")
-                if req.issueKey in doc_url:
-                    continue
-                doc_title = doc.get("path", "").rsplit("/", 1)[-1].replace(".json", "")
-                chunks = doc.get("matchedChunks", [])
-                snippet = ""
-                if chunks:
-                    raw = chunks[0].get("content", "")
-                    snippet = _truncate_snippet(_extract_chunk_text(raw))
-                similar.append({
-                    "title": doc_title,
-                    "url": doc_url,
-                    "snippet": snippet,
-                })
 
     # Skip automatic reindex — the daily update script handles both
     # collection reindexing and knowledge graph rebuild in one pass.
@@ -1251,7 +1231,7 @@ def jira_ingest(req: JiraIngestRequest, background_tasks: BackgroundTasks):
         "issue_key": result["issue_key"],
         "file_path": result["file_path"],
         "summary": result["summary"],
-        "similar": similar[:5],
+        "similar": similar,
     }
 
 
