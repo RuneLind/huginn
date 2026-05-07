@@ -29,13 +29,8 @@ from main.core.documents_collection_searcher import DocumentCollectionSearcher
 from main.core.search_trace import create_trace
 from main.core.trace_store import any_trace_enabled, default_trace_store, pointer_mode_enabled
 from main.core.search_response_formatter import (
-    NON_RERANKED_MAX_RELEVANCE,
-    apply_metadata_filters,
-    extract_chunk_heading,
-    extract_chunk_metadata,
     extract_chunk_text,
-    normalize_score,
-    separate_metadata,
+    format_search_response,
     truncate_snippet,
 )
 from main.sources.notion.notion_document_reader import NotionDocumentReader
@@ -353,8 +348,7 @@ def search(
                 trace_obj.set_expansion(search_q, expansion_terms)
                 logger.debug(f"Graph-expanded query: {search_q[:200]}")
 
-    all_results = []
-    any_low_confidence = False
+    per_collection = []
     for coll_name, searcher in target_searchers.items():
         search_result = searcher.search(
             search_q,
@@ -365,124 +359,23 @@ def search(
             trace=trace_obj,
             title_boost_query=q,
         )
-        if search_result.get("lowConfidence"):
-            any_low_confidence = True
-        is_reranked = search_result.get("reranked", True)
-        for doc in search_result.get("results", []):
-            matched_chunks = []
-            for chunk in doc.get("matchedChunks", []):
-                raw = chunk.get("content", "")
-                entry = {
-                    "content": extract_chunk_text(raw),
-                    "score": chunk.get("score", 0),
-                    "heading": extract_chunk_heading(raw),
-                }
-                chunk_meta = extract_chunk_metadata(raw)
-                if chunk_meta:
-                    entry["metadata"] = dict(chunk_meta)
-                matched_chunks.append(entry)
-            if not matched_chunks:
-                continue
+        per_collection.append((coll_name, search_result))
 
-            # Limit chunks per document (sorted by score, lower=better)
-            matched_chunks.sort(key=lambda c: c["score"])
-            matched_chunks = matched_chunks[:max_chunks_per_doc]
-
-            title = doc.get("path", "").rsplit("/", 1)[-1].replace(".json", "")
-            url = doc.get("url", "")
-            modified_time = doc.get("modifiedTime")
-
-            best_score = matched_chunks[0]["score"]
-            relevance = normalize_score(best_score, is_reranked)
-
-            # Separate metadata from chunk content, collect breadcrumb
-            doc_breadcrumb = None
-            for chunk in matched_chunks:
-                clean_content, text_metadata, breadcrumb = separate_metadata(chunk["content"])
-                chunk["content"] = clean_content
-                # Merge: chunk dict metadata (from JSON) + text-parsed metadata (text overrides)
-                merged = {}
-                if chunk.get("metadata"):
-                    merged.update(chunk["metadata"])
-                if text_metadata:
-                    merged.update(text_metadata)
-                if merged:
-                    chunk["metadata"] = merged
-                if breadcrumb and not doc_breadcrumb:
-                    doc_breadcrumb = breadcrumb
-
-            if brief:
-                best_chunk = matched_chunks[0]
-                snippet = truncate_snippet(best_chunk["content"])
-                if not snippet and best_chunk.get("metadata"):
-                    snippet = " | ".join(f"{k}: {v}" for k, v in best_chunk["metadata"].items())
-                result = {
-                    "collection": coll_name,
-                    "id": doc.get("id"),
-                    "title": title,
-                    "url": url,
-                    "snippet": snippet,
-                    "relevance": round(relevance, 3),
-                    "_score": best_score,
-                    "_reranked": is_reranked,
-                }
-                if modified_time:
-                    result["modifiedTime"] = modified_time
-                if doc_breadcrumb:
-                    result["breadcrumb"] = doc_breadcrumb
-                if best_chunk.get("heading"):
-                    result["heading"] = best_chunk["heading"]
-                if best_chunk.get("metadata"):
-                    result["metadata"] = best_chunk["metadata"]
-                all_results.append(result)
-            else:
-                if max_chunk_chars is not None:
-                    for chunk in matched_chunks:
-                        if len(chunk["content"]) > max_chunk_chars:
-                            chunk["content"] = chunk["content"][:max_chunk_chars] + "…"
-                # Add relevance to each chunk
-                for chunk in matched_chunks:
-                    chunk["relevance"] = round(normalize_score(chunk["score"], is_reranked), 3)
-                result = {
-                    "collection": coll_name,
-                    "id": doc.get("id"),
-                    "title": title,
-                    "url": url,
-                    "relevance": round(relevance, 3),
-                    "matchedChunks": matched_chunks,
-                    "_score": best_score,
-                    "_reranked": is_reranked,
-                }
-                if modified_time:
-                    result["modifiedTime"] = modified_time
-                if doc_breadcrumb:
-                    result["breadcrumb"] = doc_breadcrumb
-                best_meta = matched_chunks[0].get("metadata") if matched_chunks else None
-                if best_meta:
-                    result["metadata"] = best_meta
-                all_results.append(result)
-
-    # Apply metadata filters (post-retrieval)
-    if has_filters:
-        all_results = apply_metadata_filters(all_results, project=project, git_branch=git_branch, tags=tags)
-
-    # Sort by best chunk score (lower = better: L2 distance for FAISS, negated RRF for hybrid)
-    all_results.sort(key=lambda r: r["_score"])
-
-    # Override relevance for non-reranked results with rank-based scoring
-    # (absolute hybrid/FAISS scores aren't meaningful as relevance values)
-    for i, r in enumerate(all_results[:limit]):
-        if not r.get("_reranked"):
-            rank_relevance = round(NON_RERANKED_MAX_RELEVANCE / (1.0 + 0.12 * i), 3)
-            r["relevance"] = rank_relevance
-            for j, chunk in enumerate(r.get("matchedChunks", [])):
-                chunk["relevance"] = round(max(0.1, rank_relevance * (1.0 - 0.1 * j)), 3)
+    results, any_low_confidence = format_search_response(
+        per_collection,
+        limit=limit,
+        brief=brief,
+        max_chunk_chars=max_chunk_chars,
+        max_chunks_per_doc=max_chunks_per_doc,
+        project=project,
+        git_branch=git_branch,
+        tags=tags,
+    )
 
     # Graph context enrichment: annotate results with graph entity context
     if store.graph and detected_entities:
-        for r in all_results[:limit]:
-            title = r.get("title", "")
-            result_entities = store.graph.detect_entities(title)
+        for r in results:
+            result_entities = store.graph.detect_entities(r.get("title", ""))
             contexts = []
             for eid in result_entities:
                 ctx = store.graph.get_entity_context(eid)
@@ -491,12 +384,7 @@ def search(
             if contexts:
                 r["graph_context"] = contexts[:3]
 
-    for r in all_results:
-        r.pop("_score", None)
-        r.pop("_reranked", None)
-        for chunk in r.get("matchedChunks", []):
-            chunk.pop("score", None)
-    response = {"results": all_results[:limit]}
+    response = {"results": results}
     if graph_answer:
         response["graph_answer"] = graph_answer
     if any_low_confidence:
