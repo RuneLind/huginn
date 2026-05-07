@@ -1,7 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from knowledge_api_server import app, store
+from knowledge_api_server import app
 from main.core.search_response_formatter import (
     apply_metadata_filters,
     extract_chunk_heading,
