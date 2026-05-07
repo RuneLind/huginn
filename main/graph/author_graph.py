@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 _RE_HANDLE = re.compile(r"^\d{4}-\d{2}-\d{2}_(.+?)_\d+\.md$")
 _RE_QUOTED = re.compile(r"> \*\*Quoted @(\w+):")
 _RE_MENTION = re.compile(r"(?<![.\w])@(\w{1,15})(?!\.\w)")
+_SKIP_LINE_PREFIXES = ("# @", "> **Quoted @", "- **Engagement")
 
 
 def build_author_graph(scores, name, disk_persister, min_score, min_tweets, min_interactions):
@@ -91,7 +92,7 @@ def _count_interactions(documents, candidates):
             if tgt in candidates and tgt != src:
                 interaction_counts[(src, tgt)] += 3.0
         for line in body.split("\n"):
-            if line.startswith("# @") or line.startswith("> **Quoted @") or line.startswith("- **Engagement"):
+            if line.startswith(_SKIP_LINE_PREFIXES):
                 continue
             for mh in _RE_MENTION.findall(line):
                 tgt = mh.lower()

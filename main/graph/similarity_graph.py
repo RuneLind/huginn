@@ -1,21 +1,15 @@
 """Document similarity graph compute (FAISS embeddings + Louvain communities).
 
-Pure compute — no HTTP, no caching. Callers (the API server) own caching policy.
-
-Public API:
-- ``EMPTY_GRAPH`` — the response payload returned when a collection has no embeddings.
-- ``detect_communities(sim_matrix, doc_ids, nodes, min_similarity)`` — Louvain on the
-  similarity matrix; mutates ``nodes`` to add a ``community`` field, returns the
-  community summary list.
-- ``build_similarity_graph(name, searcher, disk_persister)`` — compute the full
-  cached payload for a collection: ``{nodes, sim_matrix, doc_ids, communities}``
-  or ``None`` if the collection has no vectors / mapping.
-- ``shape_response(cached, top_k, min_similarity)`` — turn the cached payload into
-  the API response shape (top-k edges per node, stats).
+Pure compute — no HTTP, no caching. Callers own caching policy.
 """
 
 import json
 import logging
+
+import faiss
+import numpy as np
+import networkx as nx
+from networkx.algorithms.community import louvain_communities
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +29,6 @@ def detect_communities(sim_matrix, doc_ids, nodes, min_similarity=0.5):
     then finds communities. Returns a list of community summary dicts and
     mutates each entry in ``nodes`` to add a ``community`` field.
     """
-    import numpy as np
-    import networkx as nx
-    from networkx.algorithms.community import louvain_communities
-
     num_docs = len(doc_ids)
     G = nx.Graph()
     G.add_nodes_from(range(num_docs))
@@ -104,7 +94,7 @@ def detect_communities(sim_matrix, doc_ids, nodes, min_similarity=0.5):
 
         community_info.append({
             "id": comm_id,
-            "name": community_name,
+            "name": community_name,  # may be deduplicated below
             "size": len(members),
             "top_tags": [{"tag": t, "count": c} for t, c in top_tags],
             "top_categories": [{"category": c, "count": cnt} for c, cnt in top_categories],
@@ -134,9 +124,6 @@ def build_similarity_graph(name, searcher, disk_persister):
     or ``None`` if the collection has no vectors or its index mapping cannot
     be read.
     """
-    import faiss
-    import numpy as np
-
     indexer = searcher.indexer
     faiss_indexer = indexer.faiss_indexer if hasattr(indexer, "faiss_indexer") else indexer
     idx = faiss_indexer.faiss_index  # IndexIDMap wrapping IndexFlatL2
@@ -231,7 +218,7 @@ def build_similarity_graph(name, searcher, disk_persister):
             "summary": summary,
         })
 
-    # Use 75th percentile as community-detection threshold — keeps top 25% of connections
+    # 75th percentile keeps top 25% of connections
     upper_tri = sim_matrix[np.triu_indices(len(doc_ids), k=1)]
     p75 = float(np.percentile(upper_tri, 75)) if len(upper_tri) > 0 else 0.5
     communities = detect_communities(sim_matrix, doc_ids, nodes, min_similarity=p75)
@@ -239,14 +226,12 @@ def build_similarity_graph(name, searcher, disk_persister):
     return {"nodes": nodes, "sim_matrix": sim_matrix, "doc_ids": doc_ids, "communities": communities}
 
 
-def shape_response(cached, top_k, min_similarity):
+def shape_similarity_response(cached, top_k, min_similarity):
     """Turn a cached similarity-graph payload into the API response shape.
 
     For each node, picks its top-k neighbors above ``min_similarity`` and
     deduplicates pairs.
     """
-    import numpy as np
-
     nodes = cached["nodes"]
     sim_matrix = cached["sim_matrix"]
     doc_ids = cached["doc_ids"]

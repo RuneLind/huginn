@@ -36,7 +36,7 @@ from main.graph.graph_search_augmenter import GraphSearchAugmenter
 from main.graph.similarity_graph import (
     EMPTY_GRAPH,
     build_similarity_graph,
-    shape_response as shape_similarity_graph,
+    shape_similarity_response,
 )
 from main.graph.author_graph import build_author_graph
 from main.sources.notion.notion_document_reader import NotionDocumentReader
@@ -415,7 +415,7 @@ def collection_similarity_graph(
             return EMPTY_GRAPH
         store._similarity_graph_cache[name] = cached
 
-    return shape_similarity_graph(cached, top_k, min_similarity)
+    return shape_similarity_response(cached, top_k, min_similarity)
 
 
 @app.get("/api/collection/{name}/author-graph")
