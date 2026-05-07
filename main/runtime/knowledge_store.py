@@ -43,7 +43,6 @@ class KnowledgeStore:
 
         # Auto-detect model from the first collection's FAISS index
         first_index_name = detect_faiss_index(collection_names[0], self.disk_persister)
-        self.detected_index_name = first_index_name
 
         logger.info(f"Loading shared embedding model for index: {first_index_name}")
         self.shared_embedder = create_embedder(first_index_name)
@@ -159,15 +158,12 @@ class KnowledgeStore:
             logger.warning(f"Could not build Notion ID lookup for {name}: {e}")
 
 
-_store_singleton: KnowledgeStore | None = None
+_default_store = KnowledgeStore()
 
 
 def get_store() -> KnowledgeStore:
     """FastAPI dependency provider — returns a process-wide singleton."""
-    global _store_singleton
-    if _store_singleton is None:
-        _store_singleton = KnowledgeStore()
-    return _store_singleton
+    return _default_store
 
 
 def run_collection_update(collection_name: str, store: KnowledgeStore):
