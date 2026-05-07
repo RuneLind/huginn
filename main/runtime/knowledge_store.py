@@ -38,14 +38,15 @@ class KnowledgeStore:
         self._author_graph_cache = {}
         self._lock = threading.Lock()
 
-    def load_collections(self, collection_names, data_path="./data/collections"):
+    def load_collections(self, collection_names, data_path="./data/collections",
+                         faiss_index_name=None, extra_graph_paths=None):
         self.disk_persister = DiskPersister(base_path=data_path)
 
-        # Auto-detect model from the first collection's FAISS index
-        first_index_name = detect_faiss_index(collection_names[0], self.disk_persister)
+        if faiss_index_name is None:
+            faiss_index_name = detect_faiss_index(collection_names[0], self.disk_persister)
 
-        logger.info(f"Loading shared embedding model for index: {first_index_name}")
-        self.shared_embedder = create_embedder(first_index_name)
+        logger.info(f"Loading shared embedding model for index: {faiss_index_name}")
+        self.shared_embedder = create_embedder(faiss_index_name)
         logger.info(f"Embedding model loaded: {self.shared_embedder.model_name}")
 
         self.shared_reranker = create_reranker()
@@ -60,11 +61,11 @@ class KnowledgeStore:
             self._build_tag_counts(name)
             self._build_notion_id_lookup(name)
 
-        self._load_knowledge_graph()
+        self._load_knowledge_graph(extra_paths=extra_graph_paths)
 
-    def _load_knowledge_graph(self):
+    def _load_knowledge_graph(self, extra_paths=None):
         from main.graph.graph_loader import load_default_knowledge_graph
-        self.graph = load_default_knowledge_graph()
+        self.graph = load_default_knowledge_graph(extra_paths=extra_paths)
 
     def reload_collection(self, collection_name):
         searcher = self._build_searcher(collection_name)
