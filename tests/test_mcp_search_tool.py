@@ -1,16 +1,15 @@
-"""Tests for the multi-collection MCP adapter's search tool wiring.
+"""Tests for main.core.mcp_search_tool.build_search_tool_fn.
 
-Targets multi_collection_search_mcp_adapter.build_search_tool_fn — the unit
-that ties the GraphSearchAugmenter, DocumentCollectionSearcher, and
-shape_search_results together for each registered MCP tool.
+The unit that ties GraphSearchAugmenter, DocumentCollectionSearcher, and
+shape_search_results together for each MCP search tool — shared by both
+multi_collection_search_mcp_adapter and collection_search_mcp_stdio_adapter.
 """
 import json
 import pytest
 
+from main.core.mcp_search_tool import build_search_tool_fn
 from main.graph.knowledge_graph import KnowledgeGraph
 from main.graph.graph_search_augmenter import GraphSearchAugmenter
-
-from multi_collection_search_mcp_adapter import build_search_tool_fn
 
 
 @pytest.fixture

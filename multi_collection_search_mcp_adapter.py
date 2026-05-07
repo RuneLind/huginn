@@ -22,17 +22,14 @@ Environment:
     LLM_GRAPH_PATH          private sub-repo dirs (huginn-{nav,jarvis}/scripts/...).
 """
 import argparse
-import json
 import logging
 import sys
 from pathlib import Path
-from typing import Callable
 
 from mcp.server.fastmcp import FastMCP
 
 from main.core.documents_collection_searcher import DocumentCollectionSearcher
-from main.core.search_response_formatter import shape_search_results
-from main.core.search_trace import create_trace
+from main.core.mcp_search_tool import build_search_tool_fn
 from main.graph.graph_loader import load_default_knowledge_graph
 from main.graph.graph_search_augmenter import GraphSearchAugmenter
 from main.indexes.indexer_factory import (
@@ -97,56 +94,6 @@ def build_searchers(collection_names, index_name=None, base_path="./data/collect
         )
         logging.info(f"Collection {name} loaded: {indexer.get_name()} ({indexer.get_size()} embeddings)")
     return searchers
-
-
-def build_search_tool_fn(
-    searcher,
-    collection_name: str,
-    augmenter: GraphSearchAugmenter,
-    *,
-    max_number_of_chunks: int,
-    max_number_of_documents: int,
-    include_full_text: bool,
-    trace_default: bool = False,
-) -> Callable[[str], str]:
-    """Build the per-tool search function for one collection.
-
-    Mirrors knowledge_api_server.py /api/search: graph-aware query expansion,
-    raw search via DocumentCollectionSearcher, shape_search_results post-
-    processing, per-result graph context enrichment.
-    """
-    def search_fn(query: str) -> str:
-        logging.info(f"Searching in {collection_name}: {query}")
-        trace = create_trace(trace_default)
-        trace.set_query_raw(query)
-
-        search_q, graph_answer, detected_entities = augmenter.augment_query(query, trace)
-
-        raw = searcher.search(
-            search_q,
-            max_number_of_chunks=max_number_of_chunks,
-            max_number_of_documents=max_number_of_documents,
-            include_text_content=include_full_text,
-            include_matched_chunks_content=not include_full_text,
-            trace=trace,
-            title_boost_query=query,
-        )
-        results, any_low_confidence = shape_search_results(
-            [(collection_name, raw)],
-            limit=max_number_of_documents,
-        )
-        augmenter.enrich_results(results, detected_entities)
-
-        response = {"results": results}
-        if graph_answer:
-            response["graph_answer"] = graph_answer
-        if any_low_confidence:
-            response["lowConfidence"] = True
-        if trace_default:
-            response["trace"] = trace.to_dict()
-        return json.dumps(response, indent=2, ensure_ascii=False)
-
-    return search_fn
 
 
 def register_collection_tools(mcp, searchers, augmenter, **tool_kwargs):
