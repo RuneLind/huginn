@@ -8,24 +8,26 @@ results via HTTP. Designed for low-latency responses (<50ms after warmup).
 Usage:
     uv run knowledge_api_server.py --collections my-notion --port 8321
 """
-import json
 import argparse
+import json
 import logging
 import os
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import datetime as dt
-
-from fastapi import FastAPI, Query, HTTPException, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-from main.persisters.disk_persister import DiskPersister
-from main.indexes.indexer_factory import detect_faiss_index, create_embedder, load_search_indexer, create_reranker
 from main.core.documents_collection_searcher import DocumentCollectionSearcher
-from main.core.search_response_formatter import extract_chunk_text, truncate_snippet
+from main.indexes.indexer_factory import (
+    create_embedder,
+    create_reranker,
+    detect_faiss_index,
+    load_search_indexer,
+)
+from main.persisters.disk_persister import DiskPersister
 from main.routes.collections import make_collections_router
 from main.routes.graph import make_graph_router
 from main.routes.ingest import make_ingest_router
