@@ -15,42 +15,21 @@ Environment:
                             dirs (huginn-{nav,jarvis}/scripts/...).
 """
 import argparse
-import logging
-import sys
-from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
 from main.core.mcp_search_tool import build_search_tool_fn
+from main.core.trace_store import TRACE_DEFAULT_ENV
 from main.factories.search_collection_factory import create_collection_searcher
 from main.graph.graph_loader import load_default_knowledge_graph
 from main.graph.graph_search_augmenter import GraphSearchAugmenter
 from main.utils.env import env_bool
-from main.utils.logger import setup_root_logger
+from main.utils.logger import add_file_handler, route_handlers_to_stderr, setup_root_logger
 
 
 setup_root_logger()
 
-TRACE_DEFAULT = env_bool("HUGINN_TRACE_DEFAULT")
-
-
-def _redirect_logging_to_stderr():
-    try:
-        for handler in logging.getLogger().handlers:
-            handler.setStream(sys.stderr)
-    except Exception:
-        pass
-
-
-def _add_file_log_handler(name: str):
-    try:
-        log_file = Path.home() / "logs" / name
-        log_file.parent.mkdir(exist_ok=True)
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-        logging.getLogger().addHandler(file_handler)
-    except Exception:
-        pass
+TRACE_DEFAULT = env_bool(TRACE_DEFAULT_ENV)
 
 
 def _parse_args(argv=None):
@@ -72,8 +51,8 @@ def _parse_args(argv=None):
 
 def main():
     args = _parse_args()
-    _redirect_logging_to_stderr()
-    _add_file_log_handler(f"huginn-{args['collection']}-mcp.log")
+    route_handlers_to_stderr()
+    add_file_handler(f"huginn-{args['collection']}-mcp.log")
 
     searcher = create_collection_searcher(
         collection_name=args['collection'], index_name=args['index']
