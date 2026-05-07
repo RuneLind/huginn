@@ -36,11 +36,21 @@ class KnowledgeStore:
         # Cached similarity graphs: collection_name -> {nodes, all_edges}
         self._similarity_graph_cache = {}
         self._author_graph_cache = {}
+        self._extra_graph_paths = None
+        self._build_aux_indexes = True
         self._lock = threading.Lock()
 
     def load_collections(self, collection_names, data_path="./data/collections",
-                         faiss_index_name=None, extra_graph_paths=None):
+                         faiss_index_name=None, extra_graph_paths=None,
+                         build_aux_indexes=True):
+        """Load collections into the store.
+
+        ``build_aux_indexes`` controls whether tag-count and Notion-ID lookups
+        are built; HTTP endpoints need them, stdio MCP adapters do not.
+        """
         self.disk_persister = DiskPersister(base_path=data_path)
+        self._extra_graph_paths = extra_graph_paths
+        self._build_aux_indexes = build_aux_indexes
 
         if faiss_index_name is None:
             faiss_index_name = detect_faiss_index(collection_names[0], self.disk_persister)
@@ -58,8 +68,9 @@ class KnowledgeStore:
             with self._lock:
                 self.searchers[name] = searcher
             logger.info(f"Collection {name} loaded with {searcher.indexer.get_size()} embeddings")
-            self._build_tag_counts(name)
-            self._build_notion_id_lookup(name)
+            if build_aux_indexes:
+                self._build_tag_counts(name)
+                self._build_notion_id_lookup(name)
 
         self._load_knowledge_graph(extra_paths=extra_graph_paths)
 
@@ -73,9 +84,10 @@ class KnowledgeStore:
             self.searchers[collection_name] = searcher
             self._similarity_graph_cache.pop(collection_name, None)
             self._author_graph_cache.pop(collection_name, None)
-        self._build_tag_counts(collection_name)
-        self._build_notion_id_lookup(collection_name)
-        self._load_knowledge_graph()
+        if self._build_aux_indexes:
+            self._build_tag_counts(collection_name)
+            self._build_notion_id_lookup(collection_name)
+        self._load_knowledge_graph(extra_paths=self._extra_graph_paths)
         logger.info(f"Collection {collection_name} reloaded ({searcher.indexer.get_size()} embeddings)")
 
     def get_searchers(self, collection_names=None):
@@ -163,7 +175,11 @@ _default_store = KnowledgeStore()
 
 
 def get_store() -> KnowledgeStore:
-    """FastAPI dependency provider — returns a process-wide singleton."""
+    """Return the process-wide ``KnowledgeStore`` singleton.
+
+    Used by the HTTP server (via FastAPI ``Depends``) and by the stdio MCP
+    adapters as their entry-point store.
+    """
     return _default_store
 
 

@@ -58,6 +58,7 @@ def main():
         [args['collection']],
         faiss_index_name=args['index'],
         extra_graph_paths=args['graphPaths'],
+        build_aux_indexes=False,
     )
     searcher = store.get_searchers()[args['collection']]
     augmenter = GraphSearchAugmenter(store.graph)
