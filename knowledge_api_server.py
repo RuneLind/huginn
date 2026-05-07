@@ -12,7 +12,6 @@ import json
 import argparse
 import logging
 import os
-import re
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -34,6 +33,12 @@ from main.core.search_response_formatter import (
     truncate_snippet,
 )
 from main.graph.graph_search_augmenter import GraphSearchAugmenter
+from main.graph.similarity_graph import (
+    EMPTY_GRAPH,
+    build_similarity_graph,
+    shape_similarity_response,
+)
+from main.graph.author_graph import build_author_graph
 from main.sources.notion.notion_document_reader import NotionDocumentReader
 from main.utils.logger import setup_root_logger
 from main.ingest.youtube import (
@@ -392,237 +397,6 @@ def list_collection_documents(name: str):
     return {"documents": documents}
 
 
-_EMPTY_GRAPH = {"nodes": [], "edges": [], "stats": {"node_count": 0, "edge_count": 0, "avg_similarity": 0.0},
-                 "communities": []}
-
-
-def _detect_communities(sim_matrix, doc_ids, nodes, min_similarity=0.5):
-    """Run Louvain community detection on the similarity matrix.
-
-    Builds a networkx graph from document pairs above min_similarity,
-    then finds communities. Returns list of community dicts and updates
-    each node with its community ID.
-    """
-    import numpy as np
-    import networkx as nx
-    from networkx.algorithms.community import louvain_communities
-
-    num_docs = len(doc_ids)
-    G = nx.Graph()
-    G.add_nodes_from(range(num_docs))
-
-    # Vectorized edge filtering — avoids O(n^2) Python loop
-    rows, cols = np.where(np.triu(sim_matrix, k=1) >= min_similarity)
-    for r, c in zip(rows, cols):
-        G.add_edge(int(r), int(c), weight=float(sim_matrix[r, c]))
-
-    # Remove isolated nodes (no edges above threshold) before community detection
-    isolates = list(nx.isolates(G))
-    G.remove_nodes_from(isolates)
-
-    if G.number_of_nodes() == 0:
-        # All nodes are isolated — assign each to its own community
-        for i, node in enumerate(nodes):
-            node["community"] = i
-        return []
-
-    communities = louvain_communities(G, weight="weight", resolution=1.0, seed=42)
-
-    # Sort communities by size (largest first)
-    communities = sorted(communities, key=len, reverse=True)
-
-    # Build node-to-community mapping
-    node_to_community = {}
-    for comm_id, members in enumerate(communities):
-        for member_idx in members:
-            node_to_community[member_idx] = comm_id
-
-    # Assign isolated nodes to their own communities starting after detected ones
-    next_comm = len(communities)
-    for idx in isolates:
-        node_to_community[idx] = next_comm
-        next_comm += 1
-
-    # Update nodes with community ID
-    for i, node in enumerate(nodes):
-        node["community"] = node_to_community.get(i, -1)
-
-    # Build community summaries
-    community_info = []
-    for comm_id, members in enumerate(communities):
-        member_nodes = [nodes[idx] for idx in members]
-        # Count tags across members
-        tag_counts = {}
-        for mn in member_nodes:
-            for tag in mn.get("tags", []):
-                tag_counts[tag] = tag_counts.get(tag, 0) + 1
-        top_tags = sorted(tag_counts.items(), key=lambda x: -x[1])[:5]
-
-        # Count categories
-        cat_counts = {}
-        for mn in member_nodes:
-            cat = mn.get("category", "")
-            cat_counts[cat] = cat_counts.get(cat, 0) + 1
-        top_categories = sorted(cat_counts.items(), key=lambda x: -x[1])[:3]
-
-        # Representative titles (top 3 most connected within community)
-        member_set = set(members)
-        internal_degree = {}
-        for idx in members:
-            deg = sum(1 for neighbor in G.neighbors(idx) if neighbor in member_set)
-            internal_degree[idx] = deg
-        top_members = sorted(members, key=lambda x: -internal_degree.get(x, 0))[:3]
-        representative_titles = [nodes[idx]["title"] for idx in top_members]
-
-        # Generate a readable community name from top tags/categories
-        if top_tags:
-            name_parts = [t for t, _ in top_tags[:2]]
-        elif top_categories:
-            name_parts = [c for c, _ in top_categories[:2]]
-        else:
-            name_parts = [f"Cluster {comm_id}"]
-        community_name = " + ".join(name_parts)
-
-        community_info.append({
-            "id": comm_id,
-            "name": community_name,  # may be deduplicated below
-            "size": len(members),
-            "top_tags": [{"tag": t, "count": c} for t, c in top_tags],
-            "top_categories": [{"category": c, "count": cnt} for c, cnt in top_categories],
-            "representative_docs": representative_titles,
-        })
-
-    # Deduplicate names: append representative doc title for collisions
-    name_counts = {}
-    for c in community_info:
-        name_counts[c["name"]] = name_counts.get(c["name"], 0) + 1
-    for name_val, count in name_counts.items():
-        if count <= 1:
-            continue
-        for c in community_info:
-            if c["name"] == name_val and c["representative_docs"]:
-                # Shorten the first representative doc title for disambiguation
-                doc_hint = c["representative_docs"][0]
-                if len(doc_hint) > 30:
-                    doc_hint = doc_hint[:27] + "..."
-                c["name"] = f"{name_val}: {doc_hint}"
-
-    return community_info
-
-
-def _build_similarity_graph(name, searcher):
-    """Compute the full similarity graph for a collection (cached by caller)."""
-    import faiss
-    import numpy as np
-
-    indexer = searcher.indexer
-    faiss_indexer = indexer.faiss_indexer if hasattr(indexer, "faiss_indexer") else indexer
-    idx = faiss_indexer.faiss_index  # IndexIDMap wrapping IndexFlatL2
-
-    n_vectors = idx.ntotal
-    if n_vectors == 0:
-        return None
-
-    all_vectors = idx.index.reconstruct_n(0, n_vectors)
-    id_map = faiss.vector_to_array(idx.id_map)
-
-    try:
-        mapping_text = store.disk_persister.read_text_file(
-            f"{name}/indexes/index_document_mapping.json"
-        )
-        mapping = json.loads(mapping_text)
-    except Exception:
-        logger.warning(f"Could not load index mapping for {name}")
-        return None
-
-    doc_chunks = {}
-    doc_meta = {}
-    for vec_idx, chunk_id in enumerate(id_map):
-        entry = mapping.get(str(int(chunk_id)))
-        if not entry:
-            continue
-        doc_url = entry.get("documentUrl", "")
-        doc_id = entry["documentId"]
-        doc_chunks.setdefault(doc_id, []).append(vec_idx)
-        if doc_id not in doc_meta:
-            doc_meta[doc_id] = {"url": doc_url, "path": entry.get("documentPath", "")}
-
-    if not doc_chunks:
-        return None
-
-    # Mean-pool chunk vectors into document vectors, normalize for cosine similarity
-    doc_ids = list(doc_chunks.keys())
-    dim = all_vectors.shape[1]
-    doc_vectors = np.zeros((len(doc_ids), dim), dtype=np.float32)
-    for i, doc_id in enumerate(doc_ids):
-        doc_vectors[i] = all_vectors[doc_chunks[doc_id]].mean(axis=0)
-    faiss.normalize_L2(doc_vectors)
-
-    # Compute full pairwise cosine similarity via inner product
-    # A single matrix multiply is faster than building a FAISS index at this scale
-    sim_matrix = doc_vectors @ doc_vectors.T
-
-    nodes = []
-    for doc_id in doc_ids:
-        meta = doc_meta[doc_id]
-        title = doc_id.rsplit("/", 1)[-1].replace(".md", "")
-        category = doc_id.split("/")[0] if "/" in doc_id else "uncategorized"
-        doc_date = None
-        headings = []
-        summary = ""
-        tags_list = []
-        try:
-            doc_json = json.loads(store.disk_persister.read_text_file(
-                f"{name}/documents/{doc_id}.json"
-            ))
-            stored_meta = doc_json.get("metadata") or {}
-            chunk_meta = (doc_json.get("chunks") or [{}])[0].get("metadata", {})
-            doc_date = chunk_meta.get("date") or stored_meta.get("date")
-
-            # Derive category: chunk category (YouTube), first tag (Jira/Confluence), epic, fallback
-            if chunk_meta.get("category"):
-                category = chunk_meta["category"]
-            elif stored_meta.get("tags"):
-                first_tag = stored_meta["tags"].split(",")[0].strip()
-                if first_tag:
-                    category = first_tag
-            elif stored_meta.get("epic_summary"):
-                category = stored_meta["epic_summary"]
-
-            if stored_meta.get("title"):
-                title = stored_meta["title"]
-            if stored_meta.get("tags"):
-                tags_list = [t.strip() for t in stored_meta["tags"].split(",") if t.strip()]
-
-            headings = [c["heading"] for c in doc_json.get("chunks", []) if c.get("heading")]
-            text = doc_json.get("text", "")
-            if text:
-                summary = text[:500].rstrip() + ("..." if len(text) > 500 else "")
-        except Exception:
-            logger.debug(f"Could not read metadata for {doc_id}")
-        if not tags_list:
-            tags_list = [t.strip() for t in category.split("/") if t.strip()]
-        nodes.append({
-            "id": doc_id,
-            "title": title,
-            "url": meta["url"],
-            "category": category,
-            "tags": tags_list,
-            "date": doc_date,
-            "headings": headings,
-            "summary": summary,
-        })
-
-    # Run community detection on the full similarity matrix
-    # Use 75th percentile as threshold — keeps top 25% of connections
-    import numpy as np
-    upper_tri = sim_matrix[np.triu_indices(len(doc_ids), k=1)]
-    p75 = float(np.percentile(upper_tri, 75)) if len(upper_tri) > 0 else 0.5
-    communities = _detect_communities(sim_matrix, doc_ids, nodes, min_similarity=p75)
-
-    return {"nodes": nodes, "sim_matrix": sim_matrix, "doc_ids": doc_ids, "communities": communities}
-
-
 @app.get("/api/collection/{name}/similarity-graph")
 def collection_similarity_graph(
     name: str,
@@ -633,58 +407,15 @@ def collection_similarity_graph(
     if not store.has_collection(name):
         raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
 
-    # Use cached graph or compute on first request
     cached = store._similarity_graph_cache.get(name)
     if not cached:
         searcher = store.get_searchers([name])[name]
-        cached = _build_similarity_graph(name, searcher)
+        cached = build_similarity_graph(name, searcher, store.disk_persister)
         if not cached:
-            return _EMPTY_GRAPH
+            return EMPTY_GRAPH
         store._similarity_graph_cache[name] = cached
 
-    import numpy as np
-
-    nodes = cached["nodes"]
-    sim_matrix = cached["sim_matrix"]
-    doc_ids = cached["doc_ids"]
-    n = len(doc_ids)
-    k = min(top_k, n - 1)
-
-    # For each document, find top-k neighbors above threshold
-    edges = []
-    seen_pairs = set()
-    for i in range(n):
-        row = sim_matrix[i]
-        # Get top-(k+1) indices, exclude self
-        top_indices = np.argpartition(row, -(k + 1))[-(k + 1):]
-        for idx in top_indices:
-            j = int(idx)
-            if j == i:
-                continue
-            sim = float(row[j])
-            if sim < min_similarity:
-                continue
-            pair = (min(i, j), max(i, j))
-            if pair in seen_pairs:
-                continue
-            seen_pairs.add(pair)
-            edges.append({
-                "source": doc_ids[i],
-                "target": doc_ids[j],
-                "similarity": round(sim, 4),
-            })
-
-    return {
-        "nodes": nodes,
-        "edges": edges,
-        "communities": cached.get("communities", []),
-        "stats": {
-            "node_count": len(nodes),
-            "edge_count": len(edges),
-            "community_count": len(cached.get("communities", [])),
-            "avg_similarity": round(sum(e["similarity"] for e in edges) / max(len(edges), 1), 4),
-        },
-    }
+    return shape_similarity_response(cached, top_k, min_similarity)
 
 
 @app.get("/api/collection/{name}/author-graph")
@@ -701,10 +432,7 @@ def collection_author_graph(
     Only includes authors that have at least one interaction edge (no isolates).
     Results are cached per collection; invalidated on collection reload.
     """
-    from collections import defaultdict
-
-    cache_key = name
-    cached = store._author_graph_cache.get(cache_key)
+    cached = store._author_graph_cache.get(name)
     if cached:
         return cached
 
@@ -712,131 +440,9 @@ def collection_author_graph(
     if not scores_path.exists():
         raise HTTPException(status_code=404, detail=f"No author graph found for '{name}'")
 
-    data = json.loads(scores_path.read_text())
-
-    # Pre-filter candidates by score and tweet count
-    candidates = {
-        handle for handle, info in data.items()
-        if info.get("author_score", 0) >= min_score
-        and info.get("tweet_count", 0) >= min_tweets
-    }
-
-    # Build edges first so we can filter to connected nodes only
-    tweet_dir = Path(__file__).parent / "data" / "sources" / name
-    interaction_counts: dict[tuple[str, str], float] = defaultdict(float)
-    if tweet_dir.exists():
-        re_handle = re.compile(r"^\d{4}-\d{2}-\d{2}_(.+?)_\d+\.md$")
-        re_quoted = re.compile(r"> \*\*Quoted @(\w+):")
-        re_mention = re.compile(r"(?<![.\w])@(\w{1,15})(?!\.\w)")
-
-        for f in tweet_dir.glob("*.md"):
-            m = re_handle.match(f.name)
-            if not m:
-                continue
-            src = m.group(1).lower()
-            if src not in candidates:
-                continue
-            content = f.read_text(encoding="utf-8")
-            body = content
-            if content.startswith("---"):
-                end = content.find("---", 3)
-                if end != -1:
-                    body = content[end + 3:]
-
-            for qh in re_quoted.findall(body):
-                tgt = qh.lower()
-                if tgt in candidates and tgt != src:
-                    interaction_counts[(src, tgt)] += 3.0
-            for line in body.split("\n"):
-                if line.startswith("# @") or line.startswith("> **Quoted @") or line.startswith("- **Engagement"):
-                    continue
-                for mh in re_mention.findall(line):
-                    tgt = mh.lower()
-                    if tgt in candidates and tgt != src:
-                        interaction_counts[(src, tgt)] += 1.0
-
-    # Filter to only connected handles (have at least one edge)
-    connected = set()
-    for (src, tgt), weight in interaction_counts.items():
-        if weight >= min_interactions:
-            connected.add(src)
-            connected.add(tgt)
-
-    # Remap sparse community IDs to contiguous 0, 1, 2...
-    orig_communities = set()
-    for handle in connected:
-        orig_communities.add(data[handle].get("community", -1))
-    comm_remap = {old: new for new, old in enumerate(sorted(orig_communities))}
-
-    # Build nodes (only connected authors)
-    nodes = []
-    for handle in connected:
-        info = data[handle]
-        nodes.append({
-            "id": handle,
-            "title": f"@{handle}",
-            "url": f"https://x.com/{handle}",
-            "category": f"community-{comm_remap.get(info.get('community', -1), 0)}",
-            "tags": [f"tweets:{info.get('tweet_count', 0)}"],
-            "date": None,
-            "headings": [],
-            "summary": (
-                f"Score: {info.get('author_score', 0):.3f} | "
-                f"PageRank: {info.get('pagerank_norm', 0):.3f} | "
-                f"Avg engagement: {info.get('avg_engagement', 0):.1f} | "
-                f"Tweets: {info.get('tweet_count', 0)}"
-            ),
-            "community": comm_remap.get(info.get("community", -1), -1),
-            "score": info.get("author_score", 0),
-        })
-
-    # Sort nodes by score descending
-    nodes.sort(key=lambda n: -n["score"])
-
-    # Build edges with normalized weights
-    edges = []
-    max_weight = max(interaction_counts.values()) if interaction_counts else 1.0
-    for (src, tgt), weight in interaction_counts.items():
-        if weight < min_interactions or src not in connected or tgt not in connected:
-            continue
-        edges.append({
-            "source": src,
-            "target": tgt,
-            "similarity": round(weight / max_weight, 4),
-        })
-
-    # Build community summaries
-    comm_members: dict[int, list] = defaultdict(list)
-    for node in nodes:
-        comm_members[node["community"]].append(node)
-
-    communities = []
-    for cid, members in sorted(comm_members.items(), key=lambda x: -len(x[1])):
-        if len(members) < 2:
-            continue
-        top_authors = sorted(members, key=lambda n: -n["score"])
-        name_parts = [n["title"] for n in top_authors[:2]]
-        communities.append({
-            "id": cid,
-            "name": " + ".join(name_parts),
-            "size": len(members),
-            "top_tags": [],
-            "top_categories": [],
-            "representative_docs": [n["title"] for n in top_authors[:3]],
-        })
-
-    result = {
-        "nodes": nodes,
-        "edges": edges,
-        "communities": communities,
-        "stats": {
-            "node_count": len(nodes),
-            "edge_count": len(edges),
-            "community_count": len(communities),
-            "avg_similarity": round(sum(e["similarity"] for e in edges) / max(len(edges), 1), 4),
-        },
-    }
-    store._author_graph_cache[cache_key] = result
+    scores = json.loads(scores_path.read_text())
+    result = build_author_graph(scores, name, store.disk_persister, min_score, min_tweets, min_interactions)
+    store._author_graph_cache[name] = result
     return result
 
 
