@@ -26,18 +26,10 @@ import logging
 
 from mcp.server.fastmcp import FastMCP
 
-from main.core.documents_collection_searcher import DocumentCollectionSearcher
 from main.core.mcp_search_tool import build_search_tool_fn
 from main.core.trace_store import TRACE_DEFAULT_ENV
-from main.graph.graph_loader import load_default_knowledge_graph
 from main.graph.graph_search_augmenter import GraphSearchAugmenter
-from main.indexes.indexer_factory import (
-    create_embedder,
-    create_reranker,
-    detect_faiss_index,
-    load_search_indexer,
-)
-from main.persisters.disk_persister import DiskPersister
+from main.runtime.knowledge_store import get_store
 from main.utils.env import env_bool
 from main.utils.logger import add_file_handler, route_handlers_to_stderr, setup_root_logger
 
@@ -45,33 +37,6 @@ from main.utils.logger import add_file_handler, route_handlers_to_stderr, setup_
 setup_root_logger()
 
 TRACE_DEFAULT = env_bool(TRACE_DEFAULT_ENV)
-
-
-def build_searchers(collection_names, index_name=None, base_path="./data/collections"):
-    """Build per-collection searchers backed by a single shared embedder + reranker."""
-    disk_persister = DiskPersister(base_path=base_path)
-    if index_name is None:
-        index_name = detect_faiss_index(collection_names[0], disk_persister)
-
-    logging.info(f"Loading shared embedding model for index: {index_name}")
-    shared_embedder = create_embedder(index_name)
-    logging.info(f"Embedding model loaded: {shared_embedder.model_name}")
-
-    shared_reranker = create_reranker()
-    logging.info(f"Reranker loaded: {shared_reranker.model_name}")
-
-    searchers = {}
-    for name in collection_names:
-        logging.info(f"Loading collection: {name}")
-        indexer = load_search_indexer(name, disk_persister, shared_embedder=shared_embedder)
-        searchers[name] = DocumentCollectionSearcher(
-            collection_name=name,
-            indexer=indexer,
-            persister=disk_persister,
-            reranker=shared_reranker,
-        )
-        logging.info(f"Collection {name} loaded: {indexer.get_name()} ({indexer.get_size()} embeddings)")
-    return searchers
 
 
 def register_collection_tools(mcp, searchers, augmenter, **tool_kwargs):
@@ -107,9 +72,14 @@ def main():
     add_file_handler("huginn-multi-mcp.log")
     args = _parse_args()
 
-    searchers = build_searchers(args['collections'], index_name=args['index'])
-    graph = load_default_knowledge_graph(extra_paths=args['graphPaths'])
-    augmenter = GraphSearchAugmenter(graph)
+    store = get_store()
+    store.load_collections(
+        args['collections'],
+        faiss_index_name=args['index'],
+        extra_graph_paths=args['graphPaths'],
+    )
+    augmenter = GraphSearchAugmenter(store.graph)
+    searchers = store.get_searchers()
 
     mcp = FastMCP("huginn-search")
     register_collection_tools(
