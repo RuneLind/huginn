@@ -33,6 +33,7 @@ from main.core.search_response_formatter import (
     shape_search_results,
     truncate_snippet,
 )
+from main.graph.graph_search_augmenter import GraphSearchAugmenter
 from main.sources.notion.notion_document_reader import NotionDocumentReader
 from main.utils.logger import setup_root_logger
 from main.ingest.youtube import (
@@ -321,32 +322,10 @@ def search(
     trace_obj = create_trace(trace_enabled)
     trace_obj.set_query_raw(q)
 
-    # Graph-enhanced search: entity detection + query expansion
-    search_q = q
-    graph_answer = None
-    detected_entities = []
-    if store.graph:
-        if trace_enabled:
-            entity_pairs = store.graph.detect_entities(q, with_spans=True)
-            detected_entities = [eid for eid, _ in entity_pairs]
-            for eid, span in entity_pairs:
-                node = store.graph.nodes.get(eid, {})
-                trace_obj.add_detected_entity(
-                    entity_id=eid,
-                    entity_type=node.get("type", ""),
-                    label=node.get("label", ""),
-                    matched_span=span,
-                )
-        else:
-            detected_entities = store.graph.detect_entities(q)
-        if detected_entities:
-            graph_answer = store.graph.answer_graph_query(detected_entities, q)
-            trace_obj.set_graph_answered(graph_answer is not None)
-            expansion_terms = store.graph.get_expansion_terms(detected_entities)[:5]
-            if expansion_terms:
-                search_q = q + " " + " ".join(expansion_terms)
-                trace_obj.set_expansion(search_q, expansion_terms)
-                logger.debug(f"Graph-expanded query: {search_q[:200]}")
+    augmenter = GraphSearchAugmenter(store.graph)
+    search_q, graph_answer, detected_entities = augmenter.augment_query(q, trace_obj)
+    if search_q != q:
+        logger.debug(f"Graph-expanded query: {search_q[:200]}")
 
     per_collection = []
     for coll_name, searcher in target_searchers.items():
@@ -372,17 +351,7 @@ def search(
         tags=tags,
     )
 
-    # Graph context enrichment: annotate results with graph entity context
-    if store.graph and detected_entities:
-        for r in results:
-            result_entities = store.graph.detect_entities(r.get("title", ""))
-            contexts = []
-            for eid in result_entities:
-                ctx = store.graph.get_entity_context(eid)
-                if ctx:
-                    contexts.append(ctx)
-            if contexts:
-                r["graph_context"] = contexts[:3]
+    augmenter.enrich_results(results, detected_entities)
 
     response = {"results": results}
     if graph_answer:
