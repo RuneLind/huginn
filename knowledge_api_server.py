@@ -18,30 +18,21 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from main.routes.collections import make_collections_router
-from main.routes.graph import make_graph_router
-from main.routes.ingest import make_ingest_router
-from main.routes.notion import make_notion_router
-from main.routes.search import make_search_router
-from main.runtime.knowledge_store import (
-    KnowledgeStore,
-    get_store,
-    run_collection_update as _run_collection_update,
-)
+from main.routes.collections import router as collections_router
+from main.routes.graph import router as graph_router
+from main.routes.ingest import router as ingest_router
+from main.routes.notion import router as notion_router
+from main.routes.search import router as search_router
+from main.runtime.knowledge_store import get_store
 from main.utils.logger import setup_root_logger
 
 setup_root_logger()
 logger = logging.getLogger(__name__)
 
-store: KnowledgeStore = get_store()
-
-
-def run_collection_update(collection_name):
-    _run_collection_update(collection_name, store)
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    store = get_store()
     store.load_collections(app.state.collection_names, data_path=app.state.data_path)
     yield
 
@@ -60,6 +51,7 @@ app.add_middleware(
 
 @app.get("/health")
 def health():
+    store = get_store()
     return {
         "status": "ok",
         "collections": store.collection_names(),
@@ -67,11 +59,11 @@ def health():
     }
 
 
-app.include_router(make_search_router(store))
-app.include_router(make_graph_router(store))
-app.include_router(make_notion_router(store))
-app.include_router(make_collections_router(store, run_collection_update))
-app.include_router(make_ingest_router(store, run_collection_update))
+app.include_router(search_router)
+app.include_router(graph_router)
+app.include_router(notion_router)
+app.include_router(collections_router)
+app.include_router(ingest_router)
 
 
 def main():
