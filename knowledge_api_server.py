@@ -40,6 +40,7 @@ from main.ingest.youtube import (
     fetch_transcript as _fetch_youtube_transcript,
     list_categories as _list_youtube_categories,
 )
+from main.ingest.x_articles import XArticleIngestRequest, ingest_x_article
 from main.ingest.categories import CATEGORIES
 from scripts.jira.sanitizers.pii_sanitizer import PiiSanitizer
 
@@ -243,17 +244,6 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
-
-
-class XArticleIngestRequest(BaseModel):
-    """X/Twitter article content summarized by the Chrome extension."""
-    title: str
-    url: str
-    author: str  # @handle of the article author
-    summary: str  # pre-made summary from the extension
-    date: Optional[str] = None
-    category: Optional[str] = None  # auto-detected if not provided
-    tags: Optional[list[str]] = None
 
 
 class JiraIngestComment(BaseModel):
@@ -1195,60 +1185,8 @@ def x_article_ingest(req: XArticleIngestRequest, background_tasks: BackgroundTas
     if not xa_path:
         raise HTTPException(status_code=503, detail="X articles sources path not configured (--x-articles-sources-path)")
 
-    date = req.date or dt.date.today().isoformat()
+    result = ingest_x_article(req, sources_path=xa_path)
 
-    # Validate / auto-detect category
-    category = req.category or "ai/general"
-    if category not in CATEGORIES:
-        raise HTTPException(status_code=400, detail=f"Invalid category '{category}'. Must be one of: {', '.join(CATEGORIES)}")
-
-    # Build tags from explicit tags + category parts
-    tag_parts = list(category.split("/"))
-    if req.tags:
-        for t in req.tags:
-            if t not in tag_parts:
-                tag_parts.append(t)
-    tags = ", ".join(tag_parts)
-
-    # Build markdown content
-    frontmatter = (
-        f"---\n"
-        f"date: {date}\n"
-        f"url: {req.url}\n"
-        f"author: {req.author}\n"
-        f"category: {category}\n"
-        f"tags: \"{tags}\"\n"
-        f"---\n\n"
-    )
-    md_content = frontmatter + req.summary
-
-    # Save file under category subdirectory
-    category_dir = os.path.join(xa_path, category)
-    os.makedirs(category_dir, exist_ok=True)
-    base_filename = sanitize_filename(req.title)
-    filename = base_filename + ".md"
-    filepath = os.path.join(category_dir, filename)
-
-    if os.path.exists(filepath):
-        # Check if it's the same article (same URL) — overwrite is fine
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                existing_content = f.read(500)
-            if f"url: {req.url}" not in existing_content:
-                for i in range(2, 100):
-                    filename = f"{base_filename} ({i}).md"
-                    filepath = os.path.join(category_dir, filename)
-                    if not os.path.exists(filepath):
-                        break
-        except Exception:
-            pass
-
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write(md_content)
-    file_rel_path = os.path.join(category, filename)
-    logger.info(f"X article ingest: saved {file_rel_path} (author: {req.author}, category: {category})")
-
-    # Search for similar articles
     similar = []
     if xa_collection and store.has_collection(xa_collection):
         searcher = store.get_searchers([xa_collection]).get(xa_collection)
@@ -1274,17 +1212,14 @@ def x_article_ingest(req: XArticleIngestRequest, background_tasks: BackgroundTas
                     "url": doc_url,
                     "snippet": snippet,
                 })
-
-    # Trigger background reindex
-    if xa_collection and store.has_collection(xa_collection):
         background_tasks.add_task(run_collection_update, xa_collection)
 
     return {
         "status": "ingested",
-        "file_path": file_rel_path,
-        "author": req.author,
-        "category": category,
-        "summary": req.summary,
+        "file_path": result["file_path"],
+        "author": result["author"],
+        "category": result["category"],
+        "summary": result["summary"],
         "similar": similar[:5],
     }
 
