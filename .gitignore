@@ -30,6 +30,14 @@ huginn-nav/
 huginn-capra/
 huginn-jarvis/
 
+# Knowledge graphs may contain customer-confidential data; they belong in the
+# private sub-repos above, not in the public scripts/ folder. These patterns
+# are a safety net so an accidentally-misrouted extractor output can't be
+# `git add`-ed.
+scripts/knowledge_graph/*.json
+scripts/knowledge_graph/*.cache.json
+scripts/knowledge_graph/*.cache.json.*
+
 # Local start script (personal config)
 start.sh
 

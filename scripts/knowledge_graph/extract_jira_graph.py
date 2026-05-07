@@ -8,7 +8,11 @@ tilhører_epic and refererer_til edges.
 Usage:
     uv run scripts/knowledge_graph/extract_jira_graph.py
     uv run scripts/knowledge_graph/extract_jira_graph.py --source ./data/sources/jira-issues
-    uv run scripts/knowledge_graph/extract_jira_graph.py --output ./scripts/knowledge_graph/jira_graph.json
+    uv run scripts/knowledge_graph/extract_jira_graph.py --output ./huginn-nav/scripts/knowledge_graph/jira_graph.json
+
+Output auto-routes to private sub-repos when no --output is given:
+    huginn-nav/scripts/knowledge_graph/jira_graph.json (NAV-internal data)
+    huginn-jarvis/scripts/knowledge_graph/jira_graph.json (otherwise)
 """
 
 import argparse
@@ -75,18 +79,40 @@ def extract_cross_references(body: str, self_key: str, epic_key: str) -> set[str
     return refs
 
 
+def _default_output_path() -> Path:
+    """Auto-route output to a private sub-repo so customer-confidential graphs
+    don't land in the public working tree. Falls back to a NAV-only error if
+    neither private repo is checked out."""
+    nav_dir = Path("./huginn-nav/scripts/knowledge_graph")
+    jarvis_dir = Path("./huginn-jarvis/scripts/knowledge_graph")
+    if nav_dir.exists():
+        return nav_dir / "jira_graph.json"
+    if jarvis_dir.exists():
+        return jarvis_dir / "jira_graph.json"
+    return Path("")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Extract Jira knowledge graph from markdown files")
     parser.add_argument("--source", default="./data/sources/jira-issues",
                         help="Directory with Jira markdown files")
-    parser.add_argument("--output", default="./scripts/knowledge_graph/jira_graph.json",
-                        help="Output JSON file path")
+    parser.add_argument("--output", default=None,
+                        help="Output JSON file path (default: auto-route to ./huginn-nav/ or ./huginn-jarvis/)")
     args = parser.parse_args()
 
     source_dir = Path(args.source)
     if not source_dir.exists():
         print(f"Error: Source directory not found: {source_dir}")
         return
+
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        output_path = _default_output_path()
+        if not output_path:
+            print("Error: no --output given and no private sub-repo (huginn-nav/ or huginn-jarvis/) is checked out.")
+            print("Pass --output explicitly. Do NOT write to ./scripts/knowledge_graph/ — that path leaks customer data into the public repo.")
+            return
 
     print(f"Scanning {source_dir} for Jira markdown files...")
 
@@ -197,7 +223,6 @@ def main():
     graph = {"nodes": nodes, "edges": edges, "stats": stats}
 
     # Write output
-    output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(graph, indent=2, ensure_ascii=False), encoding="utf-8")
 
