@@ -6,6 +6,8 @@ output into the public response format. Stateless functions; safe to share acros
 import math
 import re
 
+from main.utils.filename import title_from_doc_path
+
 
 # Cap for non-reranked results: without cross-encoder validation we can't
 # claim high confidence, so rank-based relevance is bounded.
@@ -155,7 +157,7 @@ def _shape_doc(doc, coll_name, is_reranked, brief, max_chunk_chars, max_chunks_p
     matched_chunks.sort(key=lambda c: c["score"])
     matched_chunks = matched_chunks[:max_chunks_per_doc]
 
-    title = doc.get("path", "").rsplit("/", 1)[-1].replace(".json", "")
+    title = title_from_doc_path(doc.get("path", ""))
     url = doc.get("url", "")
     modified_time = doc.get("modifiedTime")
     best_score = matched_chunks[0]["score"]

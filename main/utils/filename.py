@@ -12,3 +12,8 @@ def sanitize_filename(name):
     if len(name) > 200:
         name = name[:200]
     return name or "Untitled"
+
+
+def title_from_doc_path(path):
+    """Derive a display title from a document path: 'a/b/c.json' -> 'c'."""
+    return path.rsplit("/", 1)[-1].replace(".json", "")
