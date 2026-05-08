@@ -108,6 +108,22 @@ class KnowledgeStore:
         with self._lock:
             return sum(s.indexer.get_size() for s in self.searchers.values())
 
+    def get_cached_similarity_graph(self, name):
+        with self._lock:
+            return self._similarity_graph_cache.get(name)
+
+    def set_cached_similarity_graph(self, name, value):
+        with self._lock:
+            self._similarity_graph_cache[name] = value
+
+    def get_cached_author_graph(self, name):
+        with self._lock:
+            return self._author_graph_cache.get(name)
+
+    def set_cached_author_graph(self, name, value):
+        with self._lock:
+            self._author_graph_cache[name] = value
+
     def _build_searcher(self, name):
         indexer = load_search_indexer(name, self.disk_persister, shared_embedder=self.shared_embedder)
         logger.info(f"Collection {name}: using {indexer.get_name()}")
