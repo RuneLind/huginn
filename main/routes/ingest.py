@@ -11,6 +11,7 @@ from main.ingest.youtube import (
     list_categories,
 )
 from main.runtime.knowledge_store import KnowledgeStore, get_store, run_collection_update
+from main.utils.filename import title_from_doc_path
 
 router = APIRouter()
 
@@ -30,7 +31,7 @@ def _find_similar_documents(searcher, query: str, exclude_match) -> list[dict]:
     for doc in search_result.get("results", []):
         if exclude_match(doc):
             continue
-        doc_title = doc.get("path", "").rsplit("/", 1)[-1].replace(".json", "")
+        doc_title = title_from_doc_path(doc.get("path", ""))
         chunks = doc.get("matchedChunks", [])
         snippet = ""
         if chunks:

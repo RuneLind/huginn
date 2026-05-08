@@ -7,6 +7,7 @@ import time
 import numpy as np
 
 from main.core.search_trace import NULL_TRACE
+from main.utils.filename import title_from_doc_path
 from main.utils.performance import delta_ms
 
 try:
@@ -159,11 +160,6 @@ class DocumentCollectionSearcher:
         return None
 
     @staticmethod
-    def _doc_title_from_entry(entry):
-        doc_path = entry.get("documentPath", "")
-        return doc_path.rsplit("/", 1)[-1].replace(".json", "")
-
-    @staticmethod
     def _record_index_breakdown(coll_trace, breakdown):
         for chunk_id, rank, score in breakdown.get("faiss", []):
             coll_trace.record_stage("faiss", chunk_id=chunk_id, rank=rank, score=score)
@@ -182,7 +178,7 @@ class DocumentCollectionSearcher:
                 coll_trace.annotate_candidate(
                     cid,
                     document_id=entry["documentId"],
-                    doc_title=self._doc_title_from_entry(entry),
+                    doc_title=title_from_doc_path(entry.get("documentPath", "")),
                 )
 
     def _apply_confidence_filtering(self, response):
@@ -234,7 +230,7 @@ class DocumentCollectionSearcher:
                 continue
             doc_id = entry["documentId"]
             if doc_id not in doc_boosts:
-                title = self._doc_title_from_entry(entry).replace("-", " ").replace("_", " ")
+                title = title_from_doc_path(entry.get("documentPath", "")).replace("-", " ").replace("_", " ")
                 title_tokens = set(re.findall(r'\w+', title.lower()))
                 overlap = len(query_tokens & title_tokens)
                 doc_boosts[doc_id] = max(boost_per_term * overlap, boost_cap) if overlap > 0 else 0.0

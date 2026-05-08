@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from main.runtime.knowledge_store import KnowledgeStore, get_store
 from main.sources.notion.notion_document_reader import NotionDocumentReader
+from main.utils.filename import title_from_doc_path
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,7 @@ def _find_local_page_by_notion_id(store: KnowledgeStore, notion_id: str):
         doc = json.loads(store.disk_persister.read_text_file(entry["doc_path"]))
         return {
             "id": notion_id,
-            "title": entry["doc_path"].rsplit("/", 1)[-1].replace(".json", ""),
+            "title": title_from_doc_path(entry["doc_path"]),
             "url": entry["url"],
             "content": doc.get("text", ""),
             "source": "local_index",
