@@ -8,8 +8,8 @@ its own ``-collection`` / ``-collections`` arg; this helper adds the rest.
 from argparse import ArgumentParser
 
 
-def add_search_tool_args(parser: ArgumentParser) -> ArgumentParser:
-    """Register the five shared search-tool flags on ``parser`` and return it."""
+def add_search_tool_args(parser: ArgumentParser) -> None:
+    """Register the five shared search-tool flags on ``parser``."""
     parser.add_argument(
         "-index", "--index",
         required=False, default=None,
@@ -43,4 +43,3 @@ def add_search_tool_args(parser: ArgumentParser) -> ArgumentParser:
             "*_llm_graph.json files auto-detected in the private sub-repo dirs."
         ),
     )
-    return parser

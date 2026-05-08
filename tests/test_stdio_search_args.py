@@ -11,14 +11,12 @@ from main.runtime.stdio_search_args import add_search_tool_args
 
 
 def _build_parser():
-    return add_search_tool_args(argparse.ArgumentParser())
+    parser = argparse.ArgumentParser()
+    add_search_tool_args(parser)
+    return parser
 
 
 class TestSharedSearchToolArgs:
-
-    def test_returns_parser(self):
-        parser = argparse.ArgumentParser()
-        assert add_search_tool_args(parser) is parser
 
     def test_defaults(self):
         args = vars(_build_parser().parse_args([]))
