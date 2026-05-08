@@ -32,6 +32,8 @@ from pathlib import Path
 
 import httpx
 
+from main.graph.graph_search_augmenter import GraphSearchAugmenter
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -400,7 +402,7 @@ def _format_search_results(search_results: list[SearchResult]) -> list[str]:
             heading = chunks[0].get("heading", "") if chunks else ""
             relevance = r.get("relevance", "n/a")
             # Include graph context from search results if available
-            graph_ctx = r.get("graph_context", [])
+            graph_ctx = r.get(GraphSearchAugmenter.GRAPH_CONTEXT_KEY, [])
             graph_line = f"\n     Graph: {'; '.join(graph_ctx[:2])}" if graph_ctx else ""
 
             sr_parts.append(

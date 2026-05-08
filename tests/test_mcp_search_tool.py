@@ -149,7 +149,7 @@ class TestWithGraph:
         result = json.loads(fn("hva er lovvalg"))
 
         # Title contains "Lovvalg" and "utsending" — both graph entities.
-        assert "graph_context" in result["results"][0]
+        assert GraphSearchAugmenter.GRAPH_CONTEXT_KEY in result["results"][0]
 
 
 class TestLowConfidence:
