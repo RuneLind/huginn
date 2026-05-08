@@ -16,4 +16,4 @@ def sanitize_filename(name):
 
 def title_from_doc_path(path):
     """Derive a display title from a document path: 'a/b/c.json' -> 'c'."""
-    return path.rsplit("/", 1)[-1].replace(".json", "")
+    return path.rsplit("/", 1)[-1].removesuffix(".json")

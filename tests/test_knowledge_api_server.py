@@ -395,6 +395,30 @@ class TestSanitizeFilename:
         assert sanitize_filename(':<>"/\\|?*') == "Untitled"
 
 
+class TestTitleFromDocPath:
+    def test_basic(self):
+        from main.utils.filename import title_from_doc_path
+        assert title_from_doc_path("a/b/c.json") == "c"
+
+    def test_no_directory(self):
+        from main.utils.filename import title_from_doc_path
+        assert title_from_doc_path("c.json") == "c"
+
+    def test_no_json_suffix(self):
+        from main.utils.filename import title_from_doc_path
+        assert title_from_doc_path("a/b/c.md") == "c.md"
+
+    def test_only_strips_trailing_suffix(self):
+        """`.json` mid-path must not be stripped — only the trailing extension."""
+        from main.utils.filename import title_from_doc_path
+        assert title_from_doc_path("archive/v1.json.bak/notes.txt") == "notes.txt"
+
+    def test_filename_contains_json_substring(self):
+        """A filename like `my.json.notes.json` keeps the inner `.json`."""
+        from main.utils.filename import title_from_doc_path
+        assert title_from_doc_path("a/my.json.notes.json") == "my.json.notes"
+
+
 class TestModelConfig:
     """Verify model configuration to prevent MPS memory explosion on Apple Silicon."""
 
