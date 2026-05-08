@@ -37,13 +37,13 @@ def collection_similarity_graph(
     if not store.has_collection(name):
         raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
 
-    cached = store._similarity_graph_cache.get(name)
+    cached = store.get_cached_similarity_graph(name)
     if not cached:
         searcher = store.get_searchers([name])[name]
         cached = build_similarity_graph(name, searcher, store.disk_persister)
         if not cached:
             return EMPTY_GRAPH
-        store._similarity_graph_cache[name] = cached
+        store.set_cached_similarity_graph(name, cached)
 
     return shape_similarity_response(cached, top_k, min_similarity)
 
@@ -64,7 +64,7 @@ def collection_author_graph(
     Only includes authors that have at least one interaction edge (no isolates).
     Results are cached per collection; invalidated on collection reload.
     """
-    cached = store._author_graph_cache.get(name)
+    cached = store.get_cached_author_graph(name)
     if cached:
         return cached
 
@@ -75,5 +75,5 @@ def collection_author_graph(
 
     scores = json.loads(scores_path.read_text())
     result = build_author_graph(scores, name, store.disk_persister, min_score, min_tweets, min_interactions)
-    store._author_graph_cache[name] = result
+    store.set_cached_author_graph(name, result)
     return result
