@@ -33,6 +33,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 from main.core.trace_store import any_trace_enabled
+from main.graph.graph_search_augmenter import GraphSearchAugmenter
 
 # Redirect logging to stderr (stdout is reserved for MCP JSON-RPC)
 logging.basicConfig(
@@ -261,7 +262,7 @@ def _search_knowledge_impl(
             date = f" | {_format_date(r['modifiedTime'])}" if r.get("modifiedTime") else ""
             breadcrumb = f"\n   {r['breadcrumb']}" if r.get("breadcrumb") else ""
             wip = " **[UNDER ARBEID]**" if _is_wip(r) else ""
-            graph_ctx = f"\n   *{' | '.join(r['graph_context'])}*" if r.get("graph_context") else ""
+            graph_ctx = f"\n   *{' | '.join(r[GraphSearchAugmenter.GRAPH_CONTEXT_KEY])}*" if r.get(GraphSearchAugmenter.GRAPH_CONTEXT_KEY) else ""
             meta = r.get("metadata") or {}
             visible_meta = {k: v for k, v in meta.items() if k not in _INTERNAL_METADATA_KEYS and v}
             meta_line = f"\n   *{' | '.join(f'{k}: {v}' for k, v in visible_meta.items())}*" if visible_meta else ""
@@ -282,8 +283,8 @@ def _search_knowledge_impl(
             if r.get("breadcrumb"):
                 header += f"\n{r['breadcrumb']}"
             header += f"\ncollection: `{r['collection']}` doc_id: `{r['id']}`"
-            if r.get("graph_context"):
-                header += f"\n*{' | '.join(r['graph_context'])}*"
+            if r.get(GraphSearchAugmenter.GRAPH_CONTEXT_KEY):
+                header += f"\n*{' | '.join(r[GraphSearchAugmenter.GRAPH_CONTEXT_KEY])}*"
             chunks = r.get("matchedChunks", [])
             chunk_lines = []
             for chunk in chunks:

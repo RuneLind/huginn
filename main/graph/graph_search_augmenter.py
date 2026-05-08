@@ -18,6 +18,7 @@ class GraphSearchAugmenter:
 
     EXPANSION_TERM_LIMIT = 5
     CONTEXT_PER_RESULT_LIMIT = 3
+    GRAPH_CONTEXT_KEY = "graph_context"
 
     def __init__(self, graph):
         self.graph = graph
@@ -74,4 +75,4 @@ class GraphSearchAugmenter:
                 if ctx:
                     contexts.append(ctx)
             if contexts:
-                r["graph_context"] = contexts[: self.CONTEXT_PER_RESULT_LIMIT]
+                r[self.GRAPH_CONTEXT_KEY] = contexts[: self.CONTEXT_PER_RESULT_LIMIT]

@@ -126,26 +126,26 @@ class TestEnrichResults:
         aug = GraphSearchAugmenter(None)
         results = [{"title": "LA_BUC_01"}]
         aug.enrich_results(results, ["buc:LA_BUC_01"])
-        assert "graph_context" not in results[0]
+        assert GraphSearchAugmenter.GRAPH_CONTEXT_KEY not in results[0]
 
     def test_no_op_when_no_detected_entities(self, graph):
         aug = GraphSearchAugmenter(graph)
         results = [{"title": "LA_BUC_01"}]
         aug.enrich_results(results, [])
-        assert "graph_context" not in results[0]
+        assert GraphSearchAugmenter.GRAPH_CONTEXT_KEY not in results[0]
 
     def test_adds_graph_context_for_title_match(self, graph):
         aug = GraphSearchAugmenter(graph)
         results = [{"title": "LA_BUC_01 oversikt"}]
         aug.enrich_results(results, ["buc:LA_BUC_01"])
-        assert "graph_context" in results[0]
-        assert results[0]["graph_context"]
+        assert GraphSearchAugmenter.GRAPH_CONTEXT_KEY in results[0]
+        assert results[0][GraphSearchAugmenter.GRAPH_CONTEXT_KEY]
 
     def test_skips_results_without_title_match(self, graph):
         aug = GraphSearchAugmenter(graph)
         results = [{"title": "unrelated document"}]
         aug.enrich_results(results, ["buc:LA_BUC_01"])
-        assert "graph_context" not in results[0]
+        assert GraphSearchAugmenter.GRAPH_CONTEXT_KEY not in results[0]
 
     def test_caps_contexts_per_result(self, graph):
         aug = GraphSearchAugmenter(graph)
@@ -155,11 +155,18 @@ class TestEnrichResults:
         graph.get_entity_context = lambda eid: f"context for {eid}"
         results = [{"title": "anything"}]
         aug.enrich_results(results, ["buc:LA_BUC_01"])
-        assert len(results[0]["graph_context"]) == GraphSearchAugmenter.CONTEXT_PER_RESULT_LIMIT
+        assert len(results[0][GraphSearchAugmenter.GRAPH_CONTEXT_KEY]) == GraphSearchAugmenter.CONTEXT_PER_RESULT_LIMIT
 
     def test_handles_missing_title(self, graph):
         aug = GraphSearchAugmenter(graph)
         results = [{}]
         aug.enrich_results(results, ["buc:LA_BUC_01"])
         # Empty title produces no entities — no graph_context, no crash.
-        assert "graph_context" not in results[0]
+        assert GraphSearchAugmenter.GRAPH_CONTEXT_KEY not in results[0]
+
+
+class TestGraphContextKey:
+    def test_value_is_pinned(self):
+        """Renaming GRAPH_CONTEXT_KEY's value would silently break external
+        clients (Muninn, bots) that read the raw JSON response by key."""
+        assert GraphSearchAugmenter.GRAPH_CONTEXT_KEY == "graph_context"
