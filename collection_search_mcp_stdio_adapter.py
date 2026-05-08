@@ -22,6 +22,7 @@ from main.core.mcp_search_tool import build_search_tool_fn
 from main.core.trace_store import TRACE_DEFAULT_ENV
 from main.graph.graph_search_augmenter import GraphSearchAugmenter
 from main.runtime.knowledge_store import get_store
+from main.runtime.stdio_search_args import add_search_tool_args
 from main.utils.env import env_bool
 from main.utils.logger import add_file_handler, route_handlers_to_stderr, setup_root_logger
 
@@ -35,16 +36,7 @@ def _parse_args(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("-collection", "--collection", required=True,
                     help="Collection name (will be used as root folder name)")
-    ap.add_argument("-index", "--index", required=False, default=None,
-                    help="Index that will be used for search (auto-detected if omitted)")
-    ap.add_argument("-maxNumberOfChunks", "--maxNumberOfChunks", required=False, type=int, default=100,
-                    help="Max number of text chunks in result")
-    ap.add_argument("-maxNumberOfDocuments", "--maxNumberOfDocuments", required=False, type=int, default=10,
-                    help="Max number of documents in result (default: 10)")
-    ap.add_argument("-includeFullText", "--includeFullText", action="store_true", required=False, default=False,
-                    help="Include full text content in search results. If passed, reduce --maxNumberOfChunks or set a small --maxNumberOfDocuments to avoid blowing model context.")
-    ap.add_argument("-graphPaths", "--graphPaths", required=False, nargs='*', default=None,
-                    help="Optional knowledge graph JSON paths. Combined with KNOWLEDGE_GRAPH_PATH/JIRA_GRAPH_PATH/LLM_GRAPH_PATH and *_llm_graph.json files auto-detected in the private sub-repo dirs.")
+    add_search_tool_args(ap)
     return vars(ap.parse_args(argv))
 
 
