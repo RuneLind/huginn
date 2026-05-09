@@ -21,52 +21,17 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
+from main.utils.frontmatter import read_frontmatter_from_path, strip_frontmatter
+
 ISSUE_KEY_RE = re.compile(r'\b([A-Z][A-Z0-9]+-\d+)\b')
-
-
-def parse_frontmatter(filepath: str) -> dict:
-    """Parse YAML frontmatter from a markdown file into a dict."""
-    metadata = {}
-    try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            in_fm = False
-            for line in f:
-                if line.strip() == "---" and not in_fm:
-                    in_fm = True
-                    continue
-                if line.strip() == "---" and in_fm:
-                    break
-                if in_fm and ":" in line:
-                    key, _, value = line.partition(":")
-                    key = key.strip()
-                    value = value.strip().strip('"')
-                    if key and value:
-                        metadata[key] = value
-    except Exception:
-        pass
-    return metadata
 
 
 def parse_body(filepath: str) -> str:
     """Read body text after frontmatter."""
-    lines = []
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            in_fm = False
-            fm_ended = False
-            for line in f:
-                if line.strip() == "---" and not in_fm and not fm_ended:
-                    in_fm = True
-                    continue
-                if line.strip() == "---" and in_fm:
-                    in_fm = False
-                    fm_ended = True
-                    continue
-                if fm_ended:
-                    lines.append(line)
-    except Exception:
-        pass
-    return "".join(lines)
+        return strip_frontmatter(Path(filepath).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return ""
 
 
 def extract_cross_references(body: str, self_key: str, epic_key: str) -> set[str]:
@@ -126,7 +91,7 @@ def main():
     md_files = [f for f in md_files if ".excluded" not in f.parts]
 
     for filepath in md_files:
-        meta = parse_frontmatter(str(filepath))
+        meta = read_frontmatter_from_path(str(filepath))
         issue_key = meta.get("issue_key", "")
         if not issue_key:
             continue

@@ -31,7 +31,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from claude_cli import FRONTMATTER_RE, call_claude, extract_frontmatter, extract_json_array, get_content_excerpt
+from claude_cli import FRONTMATTER_RE, call_claude, extract_json_array, get_content_excerpt
+from main.utils.frontmatter import read_frontmatter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -131,7 +132,7 @@ def _tag_single_file(md_file: Path, source_dir: Path, taxonomy: dict,
     if has_tags(content) and not force:
         return {"path": rel_path, "status": "skipped", "tags": []}
 
-    fields = extract_frontmatter(content)
+    fields = read_frontmatter(content)
     title = fields.get('title', md_file.stem)
     breadcrumb = fields.get('breadcrumb', str(md_file.relative_to(source_dir).parent))
     excerpt = get_content_excerpt(content)

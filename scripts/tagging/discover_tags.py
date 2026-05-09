@@ -26,7 +26,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from claude_cli import call_claude, extract_frontmatter, extract_json_array, get_content_excerpt
+from claude_cli import call_claude, extract_json_array, get_content_excerpt
+from main.utils.frontmatter import read_frontmatter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -55,7 +56,7 @@ def discover_tags_for_file(md_file: Path, source_dir: Path, description: str,
     """Discover free-form tags for a single file. Returns (rel_path, tags)."""
     rel_path = str(md_file.relative_to(source_dir))
     content = md_file.read_text(encoding='utf-8')
-    fields = extract_frontmatter(content)
+    fields = read_frontmatter(content)
     title = fields.get('title', md_file.stem)
     breadcrumb = fields.get('breadcrumb', str(md_file.relative_to(source_dir).parent))
     excerpt = get_content_excerpt(content)
