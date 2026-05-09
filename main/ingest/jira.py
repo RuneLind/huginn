@@ -8,6 +8,7 @@ from typing import Optional
 from fastapi import HTTPException
 from pydantic import BaseModel
 
+from main.utils.frontmatter import read_frontmatter_from_path
 from scripts.jira.sanitizers.pii_sanitizer import PiiSanitizer
 
 logger = logging.getLogger(__name__)
@@ -40,46 +41,6 @@ class JiraIngestRequest(BaseModel):
     epicLink: Optional[str] = None
 
 
-def _read_existing_frontmatter(filepath: str) -> dict:
-    """Read YAML frontmatter from an existing markdown file into a dict.
-
-    Handles multi-line YAML lists (e.g. labels) by collecting list items.
-    Returns {} on read/parse failure (logged at warning level).
-    """
-    metadata = {}
-    current_list_key = None
-    try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            in_fm = False
-            for line in f:
-                if line.strip() == "---" and not in_fm:
-                    in_fm = True
-                    continue
-                if line.strip() == "---" and in_fm:
-                    break
-                if not in_fm:
-                    continue
-                stripped = line.strip()
-                if stripped.startswith("- ") and current_list_key:
-                    item = stripped[2:].strip()
-                    existing = metadata.get(current_list_key, "")
-                    metadata[current_list_key] = (existing + "," + item) if existing else item
-                    continue
-                current_list_key = None
-                if ":" in line:
-                    key, _, value = line.partition(":")
-                    key = key.strip()
-                    value = value.strip().strip('"')
-                    if key and value:
-                        metadata[key] = value
-                    elif key and not value:
-                        # Key with no value — likely start of a YAML list
-                        current_list_key = key
-    except (OSError, UnicodeDecodeError) as e:
-        logger.warning(f"Could not read frontmatter from {filepath}: {e}")
-    return metadata
-
-
 def _find_existing_jira_file(jira_path: str, issue_key: str) -> tuple[Optional[str], dict]:
     """Find an existing markdown file for `issue_key`. Returns (filepath, frontmatter) or (None, {}).
 
@@ -95,7 +56,7 @@ def _find_existing_jira_file(jira_path: str, issue_key: str) -> tuple[Optional[s
         # Match "PROJECT-1234_..." or "PROJECT-1234 ..." or "PROJECT-1234.md"
         if filename.startswith(prefix + "_") or filename.startswith(prefix + " ") or filename == prefix + ".md":
             filepath = os.path.join(jira_path, filename)
-            metadata = _read_existing_frontmatter(filepath)
+            metadata = read_frontmatter_from_path(filepath)
             if metadata.get("issue_key") == issue_key:
                 return filepath, metadata
     return None, {}

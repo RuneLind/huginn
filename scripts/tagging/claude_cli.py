@@ -4,6 +4,12 @@ import os
 import re
 import subprocess
 
+from main.utils.frontmatter import read_frontmatter, strip_frontmatter
+
+# tag_documents.py uses this for tag-line manipulation inside the FM block. The inner
+# capture group + no trailing-newline form is intentional — inject_tags relies on
+# match.end() landing right after the second `---` so the body's leading newline
+# is preserved when splicing.
 FRONTMATTER_RE = re.compile(r'^---\n(.*?)\n---', re.DOTALL)
 
 
@@ -41,22 +47,9 @@ def call_claude(prompt: str, model: str = "claude-haiku-4-5-20251001",
     return envelope.get("result", "")
 
 
-def extract_frontmatter(content: str) -> dict[str, str]:
-    """Extract frontmatter fields and return as a dict."""
-    match = FRONTMATTER_RE.match(content)
-    if not match:
-        return {}
-    fields = {}
-    for line in match.group(1).split('\n'):
-        if ':' in line:
-            key, _, value = line.partition(':')
-            fields[key.strip()] = value.strip().strip('"')
-    return fields
-
-
 def get_content_excerpt(content: str, max_chars: int = 2000) -> str:
     """Get content without frontmatter, truncated to max_chars."""
-    stripped = FRONTMATTER_RE.sub('', content).strip()
+    stripped = strip_frontmatter(content).strip()
     if len(stripped) > max_chars:
         return stripped[:max_chars] + "..."
     return stripped

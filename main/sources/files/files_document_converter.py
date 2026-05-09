@@ -3,6 +3,7 @@ import re
 
 from main.sources.files.markdown_heading_splitter import MarkdownHeadingSplitter
 from main.sources.files.session_markdown_splitter import SessionMarkdownSplitter
+from main.utils.frontmatter import read_frontmatter, strip_frontmatter
 
 # Frontmatter fields to preserve as document metadata (key in frontmatter -> key in metadata)
 _FRONTMATTER_METADATA_FIELDS = {"wip", "title", "breadcrumb", "space", "page_id", "session_id", "project", "gitBranch", "tags", "category", "date", "url",
@@ -10,8 +11,6 @@ _FRONTMATTER_METADATA_FIELDS = {"wip", "title", "breadcrumb", "space", "page_id"
 
 
 class FilesDocumentConverter:
-    _FRONTMATTER_RE = re.compile(r'^---\n.*?\n---\n?', re.DOTALL)
-    _FRONTMATTER_FIELD_RE = re.compile(r'^([^:\n]+):\s*(.+)$', re.MULTILINE)
     _MD_IMAGE_RE = re.compile(r'!\[[^\]]*\]\([^)]+\)')
     _S3_URL_RE = re.compile(r'https://[a-zA-Z0-9._-]+\.s3\.[a-zA-Z0-9-]+\.amazonaws\.com/[^\s)]*')
     _CODE_BLOCK_RE = re.compile(r'```[^\n]*\n.*?```', re.DOTALL)
@@ -66,19 +65,14 @@ class FilesDocumentConverter:
         return delimiter.join([element for element in elements if element]).strip()
     
     def _strip_frontmatter(self, text):
-        return self._FRONTMATTER_RE.sub('', text)
+        return strip_frontmatter(text)
 
     def __extract_frontmatter_metadata(self, document):
         """Extract selected fields from YAML frontmatter as document metadata."""
         for content_part in document['content']:
-            match = self._FRONTMATTER_RE.match(content_part['text'])
-            if match:
-                fm_block = match.group(0)
-                metadata = {}
-                for field_match in self._FRONTMATTER_FIELD_RE.finditer(fm_block):
-                    key = field_match.group(1).strip()
-                    if key in _FRONTMATTER_METADATA_FIELDS:
-                        metadata[key] = field_match.group(2).strip().strip('"')
+            fm = read_frontmatter(content_part['text'])
+            if fm:
+                metadata = {k: v for k, v in fm.items() if k in _FRONTMATTER_METADATA_FIELDS}
                 return metadata if metadata else None
         return None
 
@@ -128,8 +122,6 @@ class FilesDocumentConverter:
 
         return chunks
 
-    _FRONTMATTER_URL_RE = re.compile(r'^url:\s*(.+)$', re.MULTILINE)
-
     def __build_url(self, document):
         file_path = document['fileFullPath']
 
@@ -137,12 +129,9 @@ class FilesDocumentConverter:
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     content = f.read()
-
-                match = self._FRONTMATTER_RE.match(content)
-                if match:
-                    url_match = self._FRONTMATTER_URL_RE.search(match.group(0))
-                    if url_match:
-                        return url_match.group(1).strip().strip('"')
+                url = read_frontmatter(content).get("url")
+                if url:
+                    return url
             except Exception:
                 pass
 
