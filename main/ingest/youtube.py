@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from main.fetchers.youtube.youtube_transcript_downloader import YouTubeTranscriptDownloader
 from main.ingest.categories import CATEGORIES
 from main.ingest._markdown_writer import write_categorized_markdown
+from main.utils.claude_cli import call_claude
 
 logger = logging.getLogger(__name__)
 
@@ -93,35 +94,16 @@ def fetch_transcript(video_id_or_url: str) -> str:
 
 
 def _call_claude_headless(prompt: str, model: Optional[str] = None) -> str:
-    """Call Claude Code CLI in headless mode (uses Max subscription, no API key needed).
-
-    Passes prompt via stdin (not CLI arg) to avoid OS ARG_MAX limits with long transcripts.
-    """
+    """Call Claude headless and translate transport errors into FastAPI ``HTTPException``."""
     model = model or os.environ.get("CLAUDE_MODEL", "sonnet")
-    cmd = ["claude", "-p", "-", "--output-format", "json", "--model", model]
-
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=180,
-            input=prompt,
-        )
+        return call_claude(prompt, model=model, timeout=180)
     except FileNotFoundError:
         raise HTTPException(status_code=503, detail="Claude CLI not found. Install Claude Code first.")
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=504, detail="Claude CLI timed out after 180s")
-
-    if proc.returncode != 0:
-        stderr = proc.stderr.strip()[:500] if proc.stderr else "unknown error"
-        raise HTTPException(status_code=502, detail=f"Claude CLI error: {stderr}")
-
-    try:
-        result = json.loads(proc.stdout)
-        return result.get("result", proc.stdout)
-    except json.JSONDecodeError:
-        return proc.stdout.strip()
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e)[:500])
 
 
 def _parse_claude_response(text: str) -> tuple[str, str]:
