@@ -171,10 +171,10 @@ class TestSanitizeFrontmatterHandling:
     def _run_sanitize_on_file(self, tmp_path, content):
         """Simulate the sanitization file-write logic from main()."""
         from confluence_cleanup_md import sanitize_content as _sanitize, detect_wip as _detect_wip
-        from confluence_cleanup_md import parse_frontmatter_and_body
+        from main.utils.frontmatter import read_frontmatter_and_body
 
         filepath = _write_md(tmp_path, "test.md", content)
-        metadata, body = parse_frontmatter_and_body(filepath)
+        metadata, body = read_frontmatter_and_body(filepath)
         cleaned_body, removed = _sanitize(body)
         is_wip = _detect_wip(metadata.get("title", ""), body)
         needs_wip_flag = is_wip and metadata.get("wip") != "true"

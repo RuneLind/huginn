@@ -22,6 +22,7 @@ import argparse
 import logging
 from datetime import datetime, timedelta
 
+from main.utils.frontmatter import read_frontmatter_and_body
 from main.utils.logger import setup_root_logger
 
 setup_root_logger()
@@ -86,45 +87,6 @@ def match_type_pattern(issue_type, noise_patterns):
         if "type_pattern" in entry and entry["type_pattern"].lower() in type_lower:
             return entry["reason"]
     return None
-
-
-def parse_frontmatter_and_body(filepath):
-    """Parse YAML frontmatter and return (metadata_dict, body_text)."""
-    metadata = {}
-    body_lines = []
-    in_frontmatter = False
-    frontmatter_ended = False
-
-    with open(filepath, "r", encoding="utf-8") as f:
-        for line in f:
-            if not in_frontmatter and not frontmatter_ended and line.strip() == "---":
-                in_frontmatter = True
-                continue
-            if in_frontmatter:
-                if line.strip() == "---":
-                    in_frontmatter = False
-                    frontmatter_ended = True
-                    continue
-                stripped = line.strip()
-                # List item (e.g. "  - frontend") — no colon required
-                if stripped.startswith("- "):
-                    item = stripped[2:].strip()
-                    if item:
-                        existing = metadata.get("labels", "")
-                        metadata["labels"] = (existing + "," + item) if existing else item
-                    continue
-                if ":" in line:
-                    key, _, value = line.partition(":")
-                    key = key.strip()
-                    value = value.strip().strip('"')
-                    # Key with no value — likely start of a YAML list (e.g. "labels:")
-                    if key and not value:
-                        continue
-                    metadata[key] = value
-            else:
-                body_lines.append(line)
-
-    return metadata, "".join(body_lines)
 
 
 def classify_body(body_text, min_content_length, min_word_count=0):
@@ -223,7 +185,7 @@ def main():
             rel_path = os.path.relpath(filepath, save_md_path)
 
             try:
-                metadata, body = parse_frontmatter_and_body(filepath)
+                metadata, body = read_frontmatter_and_body(filepath)
             except Exception as e:
                 logging.warning(f"Could not parse {filepath}: {e}")
                 continue

@@ -1,5 +1,6 @@
 from main.utils.frontmatter import (
     read_frontmatter,
+    read_frontmatter_and_body,
     read_frontmatter_from_path,
     strip_frontmatter,
 )
@@ -66,6 +67,31 @@ class TestReadFrontmatterFromPath:
         body = "x" * 50000
         p.write_text(f'---\ntitle: foo\n---\n{body}')
         assert read_frontmatter_from_path(str(p)) == {"title": "foo"}
+
+
+class TestReadFrontmatterAndBody:
+    def test_returns_metadata_and_body(self, tmp_path):
+        p = tmp_path / "doc.md"
+        p.write_text('---\ntitle: foo\n---\nbody line 1\nbody line 2\n')
+        meta, body = read_frontmatter_and_body(str(p))
+        assert meta == {"title": "foo"}
+        assert body == "body line 1\nbody line 2\n"
+
+    def test_no_frontmatter_returns_empty_dict_and_full_body(self, tmp_path):
+        p = tmp_path / "doc.md"
+        p.write_text('plain body without frontmatter\n')
+        assert read_frontmatter_and_body(str(p)) == ({}, "plain body without frontmatter\n")
+
+    def test_missing_file_returns_empty(self, tmp_path):
+        assert read_frontmatter_and_body(str(tmp_path / "missing.md")) == ({}, "")
+
+    def test_reads_full_body_not_just_head(self, tmp_path):
+        p = tmp_path / "big.md"
+        big_body = "x" * 50000
+        p.write_text(f'---\ntitle: foo\n---\n{big_body}')
+        meta, body = read_frontmatter_and_body(str(p))
+        assert meta == {"title": "foo"}
+        assert body == big_body
 
 
 class TestStripFrontmatter:
