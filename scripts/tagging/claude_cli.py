@@ -1,50 +1,15 @@
 """Shared helpers for calling Claude CLI headless and processing markdown documents."""
 import json
-import os
 import re
-import subprocess
 
-from main.utils.frontmatter import read_frontmatter, strip_frontmatter
+from main.utils.claude_cli import call_claude  # noqa: F401  (re-exported)
+from main.utils.frontmatter import strip_frontmatter
 
 # tag_documents.py uses this for tag-line manipulation inside the FM block. The inner
 # capture group + no trailing-newline form is intentional — inject_tags relies on
 # match.end() landing right after the second `---` so the body's leading newline
 # is preserved when splicing.
 FRONTMATTER_RE = re.compile(r'^---\n(.*?)\n---', re.DOTALL)
-
-
-def call_claude(prompt: str, model: str = "claude-haiku-4-5-20251001",
-                timeout: int = 60) -> str:
-    """Call claude CLI and return the result text. Kills process on timeout."""
-    # Strip CLAUDECODE env vars to allow spawning from within a Claude Code session
-    env = {k: v for k, v in os.environ.items()
-           if not k.startswith("CLAUDECODE") and k != "CLAUDE_CODE_ENTRYPOINT"}
-    proc = subprocess.Popen(
-        ["claude", "-p", prompt, "--output-format", "json", "--model", model],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=env,
-    )
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        raise RuntimeError(f"claude CLI timed out after {timeout}s")
-
-    if proc.returncode != 0:
-        raise RuntimeError(f"claude CLI failed (exit {proc.returncode}): {stderr[:200]}")
-
-    try:
-        envelope = json.loads(stdout)
-    except json.JSONDecodeError:
-        raise RuntimeError(f"Bad JSON from claude CLI: {stdout[:200]}")
-
-    if envelope.get("is_error"):
-        raise RuntimeError(f"Claude error: {envelope.get('result', 'unknown')}")
-
-    return envelope.get("result", "")
 
 
 def get_content_excerpt(content: str, max_chars: int = 2000) -> str:
