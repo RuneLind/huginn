@@ -1,8 +1,8 @@
-"""Shared helpers for calling Claude CLI headless and processing markdown documents."""
+"""Markdown / JSON helpers used by the tagging scripts. The Claude CLI wrapper
+itself lives in ``main.utils.claude_cli`` — import it from there directly."""
 import json
 import re
 
-from main.utils.claude_cli import call_claude  # noqa: F401  (re-exported)
 from main.utils.frontmatter import strip_frontmatter
 
 # tag_documents.py uses this for tag-line manipulation inside the FM block. The inner

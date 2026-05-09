@@ -26,7 +26,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from claude_cli import call_claude, extract_json_array, get_content_excerpt
+from claude_cli import extract_json_array, get_content_excerpt
+from main.utils.claude_cli import call_claude
 from main.utils.frontmatter import read_frontmatter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
