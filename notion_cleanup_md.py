@@ -18,6 +18,7 @@ import shutil
 import argparse
 import logging
 
+from main.utils.frontmatter import read_frontmatter_and_body
 from main.utils.logger import setup_root_logger
 
 setup_root_logger()
@@ -30,32 +31,6 @@ REFERENCE_PATTERNS = [
     re.compile(r"^\[Child page:.*\]$"),
     re.compile(r"^\[Unsupported:.*\]$"),
 ]
-
-
-def parse_frontmatter_and_body(filepath):
-    """Parse YAML frontmatter and return (metadata_dict, body_text)."""
-    metadata = {}
-    body_lines = []
-    in_frontmatter = False
-    frontmatter_ended = False
-
-    with open(filepath, "r", encoding="utf-8") as f:
-        for line in f:
-            if not in_frontmatter and not frontmatter_ended and line.strip() == "---":
-                in_frontmatter = True
-                continue
-            if in_frontmatter:
-                if line.strip() == "---":
-                    in_frontmatter = False
-                    frontmatter_ended = True
-                    continue
-                if ":" in line:
-                    key, _, value = line.partition(":")
-                    metadata[key.strip()] = value.strip().strip('"')
-            else:
-                body_lines.append(line)
-
-    return metadata, "".join(body_lines)
 
 
 def classify_body(body_text, min_content_length):
@@ -115,7 +90,7 @@ def main():
             filepath = os.path.join(root, filename)
 
             try:
-                metadata, body = parse_frontmatter_and_body(filepath)
+                metadata, body = read_frontmatter_and_body(filepath)
             except Exception as e:
                 logging.warning(f"Could not parse {filepath}: {e}")
                 continue

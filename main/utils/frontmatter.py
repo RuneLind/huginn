@@ -43,6 +43,21 @@ def strip_frontmatter(text: str) -> str:
     return FRONTMATTER_RE.sub('', text)
 
 
+def read_frontmatter_and_body(filepath: str) -> tuple[dict[str, str], str]:
+    """Read full file; return ``(frontmatter_dict, body_text)``.
+
+    Returns ``({}, "")`` on read failure (logged). Unlike ``read_frontmatter_from_path``
+    this reads the whole file because callers need the body too.
+    """
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            text = f.read()
+    except (OSError, UnicodeDecodeError) as e:
+        logger.warning(f"Could not read frontmatter from {filepath}: {e}")
+        return {}, ""
+    return read_frontmatter(text), strip_frontmatter(text)
+
+
 def _parse_block(fm_text: str) -> dict[str, str]:
     metadata = {}
     current_list_key = None

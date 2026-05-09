@@ -25,6 +25,7 @@ import argparse
 import logging
 from fnmatch import fnmatch
 
+from main.utils.frontmatter import read_frontmatter_and_body
 from main.utils.logger import setup_root_logger
 
 setup_root_logger()
@@ -74,32 +75,6 @@ def match_title_noise_pattern(title, noise_patterns):
         if "title_pattern" in entry and entry["title_pattern"].lower() in title_lower:
             return entry["reason"]
     return None
-
-
-def parse_frontmatter_and_body(filepath):
-    """Parse YAML frontmatter and return (metadata_dict, body_text)."""
-    metadata = {}
-    body_lines = []
-    in_frontmatter = False
-    frontmatter_ended = False
-
-    with open(filepath, "r", encoding="utf-8") as f:
-        for line in f:
-            if not in_frontmatter and not frontmatter_ended and line.strip() == "---":
-                in_frontmatter = True
-                continue
-            if in_frontmatter:
-                if line.strip() == "---":
-                    in_frontmatter = False
-                    frontmatter_ended = True
-                    continue
-                if ":" in line:
-                    key, _, value = line.partition(":")
-                    metadata[key.strip()] = value.strip().strip('"')
-            else:
-                body_lines.append(line)
-
-    return metadata, "".join(body_lines)
 
 
 def classify_body(body_text, min_content_length, min_word_count=0):
@@ -227,7 +202,7 @@ def main():
             if noise_reason:
                 category_counts["noise_path"] += 1
                 try:
-                    metadata, _ = parse_frontmatter_and_body(filepath)
+                    metadata, _ = read_frontmatter_and_body(filepath)
                 except Exception:
                     metadata = {}
 
@@ -250,7 +225,7 @@ def main():
 
             # Content-based classification (also used for title noise check)
             try:
-                metadata, body = parse_frontmatter_and_body(filepath)
+                metadata, body = read_frontmatter_and_body(filepath)
             except Exception as e:
                 logging.warning(f"Could not parse {filepath}: {e}")
                 continue
@@ -354,7 +329,7 @@ def main():
                     continue
                 filepath = os.path.join(root, filename)
                 try:
-                    metadata, body = parse_frontmatter_and_body(filepath)
+                    metadata, body = read_frontmatter_and_body(filepath)
                 except Exception:
                     continue
                 cleaned_body, removed = sanitize_content(body)
