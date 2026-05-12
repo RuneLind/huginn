@@ -4,7 +4,7 @@ import pytest
 
 from main.core.search_trace import SearchTrace, NullSearchTrace
 from main.graph.knowledge_graph import KnowledgeGraph
-from main.graph.graph_search_augmenter import GraphSearchAugmenter
+from main.graph.graph_search_augmenter import GraphSearchAugmenter, _broaden_query
 
 
 @pytest.fixture
@@ -170,3 +170,52 @@ class TestGraphContextKey:
         """Renaming GRAPH_CONTEXT_KEY's value would silently break external
         clients (Muninn, bots) that read the raw JSON response by key."""
         assert GraphSearchAugmenter.GRAPH_CONTEXT_KEY == "graph_context"
+
+
+class TestBroadenQuery:
+    def test_keeps_first_conjunct(self):
+        assert _broaden_query("lovvalg and utsending") == "lovvalg"
+        assert _broaden_query("trygd og pensjon her") == "trygd"
+        assert _broaden_query("FAISS versus BM25 tradeoffs") == "FAISS"
+
+    def test_strips_trailing_parenthetical(self):
+        assert _broaden_query("trygdeavgift beregning (for selvstendig)") == "trygdeavgift beregning"
+
+    def test_unquotes(self):
+        assert _broaden_query('"exact phrase here"') == "exact phrase here"
+
+    def test_drops_last_word_when_query_long_enough(self):
+        assert _broaden_query("alpha beta gamma delta epsilon") == "alpha beta gamma delta"
+
+    def test_returns_none_for_short_query(self):
+        assert _broaden_query("two words") is None
+        assert _broaden_query("one") is None
+        assert _broaden_query("") is None
+
+
+class TestGetRetryHints:
+    def test_no_graph_offers_broader_heuristic_only(self):
+        aug = GraphSearchAugmenter(None)
+        assert aug.get_retry_hints("alpha beta gamma delta", []) == {"broaderQuery": "alpha beta gamma"}
+
+    def test_no_graph_short_query_returns_none(self):
+        aug = GraphSearchAugmenter(None)
+        assert aug.get_retry_hints("short query", []) is None
+
+    def test_with_graph_offers_entities_related_terms_and_narrower(self, graph):
+        aug = GraphSearchAugmenter(graph)
+        detected = graph.detect_entities("LA_BUC_02 details")
+        hints = aug.get_retry_hints("LA_BUC_02 details", detected)
+        assert "LA_BUC_02" in hints["detectedEntities"][0]
+        assert any("A003" in t for t in hints["relatedTerms"])
+        assert hints["narrowerQuery"].startswith("LA_BUC_02 details ")
+
+    def test_excludes_terms_already_present_in_query(self, graph):
+        aug = GraphSearchAugmenter(graph)
+        detected = graph.detect_entities("artikkel 13")
+        hints = aug.get_retry_hints("artikkel 13", detected) or {}
+        assert all(t.lower() != "artikkel 13" for t in hints.get("relatedTerms", []))
+
+    def test_returns_none_when_nothing_useful(self):
+        aug = GraphSearchAugmenter(None)
+        assert aug.get_retry_hints("ab cd", []) is None

@@ -12,7 +12,7 @@ import json
 import logging
 from typing import Callable
 
-from main.core.search_response_formatter import shape_search_results
+from main.core.search_response_formatter import WEAK_RESULT_RELEVANCE, shape_search_results
 from main.core.search_trace import create_trace
 from main.graph.graph_search_augmenter import GraphSearchAugmenter
 
@@ -26,12 +26,15 @@ def build_search_tool_fn(
     max_number_of_documents: int,
     include_full_text: bool,
     trace_default: bool = False,
+    min_relevance: float | None = None,
 ) -> Callable[[str], str]:
     """Return the ``(query: str) -> str`` callable an MCP tool handler invokes.
 
     Pass ``GraphSearchAugmenter(None)`` when the runtime has no knowledge
     graph configured — augmentation and enrichment then become no-ops while
-    the rest of the pipeline still runs.
+    the rest of the pipeline still runs. ``min_relevance`` drops weak results
+    (and triggers ``noConfidentResults`` + ``retryHints`` when it empties the
+    set), mirroring the ``/api/search`` query param.
     """
     def search_fn(query: str) -> str:
         logging.info(f"Searching in {collection_name}: {query}")
@@ -55,11 +58,32 @@ def build_search_tool_fn(
         )
         augmenter.enrich_results(results, detected_entities)
 
-        response = {"results": results}
+        best_score = results[0]["relevance"] if results else 0.0
+        dropped_by_min_relevance = 0
+        if min_relevance is not None:
+            kept = [r for r in results if r["relevance"] >= min_relevance]
+            dropped_by_min_relevance = len(results) - len(kept)
+            results = kept
+
+        no_confident_results = not results
+        weak = no_confident_results or best_score < WEAK_RESULT_RELEVANCE
+        retry_hints = augmenter.get_retry_hints(query, detected_entities) if weak else None
+
+        response = {"results": results, "bestScore": round(best_score, 3)}
+        if no_confident_results:
+            response["noConfidentResults"] = True
+        if retry_hints:
+            response["retryHints"] = retry_hints
         if graph_answer:
             response["graph_answer"] = graph_answer
         if any_low_confidence:
             response["lowConfidence"] = True
+        trace.set_response_meta(
+            best_score=round(best_score, 3),
+            no_confident_results=no_confident_results,
+            retry_hints=retry_hints,
+            dropped_by_min_relevance=dropped_by_min_relevance,
+        )
         if trace_default:
             response["trace"] = trace.to_dict()
         return json.dumps(response, indent=2, ensure_ascii=False)

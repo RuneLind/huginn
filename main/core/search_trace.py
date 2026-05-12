@@ -43,6 +43,7 @@ class SearchTrace:
             "rerankerSkipReason": None,
         }
         self._collections = []
+        self._response = None
 
     def set_query_raw(self, text):
         self._query["raw"] = text
@@ -72,13 +73,28 @@ class SearchTrace:
         self._collections.append(coll)
         return coll
 
+    def set_response_meta(self, *, best_score=None, no_confident_results=False,
+                          retry_hints=None, dropped_by_min_relevance=0):
+        """Record response-level signal: best relevance, whether the response was
+        empty/below the requested floor, the retry hints emitted, and how many
+        results ``min_relevance`` dropped. Additive — consumers ignore unknown keys."""
+        self._response = {
+            "bestScore": best_score,
+            "noConfidentResults": bool(no_confident_results),
+            "retryHints": retry_hints,
+            "droppedByMinRelevance": int(dropped_by_min_relevance),
+        }
+
     def to_dict(self):
-        return {
+        out = {
             "query": dict(self._query),
             "collections": [c.to_dict() for c in self._collections],
             "totalMs": delta_ms(self._t_start, time.monotonic()),
             "schemaVersion": SCHEMA_VERSION,
         }
+        if self._response is not None:
+            out["response"] = dict(self._response)
+        return out
 
 
 class CollectionTrace:
@@ -188,6 +204,8 @@ class NullSearchTrace:
     def add_detected_entity(self, entity_id, entity_type, label, matched_span): pass
     def set_graph_answered(self, answered): pass
     def set_reranker_skipped(self, skipped, reason=None): pass
+    def set_response_meta(self, *, best_score=None, no_confident_results=False,
+                          retry_hints=None, dropped_by_min_relevance=0): pass
 
     def start_collection(self, name, indexer, fetch_k):
         return NULL_COLLECTION_TRACE

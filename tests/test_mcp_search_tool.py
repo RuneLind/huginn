@@ -236,3 +236,73 @@ class TestSearchArgs:
         call = searcher.calls[0]
         assert call["max_number_of_chunks"] == 42
         assert call["max_number_of_documents"] == 7
+
+
+def _weak_raw_response():
+    """A response whose only hit reranks to a weak score (~0.26 relevance)."""
+    return {
+        "results": [
+            {
+                "id": "doc-weak",
+                "url": "https://example.com/weak",
+                "path": "wiki/Weakish-page.json",
+                "matchedChunks": [
+                    {"content": {"indexedData": "Tangentially related content.", "heading": None},
+                     "score": -0.02},
+                ],
+            }
+        ],
+        "reranked": True,
+    }
+
+
+def _build_tool(searcher, augmenter, **kwargs):
+    return build_search_tool_fn(
+        searcher, "wiki", augmenter,
+        max_number_of_chunks=20,
+        max_number_of_documents=10,
+        include_full_text=False,
+        **kwargs,
+    )
+
+
+class TestCorrectiveSignal:
+
+    def test_best_score_present_and_strong_match_emits_no_hints(self):
+        searcher = _FakeSearcher(_raw_response())  # chunks -0.45 / -0.30 → relevance ~0.92
+        result = json.loads(_build_tool(searcher, GraphSearchAugmenter(None))("anything"))
+        assert result["bestScore"] > 0.8
+        assert result["results"][0]["confidenceBand"] == "high"
+        assert "noConfidentResults" not in result
+        assert "retryHints" not in result
+
+    def test_min_relevance_keeps_strong_results(self):
+        searcher = _FakeSearcher(_raw_response())
+        result = json.loads(_build_tool(searcher, GraphSearchAugmenter(None), min_relevance=0.5)("anything"))
+        assert len(result["results"]) == 1
+
+    def test_min_relevance_empties_results_and_adds_signal(self, graph):
+        searcher = _FakeSearcher(_raw_response())
+        result = json.loads(_build_tool(searcher, GraphSearchAugmenter(graph), min_relevance=0.99)("hva er lovvalg"))
+        assert result["results"] == []
+        assert result["noConfidentResults"] is True
+        # We *did* find something — bestScore reflects the pre-filter top hit.
+        assert result["bestScore"] > 0.8
+        assert "lovvalg" in result["retryHints"]["detectedEntities"]
+
+    def test_weak_results_get_retry_hints(self, graph):
+        searcher = _FakeSearcher(_weak_raw_response())
+        result = json.loads(_build_tool(searcher, GraphSearchAugmenter(graph))("hva er lovvalg"))
+        assert result["results"]                       # not empty
+        assert result["bestScore"] < 0.45
+        assert "retryHints" in result
+        assert "noConfidentResults" not in result
+
+    def test_response_meta_recorded_in_trace(self, graph):
+        searcher = _FakeSearcher(_weak_raw_response())
+        result = json.loads(_build_tool(searcher, GraphSearchAugmenter(graph), trace_default=True)("hva er lovvalg"))
+        resp_meta = result["trace"]["response"]
+        assert resp_meta["bestScore"] < 0.45
+        assert resp_meta["noConfidentResults"] is False
+        assert resp_meta["retryHints"] is not None
+        assert resp_meta["droppedByMinRelevance"] == 0

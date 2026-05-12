@@ -13,7 +13,33 @@ from main.utils.filename import title_from_doc_path
 # claim high confidence, so rank-based relevance is bounded.
 NON_RERANKED_MAX_RELEVANCE = 0.75
 
+# Relevance-space confidence bands. 0.40 ≈ normalize_score(-0.10) — the
+# LOW_CONFIDENCE_THRESHOLD the searcher uses to flag weak responses, so a "low"
+# band is the reranker's own noise zone. 0.65 ≈ normalize_score(-0.23),
+# comfortably past that floor.
+HIGH_CONFIDENCE_RELEVANCE = 0.65
+MEDIUM_CONFIDENCE_RELEVANCE = 0.40
+
+# A response whose best result is below this is "weak": callers should treat it
+# as a corrective-retry signal even when some results came back.
+WEAK_RESULT_RELEVANCE = 0.45
+
 _METADATA_LINE_RE = re.compile(r'^\*\*([^*]+?):\*\*\s*(.+)$')
+
+
+def confidence_band(relevance, is_reranked=True):
+    """Bucket a 0.0–1.0 relevance into ``'high'`` | ``'medium'`` | ``'low'``.
+
+    Non-reranked results carry rank-based relevance — an ordering hint, not a
+    confidence estimate — so they never earn a ``'high'`` band.
+    """
+    if not is_reranked:
+        return "medium" if relevance >= 0.5 else "low"
+    if relevance >= HIGH_CONFIDENCE_RELEVANCE:
+        return "high"
+    if relevance >= MEDIUM_CONFIDENCE_RELEVANCE:
+        return "medium"
+    return "low"
 
 
 def extract_chunk_text(content):
@@ -240,8 +266,9 @@ def shape_search_results(
     """Shape (collection_name, search_result) pairs into the public API results list.
 
     Performs per-document chunk shaping, metadata filtering, score sorting,
-    rank-relevance override for non-reranked results, and internal-field
-    cleanup. Returns (results_capped_at_limit, any_low_confidence).
+    rank-relevance override for non-reranked results, ``confidenceBand``
+    tagging, and internal-field cleanup. Returns (results_capped_at_limit,
+    any_low_confidence).
 
     Graph augmentation (query expansion before, per-result context after) is
     the caller's concern — this function only shapes raw search output.
@@ -274,6 +301,7 @@ def shape_search_results(
 
     top = all_results[:limit]
     for r in top:
+        r["confidenceBand"] = confidence_band(r["relevance"], r.get("_reranked", True))
         r.pop("_score", None)
         r.pop("_reranked", None)
         for chunk in r.get("matchedChunks", []):

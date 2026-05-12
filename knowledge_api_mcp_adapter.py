@@ -203,6 +203,32 @@ def _api_get(path: str, params: dict | None = None, timeout: float = 30.0) -> ht
     return httpx.get(f"{API_URL}{path}", params=params, timeout=timeout)
 
 
+def _format_relevance_band(r: dict) -> str:
+    """Format a result's relevance + confidence band, e.g. ' (82.0% relevant · high)'."""
+    rel = r.get("relevance")
+    if rel is None:
+        return ""
+    band = r.get("confidenceBand")
+    return f" ({_format_relevance(rel)}{' · ' + band if band else ''})"
+
+
+def _format_retry_hints(data: dict) -> str:
+    """Render retryHints / noConfidentResults into a compact suggestion line, or ''."""
+    hints = data.get("retryHints") or {}
+    bits = []
+    related = hints.get("relatedTerms")
+    if related:
+        bits.append("related terms: " + ", ".join(related))
+    if hints.get("narrowerQuery"):
+        bits.append(f'narrower query: "{hints["narrowerQuery"]}"')
+    if hints.get("broaderQuery"):
+        bits.append(f'broader query: "{hints["broaderQuery"]}"')
+    if not bits and not data.get("noConfidentResults"):
+        return ""
+    prefix = "No confident match" if data.get("noConfidentResults") else "Weak match"
+    return f"\n\n*{prefix} — try: {' · '.join(bits)}*" if bits else f"\n\n*{prefix}.*"
+
+
 def _search_knowledge_impl(
     query: str,
     collection: str | None = None,
@@ -211,10 +237,13 @@ def _search_knowledge_impl(
     project: str | None = None,
     git_branch: str | None = None,
     tags: str | None = None,
+    min_relevance: float | None = None,
 ) -> str:
     """Search indexed document collections using vector search.
 
     This is the shared implementation called by all signature variants.
+    ``min_relevance`` (0.0-1.0) drops weak results; if everything is below it,
+    the response says so and offers retry hints instead of low-quality filler.
     """
     try:
         params = {"q": query, "limit": limit, "brief": brief, "max_chunks_per_doc": 2}
@@ -230,6 +259,8 @@ def _search_knowledge_impl(
             params["git_branch"] = git_branch
         if tags:
             params["tags"] = tags
+        if min_relevance is not None:
+            params["min_relevance"] = min_relevance
         if TRACE_DEFAULT:
             params["trace"] = "true"
         resp = _api_get("/api/search", params=params)
@@ -246,7 +277,7 @@ def _search_knowledge_impl(
     if not results and not data.get("graph_answer"):
         low = " (low confidence)" if data.get("lowConfidence") else ""
         logger.info(f"No-hit search '{query}'{low}")
-        text = f"No results found for '{query}'{low}."
+        text = f"No results found for '{query}'{low}." + _format_retry_hints(data)
         return _append_trace_marker(text, data)
 
     parts = []
@@ -258,7 +289,7 @@ def _search_knowledge_impl(
     if brief:
         for i, r in enumerate(results, 1):
             heading = f" > {r['heading']}" if r.get("heading") else ""
-            relevance = f" ({_format_relevance(r.get('relevance'))})" if r.get("relevance") is not None else ""
+            relevance = _format_relevance_band(r)
             date = f" | {_format_date(r['modifiedTime'])}" if r.get("modifiedTime") else ""
             breadcrumb = f"\n   {r['breadcrumb']}" if r.get("breadcrumb") else ""
             wip = " **[UNDER ARBEID]**" if _is_wip(r) else ""
@@ -274,7 +305,7 @@ def _search_knowledge_impl(
             )
     else:
         for r in results:
-            relevance = f" ({_format_relevance(r.get('relevance'))})" if r.get("relevance") is not None else ""
+            relevance = _format_relevance_band(r)
             date = f" | updated: {_format_date(r['modifiedTime'])}" if r.get("modifiedTime") else ""
             wip = " **[UNDER ARBEID]**" if _is_wip(r) else ""
             header = f"## {r['title']}{wip}{relevance}{date}"
@@ -298,7 +329,7 @@ def _search_knowledge_impl(
                         chunk_lines.append(f"*{meta_str}*")
             parts.append(header + "\n\n" + "\n\n".join(chunk_lines))
 
-    text = "\n\n".join(parts)
+    text = "\n\n".join(parts) + _format_retry_hints(data)
     return _append_trace_marker(text, data)
 
 
@@ -499,8 +530,9 @@ def _search_with_sessions_and_tags(
     project: str | None = None,
     git_branch: str | None = None,
     tags: str | None = None,
+    min_relevance: float | None = None,
 ) -> str:
-    return _search_knowledge_impl(query, collection, limit, brief, project, git_branch, tags)
+    return _search_knowledge_impl(query, collection, limit, brief, project, git_branch, tags, min_relevance)
 
 
 def _search_with_sessions(
@@ -510,8 +542,9 @@ def _search_with_sessions(
     brief: bool = False,
     project: str | None = None,
     git_branch: str | None = None,
+    min_relevance: float | None = None,
 ) -> str:
-    return _search_knowledge_impl(query, collection, limit, brief, project, git_branch)
+    return _search_knowledge_impl(query, collection, limit, brief, project, git_branch, min_relevance=min_relevance)
 
 
 def _search_with_tags(
@@ -520,8 +553,9 @@ def _search_with_tags(
     limit: int = 10,
     brief: bool = False,
     tags: str | None = None,
+    min_relevance: float | None = None,
 ) -> str:
-    return _search_knowledge_impl(query, collection, limit, brief, tags=tags)
+    return _search_knowledge_impl(query, collection, limit, brief, tags=tags, min_relevance=min_relevance)
 
 
 def _search_basic(
@@ -529,8 +563,9 @@ def _search_basic(
     collection: str | None = None,
     limit: int = 10,
     brief: bool = False,
+    min_relevance: float | None = None,
 ) -> str:
-    return _search_knowledge_impl(query, collection, limit, brief)
+    return _search_knowledge_impl(query, collection, limit, brief, min_relevance=min_relevance)
 
 
 def _pick_search_function():

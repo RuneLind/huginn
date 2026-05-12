@@ -3,12 +3,16 @@ from fastapi.testclient import TestClient
 
 from knowledge_api_server import app
 from main.core.search_response_formatter import (
+    HIGH_CONFIDENCE_RELEVANCE,
+    MEDIUM_CONFIDENCE_RELEVANCE,
     apply_metadata_filters,
+    confidence_band,
     extract_chunk_heading,
     extract_chunk_metadata,
     extract_chunk_text,
     normalize_score,
     separate_metadata,
+    shape_search_results,
     truncate_snippet,
 )
 from main.sources.notion.notion_document_reader import NotionDocumentReader
@@ -417,6 +421,57 @@ class TestTitleFromDocPath:
         """A filename like `my.json.notes.json` keeps the inner `.json`."""
         from main.utils.filename import title_from_doc_path
         assert title_from_doc_path("a/my.json.notes.json") == "my.json.notes"
+
+
+def _shape_doc_raw(doc_id, score, text="some indexed content for this doc"):
+    return {
+        "id": doc_id,
+        "url": f"https://example.com/{doc_id}",
+        "path": f"wiki/{doc_id}.json",
+        "matchedChunks": [{"content": {"indexedData": text, "heading": None}, "score": score}],
+    }
+
+
+class TestConfidenceBand:
+    def test_reranked_high(self):
+        assert confidence_band(HIGH_CONFIDENCE_RELEVANCE, is_reranked=True) == "high"
+        assert confidence_band(0.99, is_reranked=True) == "high"
+
+    def test_reranked_medium(self):
+        assert confidence_band(MEDIUM_CONFIDENCE_RELEVANCE, is_reranked=True) == "medium"
+        midpoint = (HIGH_CONFIDENCE_RELEVANCE + MEDIUM_CONFIDENCE_RELEVANCE) / 2
+        assert confidence_band(midpoint, is_reranked=True) == "medium"
+
+    def test_reranked_low(self):
+        assert confidence_band(MEDIUM_CONFIDENCE_RELEVANCE - 0.01, is_reranked=True) == "low"
+        assert confidence_band(0.0, is_reranked=True) == "low"
+
+    def test_non_reranked_never_high(self):
+        # Rank-based relevance is an ordering hint, not a confidence estimate.
+        assert confidence_band(0.75, is_reranked=False) == "medium"
+        assert confidence_band(0.99, is_reranked=False) == "medium"
+
+    def test_non_reranked_low_for_tail_ranks(self):
+        assert confidence_band(0.45, is_reranked=False) == "low"
+
+
+class TestShapeSearchResultsConfidenceBand:
+    def test_reranked_results_get_band_by_relevance(self):
+        raw = {"results": [_shape_doc_raw("a", -1.0), _shape_doc_raw("b", -0.05)], "reranked": True}
+        results, _ = shape_search_results([("wiki", raw)], limit=10)
+        assert results[0]["id"] == "a"
+        assert results[0]["confidenceBand"] == "high"   # relevance ~0.999
+        assert results[1]["confidenceBand"] == "low"    # relevance ~0.25
+
+    def test_non_reranked_results_capped_at_medium_then_low(self):
+        raw = {
+            "results": [_shape_doc_raw(f"d{i}", 0.1 * (i + 1)) for i in range(6)],
+            "reranked": False,
+        }
+        results, _ = shape_search_results([("wiki", raw)], limit=10)
+        assert results[0]["confidenceBand"] == "medium"   # rank 0 → 0.75
+        assert results[-1]["confidenceBand"] == "low"     # rank 5 → ~0.47
+        assert all(r["confidenceBand"] in ("medium", "low") for r in results)
 
 
 class TestModelConfig:
