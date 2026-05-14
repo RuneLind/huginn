@@ -306,3 +306,16 @@ class TestCorrectiveSignal:
         assert resp_meta["noConfidentResults"] is False
         assert resp_meta["retryHints"] is not None
         assert resp_meta["droppedByMinRelevance"] == 0
+        assert resp_meta["reranked"] is True  # _weak_raw_response sets reranked: True
+
+    def test_reranked_flag_is_true_when_searcher_reranked(self):
+        searcher = _FakeSearcher(_raw_response())  # reranked=True by default
+        result = json.loads(_build_tool(searcher, GraphSearchAugmenter(None))("anything"))
+        assert result["reranked"] is True
+
+    def test_reranked_flag_is_false_when_searcher_skipped_reranking(self):
+        searcher = _FakeSearcher(_raw_response(reranked=False))
+        result = json.loads(_build_tool(searcher, GraphSearchAugmenter(None))("anything"))
+        assert result["reranked"] is False
+        # Top result's confidenceBand also reflects this — capped at medium.
+        assert result["results"][0]["confidenceBand"] in ("medium", "low")

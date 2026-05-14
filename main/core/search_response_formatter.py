@@ -317,6 +317,7 @@ def apply_corrective_signal(
     detected_entities,
     min_relevance,
     trace,
+    reranked=True,
 ):
     """Filter by ``min_relevance``, compute the corrective-signal fields, record on the trace.
 
@@ -326,6 +327,10 @@ def apply_corrective_signal(
     ``trace`` to anything exposing ``set_response_meta`` (the null trace is
     fine). ``bestScore`` is captured **before** the ``min_relevance`` filter so
     callers can tell "found something below your bar" from "found nothing".
+    ``reranked`` is the top-level honest signal for whether the reranker ran;
+    when False, ``bestScore`` is rank-based (top hit = 0.75) and not a real
+    confidence estimate — consumers should lean on ``noConfidentResults`` or
+    inspect snippets instead of gating on ``bestScore`` alone.
     """
     best_score = results[0]["relevance"] if results else 0.0
     dropped_by_min_relevance = 0
@@ -338,7 +343,11 @@ def apply_corrective_signal(
     weak = no_confident_results or best_score < WEAK_RESULT_RELEVANCE
     retry_hints = augmenter.get_retry_hints(query, detected_entities) if weak else None
 
-    response = {"results": results, "bestScore": round(best_score, 3)}
+    response = {
+        "results": results,
+        "bestScore": round(best_score, 3),
+        "reranked": bool(reranked),
+    }
     if no_confident_results:
         response["noConfidentResults"] = True
     if retry_hints:
@@ -349,5 +358,6 @@ def apply_corrective_signal(
         no_confident_results=no_confident_results,
         retry_hints=retry_hints,
         dropped_by_min_relevance=dropped_by_min_relevance,
+        reranked=bool(reranked),
     )
     return results, response

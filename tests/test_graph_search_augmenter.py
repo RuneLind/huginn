@@ -4,7 +4,11 @@ import pytest
 
 from main.core.search_trace import SearchTrace, NullSearchTrace
 from main.graph.knowledge_graph import KnowledgeGraph
-from main.graph.graph_search_augmenter import GraphSearchAugmenter, _broaden_query
+from main.graph.graph_search_augmenter import (
+    GraphSearchAugmenter,
+    _broaden_query,
+    _drop_last_content_word,
+)
 
 
 @pytest.fixture
@@ -219,3 +223,86 @@ class TestGetRetryHints:
     def test_returns_none_when_nothing_useful(self):
         aug = GraphSearchAugmenter(None)
         assert aug.get_retry_hints("ab cd", []) is None
+
+
+class TestDropLastContentWord:
+    def test_returns_none_for_short_query(self):
+        assert _drop_last_content_word("two words") is None
+        assert _drop_last_content_word("one") is None
+        assert _drop_last_content_word("") is None
+
+    def test_drops_last_content_word_at_three_tokens(self):
+        assert _drop_last_content_word("meningen med livet") == "meningen"
+
+    def test_skips_trailing_stopwords(self):
+        # "selvstendige" is content → drop; "for" left dangling at end → trim.
+        assert _drop_last_content_word("trygdeavgift beregning for selvstendige") == "trygdeavgift beregning"
+
+    def test_returns_none_when_only_content_word_drops_to_pure_stopwords(self):
+        # "hva er lovvalg": drop "lovvalg" (content) → ["hva", "er"] → both stopwords → trim
+        # to empty → return None (no usable query left).
+        assert _drop_last_content_word("hva er lovvalg") is None
+
+    def test_strips_trailing_punctuation_when_classifying_stopword(self):
+        # "for," is recognised as the stopword "for" despite the trailing comma → trim.
+        assert _drop_last_content_word("trygdeavgift beregning for, selvstendige") == "trygdeavgift beregning"
+
+    def test_all_stopword_query_drops_last_anyway(self):
+        # All-stopword fallback path: drop the trailing token rather than return None.
+        assert _drop_last_content_word("the and of") == "the and"
+
+
+class TestBroadenQueryStopwordAware:
+    def test_three_token_query_now_broadens(self):
+        # Previously returned None; new heuristic drops the last content word.
+        assert _broaden_query("meningen med livet") == "meningen"
+
+    def test_four_token_with_trailing_stopword(self):
+        # The conjunction "and" splits → "alpha beta", BEFORE the fallback runs.
+        # So this test proves conjunction takes precedence over the fallback.
+        assert _broaden_query("alpha and beta gamma") == "alpha"
+
+    def test_pure_fallback_when_no_structure(self):
+        # No conjunctions / parens / quotes — drop last content word.
+        assert _broaden_query("blockchain quantum computing AI") == "blockchain quantum computing"
+
+
+class TestFallbackNarrowerSeed:
+    def test_returns_none_without_graph(self):
+        aug = GraphSearchAugmenter(None)
+        assert aug._fallback_narrower_seed("anything") is None
+
+    def test_returns_none_when_no_token_overlap(self, graph):
+        aug = GraphSearchAugmenter(graph)
+        # "elephant" / "submarine" / "quartz" share no token with any graph label.
+        assert aug._fallback_narrower_seed("elephant submarine quartz") is None
+
+    def test_returns_neighbour_label_on_token_overlap(self, graph):
+        # Query shares "lovvalg" with the BUC label "LA_BUC_02 Beslutning om lovvalg".
+        # That BUC has a neighbour SED A003 via inneholder_sed → expect A003's label.
+        aug = GraphSearchAugmenter(graph)
+        seed = aug._fallback_narrower_seed("noe om lovvalg")
+        assert seed is not None
+        # Should be a real graph label (A003 is the top neighbour of LA_BUC_02).
+        assert seed in {"A003", "Artikkel 13"} or "LA_BUC_02" in seed
+
+    def test_ignores_short_tokens_and_stopwords(self, graph):
+        aug = GraphSearchAugmenter(graph)
+        # "og" / "om" / "et" are stopwords; "13" is short (< 3 chars).
+        assert aug._fallback_narrower_seed("og om et 13") is None
+
+
+class TestGetRetryHintsFallback:
+    def test_no_entity_but_token_overlap_seeds_narrower(self, graph):
+        aug = GraphSearchAugmenter(graph)
+        # No detection of "lovvalg" as an entity in the fixture graph (it's only
+        # part of a BUC label), but token overlap should still produce a narrower.
+        hints = aug.get_retry_hints("noe om lovvalg", [])
+        assert hints is not None
+        assert "narrowerQuery" in hints
+        assert hints["narrowerQuery"].startswith("noe om lovvalg ")
+
+    def test_no_entity_no_overlap_no_narrower(self, graph):
+        aug = GraphSearchAugmenter(graph)
+        hints = aug.get_retry_hints("elephant submarine quartz", []) or {}
+        assert "narrowerQuery" not in hints

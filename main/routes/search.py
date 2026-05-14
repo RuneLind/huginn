@@ -76,6 +76,7 @@ def search(
 
     augmenter.enrich_results(results, detected_entities)
 
+    reranked = all(sr.get("reranked", True) for _, sr in per_collection) if per_collection else True
     results, response = apply_corrective_signal(
         results,
         query=q,
@@ -83,6 +84,7 @@ def search(
         detected_entities=detected_entities,
         min_relevance=min_relevance,
         trace=trace_obj,
+        reranked=reranked,
     )
     if graph_answer:
         response["graph_answer"] = graph_answer
