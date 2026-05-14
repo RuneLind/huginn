@@ -10,11 +10,14 @@ same response shape.
 """
 import json
 import logging
-from typing import Callable
+from typing import Callable, Literal
 
 from main.core.search_response_formatter import run_corrective_search, shape_search_results
 from main.core.search_trace import create_trace
 from main.graph.graph_search_augmenter import GraphSearchAugmenter
+
+
+CorrectiveMode = Literal["auto", "off", "force"]
 
 
 def build_search_tool_fn(
@@ -27,7 +30,7 @@ def build_search_tool_fn(
     include_full_text: bool,
     trace_default: bool = False,
     min_relevance: float | None = None,
-    corrective_default: str = "auto",
+    corrective_default: CorrectiveMode = "auto",
 ) -> Callable[..., str]:
     """Return the ``(query, corrective="auto") -> str`` callable an MCP tool
     handler invokes.
@@ -43,7 +46,7 @@ def build_search_tool_fn(
     leave the per-call value as ``"auto"``; set to ``"off"`` only to reproduce
     pre-corrective behaviour for testing. ``"force"`` is a debug knob.
     """
-    def search_fn(query: str, corrective: str = corrective_default) -> str:
+    def search_fn(query: str, corrective: CorrectiveMode = corrective_default) -> str:
         logging.info(f"Searching in {collection_name}: {query}")
         trace = create_trace(trace_default)
         trace.set_query_raw(query)

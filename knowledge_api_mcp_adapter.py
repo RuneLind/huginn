@@ -28,6 +28,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import Literal
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -247,7 +248,7 @@ def _search_knowledge_impl(
     tags: str | None = None,
     min_relevance: float | None = None,
     rerank: bool | None = None,
-    corrective: str | None = None,
+    corrective: Literal["auto", "off", "force"] | None = None,
 ) -> str:
     """Search indexed document collections using vector search.
 
@@ -553,7 +554,7 @@ def _search_with_sessions_and_tags(
     tags: str | None = None,
     min_relevance: float | None = None,
     rerank: bool | None = None,
-    corrective: str | None = None,
+    corrective: Literal["auto", "off", "force"] | None = None,
 ) -> str:
     return _search_knowledge_impl(query, collection, limit, brief, project, git_branch, tags, min_relevance, rerank, corrective)
 
@@ -567,7 +568,7 @@ def _search_with_sessions(
     git_branch: str | None = None,
     min_relevance: float | None = None,
     rerank: bool | None = None,
-    corrective: str | None = None,
+    corrective: Literal["auto", "off", "force"] | None = None,
 ) -> str:
     return _search_knowledge_impl(query, collection, limit, brief, project, git_branch, min_relevance=min_relevance, rerank=rerank, corrective=corrective)
 
@@ -580,7 +581,7 @@ def _search_with_tags(
     tags: str | None = None,
     min_relevance: float | None = None,
     rerank: bool | None = None,
-    corrective: str | None = None,
+    corrective: Literal["auto", "off", "force"] | None = None,
 ) -> str:
     return _search_knowledge_impl(query, collection, limit, brief, tags=tags, min_relevance=min_relevance, rerank=rerank, corrective=corrective)
 
@@ -592,7 +593,7 @@ def _search_basic(
     brief: bool = False,
     min_relevance: float | None = None,
     rerank: bool | None = None,
-    corrective: str | None = None,
+    corrective: Literal["auto", "off", "force"] | None = None,
 ) -> str:
     return _search_knowledge_impl(query, collection, limit, brief, min_relevance=min_relevance, rerank=rerank, corrective=corrective)
 

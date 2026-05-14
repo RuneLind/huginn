@@ -1,5 +1,6 @@
 """Search and trace routes."""
 import logging
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -27,12 +28,10 @@ def search(
     git_branch: str = Query(None, description="Filter by gitBranch metadata"),
     tags: str = Query(None, description="Filter by tags (comma-separated, matches any)"),
     min_relevance: float = Query(None, ge=0.0, le=1.0, description="Drop results below this relevance (0.0-1.0). If all are below, returns empty results plus retryHints and noConfidentResults=true."),
-    corrective: str = Query("auto", description="Corrective-rescue mode: 'auto' (default; rescue when first search is weak and a usable hint exists), 'off' (today's behaviour, no rescue), 'force' (rescue whenever a hint exists — test knob)."),
+    corrective: Literal["auto", "off", "force"] = Query("auto", description="Corrective-rescue mode: 'auto' (default; rescue when first search is weak and a usable hint exists), 'off' (today's behaviour, no rescue), 'force' (rescue whenever a hint exists — test knob)."),
     trace: bool = Query(False, description="Return per-stage search trace (entities, scores, timings) for debugging"),
     store: KnowledgeStore = Depends(get_store),
 ):
-    if corrective not in ("auto", "off", "force"):
-        raise HTTPException(status_code=400, detail=f"corrective must be one of 'auto', 'off', 'force' (got {corrective!r})")
     if collection:
         for c in collection:
             if not store.has_collection(c):

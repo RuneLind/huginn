@@ -345,6 +345,30 @@ def _compute_corrective_signal(
     }
 
 
+def _finalize_signal(sig, *, trace, reranked):
+    """Build the response dict + write the trace from an already-computed
+    ``_compute_corrective_signal`` result. ``run_corrective_search`` calls this
+    directly to avoid recomputing the signal it already has."""
+    response = {
+        "results": sig["results"],
+        "bestScore": round(sig["best_score"], 3),
+        "reranked": bool(reranked),
+    }
+    if sig["no_confident_results"]:
+        response["noConfidentResults"] = True
+    if sig["retry_hints"]:
+        response["retryHints"] = sig["retry_hints"]
+
+    trace.set_response_meta(
+        best_score=round(sig["best_score"], 3),
+        no_confident_results=sig["no_confident_results"],
+        retry_hints=sig["retry_hints"],
+        dropped_by_min_relevance=sig["dropped_by_min_relevance"],
+        reranked=bool(reranked),
+    )
+    return sig["results"], response
+
+
 def apply_corrective_signal(
     results,
     *,
@@ -373,25 +397,7 @@ def apply_corrective_signal(
         detected_entities=detected_entities,
         min_relevance=min_relevance,
     )
-
-    response = {
-        "results": sig["results"],
-        "bestScore": round(sig["best_score"], 3),
-        "reranked": bool(reranked),
-    }
-    if sig["no_confident_results"]:
-        response["noConfidentResults"] = True
-    if sig["retry_hints"]:
-        response["retryHints"] = sig["retry_hints"]
-
-    trace.set_response_meta(
-        best_score=round(sig["best_score"], 3),
-        no_confident_results=sig["no_confident_results"],
-        retry_hints=sig["retry_hints"],
-        dropped_by_min_relevance=sig["dropped_by_min_relevance"],
-        reranked=bool(reranked),
-    )
-    return sig["results"], response
+    return _finalize_signal(sig, trace=trace, reranked=reranked)
 
 
 def merge_search_results(originals, rescue, *, limit=None):
@@ -475,10 +481,8 @@ def run_corrective_search(
     )
     hints = sig["retry_hints"] or {}
     weak = sig["weak"]
-    # Force mode rescues even on confident results, so it needs hints regardless
-    # of weakness. ``_compute_corrective_signal`` only fetches hints on weak
-    # signals (to avoid attaching ``retryHints`` to confident responses), so
-    # force mode fetches them itself when missing.
+    # Force mode rescues even on confident results, so ``_compute_corrective_signal``'s
+    # weak-only hint shortcut won't have populated them — fetch directly.
     if mode == "force" and not hints:
         hints = augmenter.get_retry_hints(query, detected_entities) or {}
     rescue_query = hints.get("broaderQuery") or hints.get("narrowerQuery")
@@ -505,15 +509,7 @@ def run_corrective_search(
             "verdict": verdict,
             "queriesTried": queries_tried,
         }
-        results, response = apply_corrective_signal(
-            initial_results,
-            query=query,
-            augmenter=augmenter,
-            detected_entities=detected_entities,
-            min_relevance=min_relevance,
-            trace=trace,
-            reranked=reranked,
-        )
+        results, response = _finalize_signal(sig, trace=trace, reranked=reranked)
         trace.set_corrective(corrective_meta)
         return results, response
 
@@ -537,15 +533,7 @@ def run_corrective_search(
         "verdict": verdict,
         "queriesTried": queries_tried,
     }
-    results, response = apply_corrective_signal(
-        merged,
-        query=query,
-        augmenter=augmenter,
-        detected_entities=detected_entities,
-        min_relevance=min_relevance,
-        trace=trace,
-        reranked=reranked,
-    )
+    results, response = _finalize_signal(sig2, trace=trace, reranked=reranked)
     trace.set_corrective(corrective_meta)
     response["corrective"] = corrective_meta
     return results, response
