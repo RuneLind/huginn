@@ -65,6 +65,7 @@ def build_search_tool_fn(
             detected_entities=detected_entities,
             min_relevance=min_relevance,
             trace=trace,
+            reranked=bool(raw.get("reranked", True)),
         )
         if graph_answer:
             response["graph_answer"] = graph_answer

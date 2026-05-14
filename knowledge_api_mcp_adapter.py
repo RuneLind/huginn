@@ -238,12 +238,17 @@ def _search_knowledge_impl(
     git_branch: str | None = None,
     tags: str | None = None,
     min_relevance: float | None = None,
+    rerank: bool | None = None,
 ) -> str:
     """Search indexed document collections using vector search.
 
     This is the shared implementation called by all signature variants.
     ``min_relevance`` (0.0-1.0) drops weak results; if everything is below it,
     the response says so and offers retry hints instead of low-quality filler.
+    ``rerank`` forces cross-encoder reranking on (or off); ``None`` leaves the
+    server-side default in place (which keys off ``brief``). Forcing
+    ``rerank=True`` from a corrective-retrieval client makes ``bestScore`` a
+    real confidence estimate even when ``brief=True``.
     """
     try:
         params = {"q": query, "limit": limit, "brief": brief, "max_chunks_per_doc": 2}
@@ -261,6 +266,8 @@ def _search_knowledge_impl(
             params["tags"] = tags
         if min_relevance is not None:
             params["min_relevance"] = min_relevance
+        if rerank is not None:
+            params["rerank"] = "true" if rerank else "false"
         if TRACE_DEFAULT:
             params["trace"] = "true"
         resp = _api_get("/api/search", params=params)
@@ -531,8 +538,9 @@ def _search_with_sessions_and_tags(
     git_branch: str | None = None,
     tags: str | None = None,
     min_relevance: float | None = None,
+    rerank: bool | None = None,
 ) -> str:
-    return _search_knowledge_impl(query, collection, limit, brief, project, git_branch, tags, min_relevance)
+    return _search_knowledge_impl(query, collection, limit, brief, project, git_branch, tags, min_relevance, rerank)
 
 
 def _search_with_sessions(
@@ -543,8 +551,9 @@ def _search_with_sessions(
     project: str | None = None,
     git_branch: str | None = None,
     min_relevance: float | None = None,
+    rerank: bool | None = None,
 ) -> str:
-    return _search_knowledge_impl(query, collection, limit, brief, project, git_branch, min_relevance=min_relevance)
+    return _search_knowledge_impl(query, collection, limit, brief, project, git_branch, min_relevance=min_relevance, rerank=rerank)
 
 
 def _search_with_tags(
@@ -554,8 +563,9 @@ def _search_with_tags(
     brief: bool = False,
     tags: str | None = None,
     min_relevance: float | None = None,
+    rerank: bool | None = None,
 ) -> str:
-    return _search_knowledge_impl(query, collection, limit, brief, tags=tags, min_relevance=min_relevance)
+    return _search_knowledge_impl(query, collection, limit, brief, tags=tags, min_relevance=min_relevance, rerank=rerank)
 
 
 def _search_basic(
@@ -564,8 +574,9 @@ def _search_basic(
     limit: int = 10,
     brief: bool = False,
     min_relevance: float | None = None,
+    rerank: bool | None = None,
 ) -> str:
-    return _search_knowledge_impl(query, collection, limit, brief, min_relevance=min_relevance)
+    return _search_knowledge_impl(query, collection, limit, brief, min_relevance=min_relevance, rerank=rerank)
 
 
 def _pick_search_function():

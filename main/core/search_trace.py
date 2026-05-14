@@ -74,15 +74,17 @@ class SearchTrace:
         return coll
 
     def set_response_meta(self, *, best_score=None, no_confident_results=False,
-                          retry_hints=None, dropped_by_min_relevance=0):
+                          retry_hints=None, dropped_by_min_relevance=0, reranked=True):
         """Record response-level signal: best relevance, whether the response was
-        empty/below the requested floor, the retry hints emitted, and how many
-        results ``min_relevance`` dropped. Additive — consumers ignore unknown keys."""
+        empty/below the requested floor, the retry hints emitted, how many
+        results ``min_relevance`` dropped, and whether the reranker ran (when
+        False, ``bestScore`` is rank-based). Additive — consumers ignore unknown keys."""
         self._response = {
             "bestScore": best_score,
             "noConfidentResults": bool(no_confident_results),
             "retryHints": retry_hints,
             "droppedByMinRelevance": int(dropped_by_min_relevance),
+            "reranked": bool(reranked),
         }
 
     def to_dict(self):
@@ -205,7 +207,7 @@ class NullSearchTrace:
     def set_graph_answered(self, answered): pass
     def set_reranker_skipped(self, skipped, reason=None): pass
     def set_response_meta(self, *, best_score=None, no_confident_results=False,
-                          retry_hints=None, dropped_by_min_relevance=0): pass
+                          retry_hints=None, dropped_by_min_relevance=0, reranked=True): pass
 
     def start_collection(self, name, indexer, fetch_k):
         return NULL_COLLECTION_TRACE
