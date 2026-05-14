@@ -3,7 +3,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from main.core.search_response_formatter import shape_search_results
+from main.core.search_response_formatter import apply_corrective_signal, shape_search_results
 from main.core.search_trace import create_trace
 from main.core.trace_store import any_trace_enabled, default_trace_store, pointer_mode_enabled
 from main.graph.graph_search_augmenter import GraphSearchAugmenter
@@ -26,6 +26,7 @@ def search(
     project: str = Query(None, description="Filter by project metadata"),
     git_branch: str = Query(None, description="Filter by gitBranch metadata"),
     tags: str = Query(None, description="Filter by tags (comma-separated, matches any)"),
+    min_relevance: float = Query(None, ge=0.0, le=1.0, description="Drop results below this relevance (0.0-1.0). If all are below, returns empty results plus retryHints and noConfidentResults=true."),
     trace: bool = Query(False, description="Return per-stage search trace (entities, scores, timings) for debugging"),
     store: KnowledgeStore = Depends(get_store),
 ):
@@ -75,7 +76,14 @@ def search(
 
     augmenter.enrich_results(results, detected_entities)
 
-    response = {"results": results}
+    results, response = apply_corrective_signal(
+        results,
+        query=q,
+        augmenter=augmenter,
+        detected_entities=detected_entities,
+        min_relevance=min_relevance,
+        trace=trace_obj,
+    )
     if graph_answer:
         response["graph_answer"] = graph_answer
     if any_low_confidence:

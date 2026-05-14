@@ -13,7 +13,33 @@ from main.utils.filename import title_from_doc_path
 # claim high confidence, so rank-based relevance is bounded.
 NON_RERANKED_MAX_RELEVANCE = 0.75
 
+# Relevance-space confidence bands. 0.40 ≈ normalize_score(-0.10) — the
+# LOW_CONFIDENCE_THRESHOLD the searcher uses to flag weak responses, so a "low"
+# band is the reranker's own noise zone. 0.65 ≈ normalize_score(-0.23),
+# comfortably past that floor.
+HIGH_CONFIDENCE_RELEVANCE = 0.65
+MEDIUM_CONFIDENCE_RELEVANCE = 0.40
+
+# A response whose best result is below this is "weak": callers should treat it
+# as a corrective-retry signal even when some results came back.
+WEAK_RESULT_RELEVANCE = 0.45
+
 _METADATA_LINE_RE = re.compile(r'^\*\*([^*]+?):\*\*\s*(.+)$')
+
+
+def confidence_band(relevance, is_reranked=True):
+    """Bucket a 0.0–1.0 relevance into ``'high'`` | ``'medium'`` | ``'low'``.
+
+    Non-reranked results carry rank-based relevance — an ordering hint, not a
+    confidence estimate — so they never earn a ``'high'`` band.
+    """
+    if not is_reranked:
+        return "medium" if relevance >= 0.5 else "low"
+    if relevance >= HIGH_CONFIDENCE_RELEVANCE:
+        return "high"
+    if relevance >= MEDIUM_CONFIDENCE_RELEVANCE:
+        return "medium"
+    return "low"
 
 
 def extract_chunk_text(content):
@@ -240,8 +266,9 @@ def shape_search_results(
     """Shape (collection_name, search_result) pairs into the public API results list.
 
     Performs per-document chunk shaping, metadata filtering, score sorting,
-    rank-relevance override for non-reranked results, and internal-field
-    cleanup. Returns (results_capped_at_limit, any_low_confidence).
+    rank-relevance override for non-reranked results, ``confidenceBand``
+    tagging, and internal-field cleanup. Returns (results_capped_at_limit,
+    any_low_confidence).
 
     Graph augmentation (query expansion before, per-result context after) is
     the caller's concern — this function only shapes raw search output.
@@ -274,8 +301,53 @@ def shape_search_results(
 
     top = all_results[:limit]
     for r in top:
+        r["confidenceBand"] = confidence_band(r["relevance"], r.get("_reranked", True))
         r.pop("_score", None)
         r.pop("_reranked", None)
         for chunk in r.get("matchedChunks", []):
             chunk.pop("score", None)
     return top, any_low_confidence
+
+
+def apply_corrective_signal(
+    results,
+    *,
+    query,
+    augmenter,
+    detected_entities,
+    min_relevance,
+    trace,
+):
+    """Filter by ``min_relevance``, compute the corrective-signal fields, record on the trace.
+
+    Returns ``(kept_results, response)`` — the caller merges any additional
+    response keys (``graph_answer``, ``lowConfidence``, trace) into the dict.
+    ``augmenter`` is duck-typed to anything exposing ``get_retry_hints``;
+    ``trace`` to anything exposing ``set_response_meta`` (the null trace is
+    fine). ``bestScore`` is captured **before** the ``min_relevance`` filter so
+    callers can tell "found something below your bar" from "found nothing".
+    """
+    best_score = results[0]["relevance"] if results else 0.0
+    dropped_by_min_relevance = 0
+    if min_relevance is not None:
+        kept = [r for r in results if r["relevance"] >= min_relevance]
+        dropped_by_min_relevance = len(results) - len(kept)
+        results = kept
+
+    no_confident_results = not results
+    weak = no_confident_results or best_score < WEAK_RESULT_RELEVANCE
+    retry_hints = augmenter.get_retry_hints(query, detected_entities) if weak else None
+
+    response = {"results": results, "bestScore": round(best_score, 3)}
+    if no_confident_results:
+        response["noConfidentResults"] = True
+    if retry_hints:
+        response["retryHints"] = retry_hints
+
+    trace.set_response_meta(
+        best_score=round(best_score, 3),
+        no_confident_results=no_confident_results,
+        retry_hints=retry_hints,
+        dropped_by_min_relevance=dropped_by_min_relevance,
+    )
+    return results, response

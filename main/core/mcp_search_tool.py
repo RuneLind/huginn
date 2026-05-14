@@ -12,7 +12,7 @@ import json
 import logging
 from typing import Callable
 
-from main.core.search_response_formatter import shape_search_results
+from main.core.search_response_formatter import apply_corrective_signal, shape_search_results
 from main.core.search_trace import create_trace
 from main.graph.graph_search_augmenter import GraphSearchAugmenter
 
@@ -26,12 +26,15 @@ def build_search_tool_fn(
     max_number_of_documents: int,
     include_full_text: bool,
     trace_default: bool = False,
+    min_relevance: float | None = None,
 ) -> Callable[[str], str]:
     """Return the ``(query: str) -> str`` callable an MCP tool handler invokes.
 
     Pass ``GraphSearchAugmenter(None)`` when the runtime has no knowledge
     graph configured — augmentation and enrichment then become no-ops while
-    the rest of the pipeline still runs.
+    the rest of the pipeline still runs. ``min_relevance`` drops weak results
+    (and triggers ``noConfidentResults`` + ``retryHints`` when it empties the
+    set), mirroring the ``/api/search`` query param.
     """
     def search_fn(query: str) -> str:
         logging.info(f"Searching in {collection_name}: {query}")
@@ -55,7 +58,14 @@ def build_search_tool_fn(
         )
         augmenter.enrich_results(results, detected_entities)
 
-        response = {"results": results}
+        results, response = apply_corrective_signal(
+            results,
+            query=query,
+            augmenter=augmenter,
+            detected_entities=detected_entities,
+            min_relevance=min_relevance,
+            trace=trace,
+        )
         if graph_answer:
             response["graph_answer"] = graph_answer
         if any_low_confidence:

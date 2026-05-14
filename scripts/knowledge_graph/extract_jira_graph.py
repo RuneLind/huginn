@@ -18,8 +18,12 @@ Output auto-routes to private sub-repos when no --output is given:
 import argparse
 import json
 import re
+import sys
 from collections import defaultdict
 from pathlib import Path
+
+# Allow running as a script (uv run scripts/...) by putting the repo root on sys.path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from main.utils.frontmatter import read_frontmatter_from_path, strip_frontmatter
 

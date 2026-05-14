@@ -1,23 +1,67 @@
 """Graph-aware query expansion and result enrichment.
 
-Wraps a ``KnowledgeGraph`` and exposes the two operations the search endpoint
+Wraps a ``KnowledgeGraph`` and exposes the operations the search endpoint
 needs:
 
 - ``augment_query`` — detect entities in the raw query, expand it with
   neighbor terms, and return any direct relational answer.
 - ``enrich_results`` — annotate result entries with human-readable graph
   context for entities found in the title.
+- ``get_retry_hints`` — when a search comes back weak, suggest concrete
+  follow-ups (related graph terms, a narrower/broader query) so the caller
+  can drive a corrective re-query.
 
-Both methods no-op cleanly when the wrapped graph is ``None``.
+All methods no-op (or fall back to graph-free heuristics) when the wrapped
+graph is ``None``.
 """
 
+import re
+
 from main.core.search_trace import SearchTrace
+
+
+_CONJUNCTION_SPLITS = (" versus ", " vs. ", " vs ", " and ", " og ", " & ")
+_TRAILING_PARENS_RE = re.compile(r'\s*\([^)]*\)\s*$')
+
+
+def _broaden_query(q: str) -> str | None:
+    """Heuristically widen a query: drop a trailing clause / parenthetical / quotes.
+
+    Returns the broadened query, or ``None`` if no safe broadening applies.
+    Purely lexical — no graph needed.
+    """
+    if not q:
+        return None
+    stripped = q.strip()
+    lower = stripped.lower()
+    # Conjunctions: keep the first conjunct ("X and Y" → "X").
+    for sep in _CONJUNCTION_SPLITS:
+        idx = lower.find(sep)
+        if idx > 0:
+            head = stripped[:idx].strip()
+            if head:
+                return head
+    # Trailing parenthetical.
+    m = _TRAILING_PARENS_RE.search(stripped)
+    if m and m.start() > 0:
+        return stripped[:m.start()].strip()
+    # Quoted phrase → unquote.
+    if '"' in stripped:
+        unquoted = stripped.replace('"', '').strip()
+        if unquoted and unquoted != stripped:
+            return unquoted
+    # Otherwise drop the last word, but only if there's still a real query left.
+    words = stripped.split()
+    if len(words) > 3:
+        return " ".join(words[:-1])
+    return None
 
 
 class GraphSearchAugmenter:
 
     EXPANSION_TERM_LIMIT = 5
     CONTEXT_PER_RESULT_LIMIT = 3
+    RETRY_TERM_LIMIT = 8
     GRAPH_CONTEXT_KEY = "graph_context"
 
     def __init__(self, graph):
@@ -76,3 +120,49 @@ class GraphSearchAugmenter:
                     contexts.append(ctx)
             if contexts:
                 r[self.GRAPH_CONTEXT_KEY] = contexts[: self.CONTEXT_PER_RESULT_LIMIT]
+
+    def get_retry_hints(self, q: str, detected_entities: list) -> dict | None:
+        """Suggest concrete follow-ups for a weak/empty search.
+
+        Returns a dict with any of: ``detectedEntities`` (entity labels found
+        in the query), ``relatedTerms`` (graph-neighbour terms not already in
+        the query), ``narrowerQuery`` (query + the top entity label),
+        ``broaderQuery`` (a lexical widening). Returns ``None`` when nothing
+        useful can be offered. Cheap — graph lookups only, no search.
+        """
+        hints: dict = {}
+        q_lower = (q or "").lower()
+
+        entity_labels: list[str] = []
+        if self.graph is not None:
+            for eid in detected_entities:
+                node = self.graph.nodes.get(eid)
+                label = node.get("label") if node else None
+                if label and label not in entity_labels:
+                    entity_labels.append(label)
+        if entity_labels:
+            hints["detectedEntities"] = entity_labels
+
+        if self.graph is not None and detected_entities:
+            related: list[str] = []
+            for term in self.graph.get_expansion_terms(detected_entities):
+                if not term:
+                    continue
+                if term.lower() in q_lower or term in related:
+                    continue
+                related.append(term)
+                if len(related) >= self.RETRY_TERM_LIMIT:
+                    break
+            if related:
+                hints["relatedTerms"] = related
+
+        if entity_labels:
+            top = entity_labels[0]
+            if top.lower() not in q_lower:
+                hints["narrowerQuery"] = f"{q} {top}".strip()
+
+        broader = _broaden_query(q)
+        if broader and broader.lower() != q_lower:
+            hints["broaderQuery"] = broader
+
+        return hints or None
