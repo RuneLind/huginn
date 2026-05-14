@@ -10,11 +10,14 @@ same response shape.
 """
 import json
 import logging
-from typing import Callable
+from typing import Callable, Literal
 
-from main.core.search_response_formatter import apply_corrective_signal, shape_search_results
+from main.core.search_response_formatter import run_corrective_search, shape_search_results
 from main.core.search_trace import create_trace
 from main.graph.graph_search_augmenter import GraphSearchAugmenter
+
+
+CorrectiveMode = Literal["auto", "off", "force"]
 
 
 def build_search_tool_fn(
@@ -27,16 +30,23 @@ def build_search_tool_fn(
     include_full_text: bool,
     trace_default: bool = False,
     min_relevance: float | None = None,
-) -> Callable[[str], str]:
-    """Return the ``(query: str) -> str`` callable an MCP tool handler invokes.
+    corrective_default: CorrectiveMode = "auto",
+) -> Callable[..., str]:
+    """Return the ``(query, corrective="auto") -> str`` callable an MCP tool
+    handler invokes.
 
     Pass ``GraphSearchAugmenter(None)`` when the runtime has no knowledge
     graph configured — augmentation and enrichment then become no-ops while
     the rest of the pipeline still runs. ``min_relevance`` drops weak results
     (and triggers ``noConfidentResults`` + ``retryHints`` when it empties the
     set), mirroring the ``/api/search`` query param.
+
+    ``corrective_default`` sets the runtime default for the returned callable's
+    ``corrective`` arg, which controls huginn-side rescue retrieval. Normally
+    leave the per-call value as ``"auto"``; set to ``"off"`` only to reproduce
+    pre-corrective behaviour for testing. ``"force"`` is a debug knob.
     """
-    def search_fn(query: str) -> str:
+    def search_fn(query: str, corrective: CorrectiveMode = corrective_default) -> str:
         logging.info(f"Searching in {collection_name}: {query}")
         trace = create_trace(trace_default)
         trace.set_query_raw(query)
@@ -58,14 +68,36 @@ def build_search_tool_fn(
         )
         augmenter.enrich_results(results, detected_entities)
 
-        results, response = apply_corrective_signal(
+        reranked = bool(raw.get("reranked", True))
+
+        def rerun_search_fn(rescue_query: str):
+            rescue_raw = searcher.search(
+                rescue_query,
+                max_number_of_chunks=max_number_of_chunks,
+                max_number_of_documents=max_number_of_documents,
+                include_text_content=include_full_text,
+                include_matched_chunks_content=not include_full_text,
+                trace=trace,
+                title_boost_query=rescue_query,
+            )
+            rescue_results, _ = shape_search_results(
+                [(collection_name, rescue_raw)],
+                limit=max_number_of_documents,
+            )
+            augmenter.enrich_results(rescue_results, detected_entities)
+            return rescue_results
+
+        results, response = run_corrective_search(
             results,
             query=query,
             augmenter=augmenter,
             detected_entities=detected_entities,
             min_relevance=min_relevance,
             trace=trace,
-            reranked=bool(raw.get("reranked", True)),
+            reranked=reranked,
+            mode=corrective,
+            rerun_search_fn=rerun_search_fn,
+            limit=max_number_of_documents,
         )
         if graph_answer:
             response["graph_answer"] = graph_answer
