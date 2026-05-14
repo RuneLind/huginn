@@ -63,9 +63,7 @@ def _drop_last_content_word(q: str) -> str | None:
                 remaining = remaining[:-1]
             result = " ".join(remaining).strip()
             return result or None
-    # All-stopword query — drop the last token regardless.
-    result = " ".join(tokens[:-1]).strip()
-    return result or None
+    return None
 
 
 def _broaden_query(q: str) -> str | None:
@@ -203,8 +201,6 @@ class GraphSearchAugmenter:
             if top.lower() not in q_lower:
                 hints["narrowerQuery"] = f"{q} {top}".strip()
         else:
-            # No entity matched the query — fall back to token-overlap against
-            # graph labels and seed a narrower with the top match's neighbour.
             seed = self._fallback_narrower_seed(q)
             if seed and seed.lower() not in q_lower:
                 hints["narrowerQuery"] = f"{q} {seed}".strip()
@@ -253,12 +249,10 @@ class GraphSearchAugmenter:
         if best_node_id is None:
             return None
 
-        # Walk one hop out — prefer outgoing, fall back to incoming.
         for edges_attr, side_key in (("outgoing", "target"), ("incoming", "source")):
             for edge in getattr(self.graph, edges_attr).get(best_node_id, []):
                 neighbour = self.graph.nodes.get(edge.get(side_key))
                 if neighbour and neighbour.get("label"):
                     return neighbour["label"]
-        # No neighbour — fall back to the matched node's own label.
         matched = self.graph.nodes.get(best_node_id)
         return matched.get("label") if matched else None

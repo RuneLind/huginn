@@ -247,9 +247,9 @@ class TestDropLastContentWord:
         # "for," is recognised as the stopword "for" despite the trailing comma → trim.
         assert _drop_last_content_word("trygdeavgift beregning for, selvstendige") == "trygdeavgift beregning"
 
-    def test_all_stopword_query_drops_last_anyway(self):
-        # All-stopword fallback path: drop the trailing token rather than return None.
-        assert _drop_last_content_word("the and of") == "the and"
+    def test_all_stopword_query_returns_none(self):
+        # No content word to drop → no usable broader query.
+        assert _drop_last_content_word("the and of") is None
 
 
 class TestBroadenQueryStopwordAware:
