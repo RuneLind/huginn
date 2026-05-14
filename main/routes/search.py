@@ -3,7 +3,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from main.core.search_response_formatter import WEAK_RESULT_RELEVANCE, shape_search_results
+from main.core.search_response_formatter import apply_corrective_signal, shape_search_results
 from main.core.search_trace import create_trace
 from main.core.trace_store import any_trace_enabled, default_trace_store, pointer_mode_enabled
 from main.graph.graph_search_augmenter import GraphSearchAugmenter
@@ -76,34 +76,18 @@ def search(
 
     augmenter.enrich_results(results, detected_entities)
 
-    # Best relevance is taken before any min_relevance filter, so the caller can
-    # see "we found something, just below your bar" vs "nothing at all".
-    best_score = results[0]["relevance"] if results else 0.0
-    dropped_by_min_relevance = 0
-    if min_relevance is not None:
-        kept = [r for r in results if r["relevance"] >= min_relevance]
-        dropped_by_min_relevance = len(results) - len(kept)
-        results = kept
-
-    no_confident_results = not results
-    weak = no_confident_results or best_score < WEAK_RESULT_RELEVANCE
-    retry_hints = augmenter.get_retry_hints(q, detected_entities) if weak else None
-
-    response = {"results": results, "bestScore": round(best_score, 3)}
-    if no_confident_results:
-        response["noConfidentResults"] = True
-    if retry_hints:
-        response["retryHints"] = retry_hints
+    results, response = apply_corrective_signal(
+        results,
+        query=q,
+        augmenter=augmenter,
+        detected_entities=detected_entities,
+        min_relevance=min_relevance,
+        trace=trace_obj,
+    )
     if graph_answer:
         response["graph_answer"] = graph_answer
     if any_low_confidence:
         response["lowConfidence"] = True
-    trace_obj.set_response_meta(
-        best_score=round(best_score, 3),
-        no_confident_results=no_confident_results,
-        retry_hints=retry_hints,
-        dropped_by_min_relevance=dropped_by_min_relevance,
-    )
     if trace_enabled:
         trace_dict = trace_obj.to_dict()
         if pointer_mode_enabled():

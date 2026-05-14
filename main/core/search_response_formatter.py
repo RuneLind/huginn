@@ -307,3 +307,47 @@ def shape_search_results(
         for chunk in r.get("matchedChunks", []):
             chunk.pop("score", None)
     return top, any_low_confidence
+
+
+def apply_corrective_signal(
+    results,
+    *,
+    query,
+    augmenter,
+    detected_entities,
+    min_relevance,
+    trace,
+):
+    """Filter by ``min_relevance``, compute the corrective-signal fields, record on the trace.
+
+    Returns ``(kept_results, response)`` — the caller merges any additional
+    response keys (``graph_answer``, ``lowConfidence``, trace) into the dict.
+    ``augmenter`` is duck-typed to anything exposing ``get_retry_hints``;
+    ``trace`` to anything exposing ``set_response_meta`` (the null trace is
+    fine). ``bestScore`` is captured **before** the ``min_relevance`` filter so
+    callers can tell "found something below your bar" from "found nothing".
+    """
+    best_score = results[0]["relevance"] if results else 0.0
+    dropped_by_min_relevance = 0
+    if min_relevance is not None:
+        kept = [r for r in results if r["relevance"] >= min_relevance]
+        dropped_by_min_relevance = len(results) - len(kept)
+        results = kept
+
+    no_confident_results = not results
+    weak = no_confident_results or best_score < WEAK_RESULT_RELEVANCE
+    retry_hints = augmenter.get_retry_hints(query, detected_entities) if weak else None
+
+    response = {"results": results, "bestScore": round(best_score, 3)}
+    if no_confident_results:
+        response["noConfidentResults"] = True
+    if retry_hints:
+        response["retryHints"] = retry_hints
+
+    trace.set_response_meta(
+        best_score=round(best_score, 3),
+        no_confident_results=no_confident_results,
+        retry_hints=retry_hints,
+        dropped_by_min_relevance=dropped_by_min_relevance,
+    )
+    return results, response
