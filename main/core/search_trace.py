@@ -79,6 +79,7 @@ class SearchTrace:
         empty/below the requested floor, the retry hints emitted, how many
         results ``min_relevance`` dropped, and whether the reranker ran (when
         False, ``bestScore`` is rank-based). Additive — consumers ignore unknown keys."""
+        corrective = self._response.get("corrective") if self._response else None
         self._response = {
             "bestScore": best_score,
             "noConfidentResults": bool(no_confident_results),
@@ -86,6 +87,22 @@ class SearchTrace:
             "droppedByMinRelevance": int(dropped_by_min_relevance),
             "reranked": bool(reranked),
         }
+        if corrective is not None:
+            self._response["corrective"] = corrective
+
+    def set_corrective(self, corrective):
+        """Attach corrective-rescue metadata to the response block.
+
+        Should be called after ``set_response_meta`` (otherwise the
+        ``corrective`` field is created on a bare response block — still
+        readable by dashboards, just missing the surrounding signal fields).
+        ``corrective`` is the ``{mode, retries, rescueFired, verdict,
+        queriesTried}`` dict ``run_corrective_search`` emits."""
+        if corrective is None:
+            return
+        if self._response is None:
+            self._response = {}
+        self._response["corrective"] = corrective
 
     def to_dict(self):
         out = {
@@ -208,6 +225,7 @@ class NullSearchTrace:
     def set_reranker_skipped(self, skipped, reason=None): pass
     def set_response_meta(self, *, best_score=None, no_confident_results=False,
                           retry_hints=None, dropped_by_min_relevance=0, reranked=True): pass
+    def set_corrective(self, corrective): pass
 
     def start_collection(self, name, indexer, fetch_k):
         return NULL_COLLECTION_TRACE

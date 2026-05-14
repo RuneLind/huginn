@@ -309,6 +309,42 @@ def shape_search_results(
     return top, any_low_confidence
 
 
+def _compute_corrective_signal(
+    results,
+    *,
+    query,
+    augmenter,
+    detected_entities,
+    min_relevance,
+):
+    """Pure signal computation — no trace writes. Returns the underlying state
+    both ``apply_corrective_signal`` (for response shaping + trace recording)
+    and ``run_corrective_search`` (for the rescue decision) work from.
+
+    ``bestScore`` is captured **before** the ``min_relevance`` filter so callers
+    can tell "found something below your bar" from "found nothing".
+    """
+    best_score = results[0]["relevance"] if results else 0.0
+    dropped_by_min_relevance = 0
+    if min_relevance is not None:
+        kept = [r for r in results if r["relevance"] >= min_relevance]
+        dropped_by_min_relevance = len(results) - len(kept)
+        results = kept
+
+    no_confident_results = not results
+    weak = no_confident_results or best_score < WEAK_RESULT_RELEVANCE
+    retry_hints = augmenter.get_retry_hints(query, detected_entities) if weak else None
+
+    return {
+        "results": results,
+        "best_score": best_score,
+        "weak": weak,
+        "no_confident_results": no_confident_results,
+        "retry_hints": retry_hints,
+        "dropped_by_min_relevance": dropped_by_min_relevance,
+    }
+
+
 def apply_corrective_signal(
     results,
     *,
@@ -325,39 +361,191 @@ def apply_corrective_signal(
     response keys (``graph_answer``, ``lowConfidence``, trace) into the dict.
     ``augmenter`` is duck-typed to anything exposing ``get_retry_hints``;
     ``trace`` to anything exposing ``set_response_meta`` (the null trace is
-    fine). ``bestScore`` is captured **before** the ``min_relevance`` filter so
-    callers can tell "found something below your bar" from "found nothing".
-    ``reranked`` is the top-level honest signal for whether the reranker ran;
-    when False, ``bestScore`` is rank-based (top hit = 0.75) and not a real
-    confidence estimate — consumers should lean on ``noConfidentResults`` or
-    inspect snippets instead of gating on ``bestScore`` alone.
+    fine). ``reranked`` is the top-level honest signal for whether the reranker
+    ran; when False, ``bestScore`` is rank-based (top hit = 0.75) and not a
+    real confidence estimate — consumers should lean on ``noConfidentResults``
+    or inspect snippets instead of gating on ``bestScore`` alone.
     """
-    best_score = results[0]["relevance"] if results else 0.0
-    dropped_by_min_relevance = 0
-    if min_relevance is not None:
-        kept = [r for r in results if r["relevance"] >= min_relevance]
-        dropped_by_min_relevance = len(results) - len(kept)
-        results = kept
-
-    no_confident_results = not results
-    weak = no_confident_results or best_score < WEAK_RESULT_RELEVANCE
-    retry_hints = augmenter.get_retry_hints(query, detected_entities) if weak else None
+    sig = _compute_corrective_signal(
+        results,
+        query=query,
+        augmenter=augmenter,
+        detected_entities=detected_entities,
+        min_relevance=min_relevance,
+    )
 
     response = {
-        "results": results,
-        "bestScore": round(best_score, 3),
+        "results": sig["results"],
+        "bestScore": round(sig["best_score"], 3),
         "reranked": bool(reranked),
     }
-    if no_confident_results:
+    if sig["no_confident_results"]:
         response["noConfidentResults"] = True
-    if retry_hints:
-        response["retryHints"] = retry_hints
+    if sig["retry_hints"]:
+        response["retryHints"] = sig["retry_hints"]
 
     trace.set_response_meta(
-        best_score=round(best_score, 3),
-        no_confident_results=no_confident_results,
-        retry_hints=retry_hints,
-        dropped_by_min_relevance=dropped_by_min_relevance,
+        best_score=round(sig["best_score"], 3),
+        no_confident_results=sig["no_confident_results"],
+        retry_hints=sig["retry_hints"],
+        dropped_by_min_relevance=sig["dropped_by_min_relevance"],
         reranked=bool(reranked),
     )
+    return sig["results"], response
+
+
+def merge_search_results(originals, rescue, *, limit=None):
+    """Merge two shaped-result lists. Dedupe by ``(collection, id)``;
+    rescue wins on the dedupe key (it's the "more confident" set by
+    construction). Re-sort by ``relevance`` descending — the relevance scale is
+    already calibrated and ``_score`` was stripped by ``shape_search_results``.
+    """
+    seen: set = set()
+    merged: list = []
+    for r in rescue:
+        key = (r.get("collection"), r.get("id"))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(r)
+    for r in originals:
+        key = (r.get("collection"), r.get("id"))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(r)
+    merged.sort(key=lambda r: r.get("relevance", 0.0), reverse=True)
+    if limit is not None:
+        merged = merged[:limit]
+    return merged
+
+
+def run_corrective_search(
+    initial_results,
+    *,
+    query,
+    augmenter,
+    detected_entities,
+    min_relevance,
+    trace,
+    reranked,
+    mode="auto",
+    rerun_search_fn=None,
+    limit=None,
+):
+    """Run the corrective signal; when weak, optionally re-search with a hint
+    query and merge results.
+
+    ``mode``:
+        - ``"off"`` — pure delegation to ``apply_corrective_signal``; response
+          shape and trace contents are byte-identical to the pre-Path-D world.
+        - ``"auto"`` — rescue iff the signal is weak *and* a usable hint exists.
+        - ``"force"`` — rescue iff a hint exists, regardless of weakness
+          (test/debug knob).
+
+    ``rerun_search_fn(rescue_query)`` returns a list of shaped + enriched
+    result dicts in the same shape ``shape_search_results`` produces. Required
+    when ``mode != "off"``; when omitted, ``run_corrective_search`` falls back
+    to no-rescue behaviour (verdict ``"weak_skipped"``).
+
+    On rescue, the response gains a ``corrective`` dict with
+    ``{mode, retries, rescueFired, verdict, queriesTried}``; the same dict is
+    recorded on the trace. No ``corrective`` field is added to the response in
+    the no-rescue case (keeps the response shape unchanged for confident
+    queries — backward-compatible), but the trace still records it for
+    dashboards.
+    """
+    if mode == "off":
+        return apply_corrective_signal(
+            initial_results,
+            query=query,
+            augmenter=augmenter,
+            detected_entities=detected_entities,
+            min_relevance=min_relevance,
+            trace=trace,
+            reranked=reranked,
+        )
+
+    sig = _compute_corrective_signal(
+        initial_results,
+        query=query,
+        augmenter=augmenter,
+        detected_entities=detected_entities,
+        min_relevance=min_relevance,
+    )
+    hints = sig["retry_hints"] or {}
+    weak = sig["weak"]
+    # Force mode rescues even on confident results, so it needs hints regardless
+    # of weakness. ``_compute_corrective_signal`` only fetches hints on weak
+    # signals (to avoid attaching ``retryHints`` to confident responses), so
+    # force mode fetches them itself when missing.
+    if mode == "force" and not hints:
+        hints = augmenter.get_retry_hints(query, detected_entities) or {}
+    rescue_query = hints.get("broaderQuery") or hints.get("narrowerQuery")
+
+    will_rescue = (
+        rerun_search_fn is not None
+        and bool(rescue_query)
+        and (mode == "force" or (mode == "auto" and weak))
+    )
+
+    queries_tried = [query]
+
+    if not will_rescue:
+        if weak and not rescue_query:
+            verdict = "weak_no_hint"
+        elif weak:
+            verdict = "weak_skipped"
+        else:
+            verdict = "confident"
+        corrective_meta = {
+            "mode": mode,
+            "retries": 0,
+            "rescueFired": False,
+            "verdict": verdict,
+            "queriesTried": queries_tried,
+        }
+        results, response = apply_corrective_signal(
+            initial_results,
+            query=query,
+            augmenter=augmenter,
+            detected_entities=detected_entities,
+            min_relevance=min_relevance,
+            trace=trace,
+            reranked=reranked,
+        )
+        trace.set_corrective(corrective_meta)
+        return results, response
+
+    queries_tried.append(rescue_query)
+    rescue_shaped = rerun_search_fn(rescue_query)
+    merged = merge_search_results(initial_results, rescue_shaped, limit=limit)
+
+    sig2 = _compute_corrective_signal(
+        merged,
+        query=query,
+        augmenter=augmenter,
+        detected_entities=detected_entities,
+        min_relevance=min_relevance,
+    )
+    verdict = "rescued" if not sig2["weak"] else "still_weak"
+
+    corrective_meta = {
+        "mode": mode,
+        "retries": 1,
+        "rescueFired": True,
+        "verdict": verdict,
+        "queriesTried": queries_tried,
+    }
+    results, response = apply_corrective_signal(
+        merged,
+        query=query,
+        augmenter=augmenter,
+        detected_entities=detected_entities,
+        min_relevance=min_relevance,
+        trace=trace,
+        reranked=reranked,
+    )
+    trace.set_corrective(corrective_meta)
+    response["corrective"] = corrective_meta
     return results, response

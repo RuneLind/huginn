@@ -213,7 +213,15 @@ def _format_relevance_band(r: dict) -> str:
 
 
 def _format_retry_hints(data: dict) -> str:
-    """Render retryHints / noConfidentResults into a compact suggestion line, or ''."""
+    """Render retryHints / noConfidentResults into a compact suggestion line, or ''.
+
+    Suppressed when huginn's corrective rescue fired *and* succeeded (the
+    post-rescue response is no longer weak) — the model would already have the
+    rescued hits in context. When rescue fired but the result is still weak,
+    keep the footer so muninn's Path C defence-in-depth still has signal."""
+    corrective = data.get("corrective") or {}
+    if corrective.get("verdict") == "rescued":
+        return ""
     hints = data.get("retryHints") or {}
     bits = []
     related = hints.get("relatedTerms")
@@ -239,6 +247,7 @@ def _search_knowledge_impl(
     tags: str | None = None,
     min_relevance: float | None = None,
     rerank: bool | None = None,
+    corrective: str | None = None,
 ) -> str:
     """Search indexed document collections using vector search.
 
@@ -248,7 +257,10 @@ def _search_knowledge_impl(
     ``rerank`` forces cross-encoder reranking on (or off); ``None`` leaves the
     server-side default in place (which keys off ``brief``). Forcing
     ``rerank=True`` from a corrective-retrieval client makes ``bestScore`` a
-    real confidence estimate even when ``brief=True``.
+    real confidence estimate even when ``brief=True``. ``corrective`` is an
+    operator escape-hatch for huginn-side rescue retrieval — leave unset
+    (defaults to server-side ``"auto"``); only set ``"off"`` to reproduce
+    pre-corrective behaviour for testing.
     """
     try:
         params = {"q": query, "limit": limit, "brief": brief, "max_chunks_per_doc": 2}
@@ -268,6 +280,8 @@ def _search_knowledge_impl(
             params["min_relevance"] = min_relevance
         if rerank is not None:
             params["rerank"] = "true" if rerank else "false"
+        if corrective is not None:
+            params["corrective"] = corrective
         if TRACE_DEFAULT:
             params["trace"] = "true"
         resp = _api_get("/api/search", params=params)
@@ -539,8 +553,9 @@ def _search_with_sessions_and_tags(
     tags: str | None = None,
     min_relevance: float | None = None,
     rerank: bool | None = None,
+    corrective: str | None = None,
 ) -> str:
-    return _search_knowledge_impl(query, collection, limit, brief, project, git_branch, tags, min_relevance, rerank)
+    return _search_knowledge_impl(query, collection, limit, brief, project, git_branch, tags, min_relevance, rerank, corrective)
 
 
 def _search_with_sessions(
@@ -552,8 +567,9 @@ def _search_with_sessions(
     git_branch: str | None = None,
     min_relevance: float | None = None,
     rerank: bool | None = None,
+    corrective: str | None = None,
 ) -> str:
-    return _search_knowledge_impl(query, collection, limit, brief, project, git_branch, min_relevance=min_relevance, rerank=rerank)
+    return _search_knowledge_impl(query, collection, limit, brief, project, git_branch, min_relevance=min_relevance, rerank=rerank, corrective=corrective)
 
 
 def _search_with_tags(
@@ -564,8 +580,9 @@ def _search_with_tags(
     tags: str | None = None,
     min_relevance: float | None = None,
     rerank: bool | None = None,
+    corrective: str | None = None,
 ) -> str:
-    return _search_knowledge_impl(query, collection, limit, brief, tags=tags, min_relevance=min_relevance, rerank=rerank)
+    return _search_knowledge_impl(query, collection, limit, brief, tags=tags, min_relevance=min_relevance, rerank=rerank, corrective=corrective)
 
 
 def _search_basic(
@@ -575,8 +592,9 @@ def _search_basic(
     brief: bool = False,
     min_relevance: float | None = None,
     rerank: bool | None = None,
+    corrective: str | None = None,
 ) -> str:
-    return _search_knowledge_impl(query, collection, limit, brief, min_relevance=min_relevance, rerank=rerank)
+    return _search_knowledge_impl(query, collection, limit, brief, min_relevance=min_relevance, rerank=rerank, corrective=corrective)
 
 
 def _pick_search_function():

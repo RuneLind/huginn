@@ -3,7 +3,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from main.core.search_response_formatter import apply_corrective_signal, shape_search_results
+from main.core.search_response_formatter import run_corrective_search, shape_search_results
 from main.core.search_trace import create_trace
 from main.core.trace_store import any_trace_enabled, default_trace_store, pointer_mode_enabled
 from main.graph.graph_search_augmenter import GraphSearchAugmenter
@@ -27,9 +27,12 @@ def search(
     git_branch: str = Query(None, description="Filter by gitBranch metadata"),
     tags: str = Query(None, description="Filter by tags (comma-separated, matches any)"),
     min_relevance: float = Query(None, ge=0.0, le=1.0, description="Drop results below this relevance (0.0-1.0). If all are below, returns empty results plus retryHints and noConfidentResults=true."),
+    corrective: str = Query("auto", description="Corrective-rescue mode: 'auto' (default; rescue when first search is weak and a usable hint exists), 'off' (today's behaviour, no rescue), 'force' (rescue whenever a hint exists — test knob)."),
     trace: bool = Query(False, description="Return per-stage search trace (entities, scores, timings) for debugging"),
     store: KnowledgeStore = Depends(get_store),
 ):
+    if corrective not in ("auto", "off", "force"):
+        raise HTTPException(status_code=400, detail=f"corrective must be one of 'auto', 'off', 'force' (got {corrective!r})")
     if collection:
         for c in collection:
             if not store.has_collection(c):
@@ -77,7 +80,34 @@ def search(
     augmenter.enrich_results(results, detected_entities)
 
     reranked = all(sr.get("reranked", True) for _, sr in per_collection) if per_collection else True
-    results, response = apply_corrective_signal(
+
+    def rerun_search_fn(rescue_query: str):
+        rescue_per_collection = []
+        for coll_name, searcher in target_searchers.items():
+            rescue_sr = searcher.search(
+                rescue_query,
+                max_number_of_chunks=limit * overfetch,
+                max_number_of_documents=limit * (3 if has_filters else 1),
+                include_matched_chunks_content=True,
+                skip_reranker=skip_reranker,
+                trace=trace_obj,
+                title_boost_query=rescue_query,
+            )
+            rescue_per_collection.append((coll_name, rescue_sr))
+        rescue_results, _ = shape_search_results(
+            rescue_per_collection,
+            limit=limit,
+            brief=brief,
+            max_chunk_chars=max_chunk_chars,
+            max_chunks_per_doc=max_chunks_per_doc,
+            project=project,
+            git_branch=git_branch,
+            tags=tags,
+        )
+        augmenter.enrich_results(rescue_results, detected_entities)
+        return rescue_results
+
+    results, response = run_corrective_search(
         results,
         query=q,
         augmenter=augmenter,
@@ -85,6 +115,9 @@ def search(
         min_relevance=min_relevance,
         trace=trace_obj,
         reranked=reranked,
+        mode=corrective,
+        rerun_search_fn=rerun_search_fn,
+        limit=limit,
     )
     if graph_answer:
         response["graph_answer"] = graph_answer
