@@ -465,8 +465,12 @@ def run_corrective_search(
     to no-rescue behaviour (verdict ``"weak_skipped"``).
 
     On rescue, the response gains a ``corrective`` dict with
-    ``{mode, retries, rescueFired, verdict, queriesTried}``; the same dict is
-    recorded on the trace. No ``corrective`` field is added to the response in
+    ``{mode, retries, rescueFired, verdict, queriesTried, rescueStrategy}``;
+    the same dict is recorded on the trace. ``rescueStrategy`` names the
+    heuristic that produced the pass-2 query (one of the values returned by
+    ``GraphSearchAugmenter`` — ``conjunction_split``, ``trailing_parens``,
+    ``unquote``, ``drop_last_word``, ``entity_label_append``,
+    ``fallback_seed``). No ``corrective`` field is added to the response in
     the no-rescue case (keeps the response shape unchanged for confident
     queries — backward-compatible), but the trace still records it for
     dashboards.
@@ -554,6 +558,7 @@ def run_corrective_search(
         "rescueFired": True,
         "verdict": verdict,
         "queriesTried": queries_tried,
+        "rescueStrategy": strategy,
     }
     results, response = _finalize_signal(sig2, trace=trace, reranked=reranked)
     trace.set_corrective(corrective_meta)
