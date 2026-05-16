@@ -20,7 +20,8 @@ class DocumentCollectionCreator:
                  document_indexers,
                  persister,
                  operation_type: OPERATION_TYPE = OPERATION_TYPE.CREATE,
-                 indexing_batch_size=500_000):
+                 indexing_batch_size=500_000,
+                 chunk_prefixer=None):
         self.operation_type = operation_type
         self.collection_name = collection_name
         self.document_reader = document_reader
@@ -28,6 +29,7 @@ class DocumentCollectionCreator:
         self.document_indexers = document_indexers
         self.persister = persister
         self.indexing_batch_size = indexing_batch_size
+        self.chunk_prefixer = chunk_prefixer
 
     def run(self):
         if self.operation_type == OPERATION_TYPE.CREATE:
@@ -96,14 +98,20 @@ class DocumentCollectionCreator:
         document_ids = []
 
         number_of_expected_documents = self.document_reader.get_number_of_documents()
-        for document in wrap_generator_with_progress_bar(self.document_reader.read_all_documents(), 
-                                                         number_of_expected_documents, 
+        for document in wrap_generator_with_progress_bar(self.document_reader.read_all_documents(),
+                                                         number_of_expected_documents,
                                                          progress_bar_name="Reading documents"):
             for converted_document in self.document_converter.convert(document):
+                if self.chunk_prefixer is not None:
+                    self.chunk_prefixer.prefix_document(converted_document)
+
                 document_path = f"{self.collection_name}/documents/{converted_document['id']}.json"
                 self.__save_json_file(converted_document, document_path)
 
                 document_ids.append(converted_document["id"])
+
+        if self.chunk_prefixer is not None:
+            self.chunk_prefixer.cache.flush()
 
         return document_ids, number_of_expected_documents
 
@@ -241,15 +249,23 @@ class DocumentCollectionCreator:
                                   existing_manifest=None):
         number_of_documents = len(self.persister.read_folder_files(f"{self.collection_name}/documents"))
 
+        contextual_prefix_block = self.__build_contextual_prefix_block(existing_manifest)
+
         if existing_manifest:
-            return { **existing_manifest,
+            merged = { **existing_manifest,
                 "updatedTime": update_time.isoformat(),
                 "lastModifiedDocumentTime": last_modified_document_time.isoformat(),
                 "numberOfDocuments": number_of_documents,
                 "numberOfChunks": number_of_chunks,
             }
+            if contextual_prefix_block:
+                merged["contextualPrefix"] = contextual_prefix_block
+            elif "contextualPrefix" in merged and self.chunk_prefixer is None:
+                # leave the existing block in place on no-op updates so re-enabling later stays consistent
+                pass
+            return merged
 
-        return {
+        manifest = {
             "collectionName": self.collection_name,
             "updatedTime": update_time.isoformat(),
             "lastModifiedDocumentTime": last_modified_document_time.isoformat(),
@@ -257,6 +273,20 @@ class DocumentCollectionCreator:
             "numberOfChunks": number_of_chunks,
             "reader": self.document_reader.get_reader_details(),
             "indexers": [{ "name": indexer.get_name() } for indexer in self.document_indexers],
+        }
+        if contextual_prefix_block:
+            manifest["contextualPrefix"] = contextual_prefix_block
+        return manifest
+
+    def __build_contextual_prefix_block(self, existing_manifest):
+        if self.chunk_prefixer is None:
+            return None
+        existing_enabled_at = None
+        if existing_manifest and isinstance(existing_manifest.get("contextualPrefix"), dict):
+            existing_enabled_at = existing_manifest["contextualPrefix"].get("enabledAt")
+        return {
+            "model": self.chunk_prefixer.generator.model_id,
+            "enabledAt": existing_enabled_at or datetime.now(timezone.utc).isoformat(),
         }
     
     def __save_json_file(self, content, file_path):
