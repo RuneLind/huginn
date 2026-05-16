@@ -11,6 +11,7 @@ already-shaped result dicts to keep the focus on the rescue control flow rather
 than the search pipeline.
 """
 import json
+import logging
 from unittest.mock import patch
 
 import pytest
@@ -21,6 +22,7 @@ from main.core.search_response_formatter import (
     run_corrective_search,
 )
 from main.core.search_trace import SearchTrace, create_trace
+from main.graph.graph_search_augmenter import GraphSearchAugmenter
 
 
 class _FakeAugmenter:
@@ -356,7 +358,28 @@ class TestTraceMetadata:
 class TestMcpFooterSuppression:
     """Case 9: MCP rendered text omits weak-match footer on rescued verdict."""
 
-    def test_footer_suppressed_on_rescued_verdict(self):
+    def test_rescue_marker_replaces_footer_on_rescued_verdict(self):
+        from knowledge_api_mcp_adapter import _format_retry_hints
+
+        data = {
+            "retryHints": {"broaderQuery": "X"},
+            "corrective": {
+                "rescueFired": True,
+                "verdict": "rescued",
+                "queriesTried": ["meningen med livet", "meningen"],
+            },
+        }
+
+        out = _format_retry_hints(data)
+        assert "Rescued via broader query" in out
+        assert '"meningen"' in out
+        assert '"meningen med livet"' in out
+        assert "found no confident match" in out
+
+    def test_rescued_without_queries_tried_falls_back_to_empty(self):
+        """Defensive: corrective dict without queriesTried (shouldn't happen in
+        practice — run_corrective_search always populates it) yields no marker
+        rather than a misleading half-rendered string."""
         from knowledge_api_mcp_adapter import _format_retry_hints
 
         data = {
@@ -491,3 +514,148 @@ class TestEndToEndViaBuildSearchToolFn:
 
         assert len(searcher.calls) == 1
         assert "corrective" not in result
+
+
+# --- Phase 0c: corrective observability + signal-quality refinements ---
+
+
+class TestCorrectiveLogLine:
+    """Phase 0c item 1b: every non-confident verdict emits one info log line
+    with query / verdict / mode / retries / rescue_query / strategy.
+    Confident path stays silent."""
+
+    _LOGGER_NAME = "main.core.search_response_formatter"
+
+    def _run(self, *, hints, initial_relevance, mode, rerun_results=None, caplog):
+        results = [_shaped("orig", relevance=initial_relevance)]
+        augmenter = _FakeAugmenter(hints=hints)
+        with caplog.at_level(logging.INFO, logger=self._LOGGER_NAME):
+            run_corrective_search(
+                results,
+                query="meningen med livet",
+                augmenter=augmenter,
+                detected_entities=[],
+                min_relevance=None,
+                trace=SearchTrace(),
+                reranked=True,
+                mode=mode,
+                rerun_search_fn=(lambda q: rerun_results) if rerun_results is not None else None,
+                limit=10,
+            )
+        return [r for r in caplog.records if r.name == self._LOGGER_NAME]
+
+    def test_confident_verdict_emits_no_log(self, caplog):
+        records = self._run(
+            hints=None,
+            initial_relevance=0.92,
+            mode="auto",
+            caplog=caplog,
+        )
+        assert records == []
+
+    def test_weak_no_hint_logs_with_null_rescue_and_strategy(self, caplog):
+        records = self._run(
+            hints=None,
+            initial_relevance=0.30,
+            mode="auto",
+            caplog=caplog,
+        )
+        assert len(records) == 1
+        msg = records[0].getMessage()
+        assert "verdict=weak_no_hint" in msg
+        assert "mode=auto" in msg
+        assert "retries=0" in msg
+        assert "rescue_query=None" in msg
+        assert "strategy=None" in msg
+        assert "'meningen med livet'" in msg
+
+    def test_rescued_verdict_logs_with_broader_strategy(self, caplog):
+        records = self._run(
+            hints={
+                "broaderQuery": "meningen liv",
+                "broaderQueryStrategy": "drop_last_word",
+            },
+            initial_relevance=0.30,
+            mode="auto",
+            rerun_results=[_shaped("rescue", relevance=0.88)],
+            caplog=caplog,
+        )
+        assert len(records) == 1
+        msg = records[0].getMessage()
+        assert "verdict=rescued" in msg
+        assert "retries=1" in msg
+        assert "rescue_query='meningen liv'" in msg
+        assert "strategy=drop_last_word" in msg
+
+    def test_still_weak_verdict_logs_with_strategy(self, caplog):
+        records = self._run(
+            hints={
+                "narrowerQuery": "meningen med livet entity",
+                "narrowerQueryStrategy": "entity_label_append",
+            },
+            initial_relevance=0.30,
+            mode="auto",
+            rerun_results=[_shaped("rescue", relevance=0.20)],  # still weak after rescue
+            caplog=caplog,
+        )
+        assert len(records) == 1
+        msg = records[0].getMessage()
+        assert "verdict=still_weak" in msg
+        assert "rescue_query='meningen med livet entity'" in msg
+        assert "strategy=entity_label_append" in msg
+
+
+class TestStrategyFieldInHints:
+    """Phase 0c item 1a: every broader/narrower hint carries a parallel
+    *Strategy field naming the heuristic that produced it."""
+
+    @pytest.mark.parametrize("query,expected_strategy", [
+        ("artikkel 13 og lovvalg", "conjunction_split"),
+        ("trygdeavgift beregning (for selvstendig)", "trailing_parens"),
+        ('"alpha beta gamma"', "unquote"),
+        ("blockchain quantum computing AI", "drop_last_word"),
+    ])
+    def test_broader_strategy_recorded(self, query, expected_strategy):
+        aug = GraphSearchAugmenter(None)
+        hints = aug.get_retry_hints(query, [])
+        assert hints is not None
+        assert hints["broaderQueryStrategy"] == expected_strategy
+
+    def test_drop_last_word_under_two_tokens_omits_broader(self):
+        """meningen med livet → meningen (1 token) → Phase 0c filter drops it,
+        so neither broaderQuery nor broaderQueryStrategy appears in retryHints."""
+        aug = GraphSearchAugmenter(None)
+        hints = aug.get_retry_hints("meningen med livet", []) or {}
+        assert "broaderQuery" not in hints
+        assert "broaderQueryStrategy" not in hints
+
+
+class TestMeningenIntegration:
+    """Phase 0c item 2: full ``run_corrective_search`` on ``meningen med livet``
+    (no graph) no longer attempts a broader rescue — the bare-word broader is
+    filtered out, leaving ``weak_no_hint`` instead of a misleading ``rescued``
+    via a single keyword match."""
+
+    def test_meningen_med_livet_falls_through_to_weak_no_hint(self):
+        weak = [_shaped("orig", relevance=0.20)]
+        augmenter = GraphSearchAugmenter(None)
+        trace = SearchTrace()
+        rerun_calls = []
+
+        _, response = run_corrective_search(
+            weak,
+            query="meningen med livet",
+            augmenter=augmenter,
+            detected_entities=[],
+            min_relevance=None,
+            trace=trace,
+            reranked=True,
+            mode="auto",
+            rerun_search_fn=lambda q: rerun_calls.append(q) or [],
+            limit=10,
+        )
+
+        assert rerun_calls == []
+        assert "corrective" not in response
+        assert "retryHints" not in response or "broaderQuery" not in response.get("retryHints", {})
+        assert trace.to_dict()["response"]["corrective"]["verdict"] == "weak_no_hint"

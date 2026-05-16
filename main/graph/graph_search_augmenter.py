@@ -66,35 +66,45 @@ def _drop_last_content_word(q: str) -> str | None:
     return None
 
 
-def _broaden_query(q: str) -> str | None:
+def _filter_broader(query: str | None, strategy: str) -> tuple[str | None, str | None]:
+    """Drop broaders that collapse to fewer than 2 tokens — single-token
+    broaders frequently match the literal word in unrelated docs (e.g. the
+    ``"meningen med livet" → "meningen"`` false-positive surfaced in Run A).
+    """
+    if not query:
+        return None, None
+    if len(query.split()) < 2:
+        return None, None
+    return query, strategy
+
+
+def _broaden_query(q: str) -> tuple[str | None, str | None]:
     """Heuristically widen a query: drop a trailing clause / parenthetical / quotes,
     or as a final fallback drop the last content word.
 
-    Returns the broadened query, or ``None`` if no safe broadening applies.
-    Purely lexical — no graph needed.
+    Returns ``(broadened_query, strategy)`` — both ``None`` when no safe
+    broadening applies. ``strategy`` is one of ``conjunction_split``,
+    ``trailing_parens``, ``unquote``, ``drop_last_word``. Purely lexical — no
+    graph needed.
     """
     if not q:
-        return None
+        return None, None
     stripped = q.strip()
     lower = stripped.lower()
-    # Conjunctions: keep the first conjunct ("X and Y" → "X").
     for sep in _CONJUNCTION_SPLITS:
         idx = lower.find(sep)
         if idx > 0:
             head = stripped[:idx].strip()
             if head:
-                return head
-    # Trailing parenthetical.
+                return _filter_broader(head, "conjunction_split")
     m = _TRAILING_PARENS_RE.search(stripped)
     if m and m.start() > 0:
-        return stripped[:m.start()].strip()
-    # Quoted phrase → unquote.
+        return _filter_broader(stripped[:m.start()].strip(), "trailing_parens")
     if '"' in stripped:
         unquoted = stripped.replace('"', '').strip()
         if unquoted and unquoted != stripped:
-            return unquoted
-    # No structural cue — drop the last content word.
-    return _drop_last_content_word(stripped)
+            return _filter_broader(unquoted, "unquote")
+    return _filter_broader(_drop_last_content_word(stripped), "drop_last_word")
 
 
 class GraphSearchAugmenter:
@@ -196,18 +206,26 @@ class GraphSearchAugmenter:
             if related:
                 hints["relatedTerms"] = related
 
+        narrower_query: str | None = None
+        narrower_strategy: str | None = None
         if entity_labels:
             top = entity_labels[0]
             if top.lower() not in q_lower:
-                hints["narrowerQuery"] = f"{q} {top}".strip()
+                narrower_query = f"{q} {top}".strip()
+                narrower_strategy = "entity_label_append"
         else:
             seed = self._fallback_narrower_seed(q)
             if seed and seed.lower() not in q_lower:
-                hints["narrowerQuery"] = f"{q} {seed}".strip()
+                narrower_query = f"{q} {seed}".strip()
+                narrower_strategy = "fallback_seed"
+        if narrower_query:
+            hints["narrowerQuery"] = narrower_query
+            hints["narrowerQueryStrategy"] = narrower_strategy
 
-        broader = _broaden_query(q)
+        broader, broader_strategy = _broaden_query(q)
         if broader and broader.lower() != q_lower:
             hints["broaderQuery"] = broader
+            hints["broaderQueryStrategy"] = broader_strategy
 
         return hints or None
 

@@ -3,10 +3,13 @@
 Used by knowledge_api_server.py /api/search to convert raw DocumentCollectionSearcher
 output into the public response format. Stateless functions; safe to share across runtimes.
 """
+import logging
 import math
 import re
 
 from main.utils.filename import title_from_doc_path
+
+logger = logging.getLogger(__name__)
 
 
 # Cap for non-reranked results: without cross-encoder validation we can't
@@ -426,6 +429,13 @@ def merge_search_results(originals, rescue, *, limit=None):
     return merged
 
 
+def _log_corrective(query, verdict, mode, retries, rescue_query, strategy):
+    logger.info(
+        "corrective: query=%r verdict=%s mode=%s retries=%d rescue_query=%r strategy=%s",
+        query, verdict, mode, retries, rescue_query, strategy,
+    )
+
+
 def run_corrective_search(
     initial_results,
     *,
@@ -485,7 +495,17 @@ def run_corrective_search(
     # weak-only hint shortcut won't have populated them — fetch directly.
     if mode == "force" and not hints:
         hints = augmenter.get_retry_hints(query, detected_entities) or {}
-    rescue_query = hints.get("broaderQuery") or hints.get("narrowerQuery")
+    broader = hints.get("broaderQuery")
+    narrower = hints.get("narrowerQuery")
+    if broader:
+        rescue_query = broader
+        strategy = hints.get("broaderQueryStrategy")
+    elif narrower:
+        rescue_query = narrower
+        strategy = hints.get("narrowerQueryStrategy")
+    else:
+        rescue_query = None
+        strategy = None
 
     will_rescue = (
         rerun_search_fn is not None
@@ -511,6 +531,8 @@ def run_corrective_search(
         }
         results, response = _finalize_signal(sig, trace=trace, reranked=reranked)
         trace.set_corrective(corrective_meta)
+        if verdict != "confident":
+            _log_corrective(query, verdict, mode, 0, rescue_query, strategy)
         return results, response
 
     queries_tried.append(rescue_query)
@@ -536,4 +558,5 @@ def run_corrective_search(
     results, response = _finalize_signal(sig2, trace=trace, reranked=reranked)
     trace.set_corrective(corrective_meta)
     response["corrective"] = corrective_meta
+    _log_corrective(query, verdict, mode, 1, rescue_query, strategy)
     return results, response
