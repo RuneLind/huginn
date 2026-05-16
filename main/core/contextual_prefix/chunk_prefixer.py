@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Iterable
 
 from main.core.contextual_prefix.cache import ContextualCache
@@ -29,6 +30,7 @@ class ChunkPrefixer:
         self.cache = cache
 
     def prefix_document(self, converted_document: dict) -> None:
+        start_time = time.monotonic()
         doc_id = converted_document["id"]
         doc_text = converted_document.get("text") or self._reconstruct_doc_text(converted_document["chunks"])
         chunks = converted_document.get("chunks", [])
@@ -50,6 +52,9 @@ class ChunkPrefixer:
             else:
                 indices_to_generate.append(i)
                 chunk_texts_to_generate.append(chunk_text)
+
+        cache_hits = len(cached_prefixes)
+        requested = len(chunk_texts_to_generate)
 
         new_prefixes: list[str] = []
         if chunk_texts_to_generate:
@@ -79,6 +84,13 @@ class ChunkPrefixer:
             chunk = chunks[idx]
             chunk["contextualPrefix"] = prefix
             chunk["indexedData"] = f"{prefix}\n\n{chunk['indexedData']}"
+
+        generated = len(cached_prefixes) - cache_hits
+        duration = time.monotonic() - start_time
+        logger.info(
+            "prefix doc=%s chunks=%d cached=%d generated=%d requested=%d duration=%.1fs",
+            doc_id, len(chunks), cache_hits, generated, requested, duration,
+        )
 
     def prefix_documents(self, converted_documents: Iterable[dict]) -> None:
         for converted_document in converted_documents:
