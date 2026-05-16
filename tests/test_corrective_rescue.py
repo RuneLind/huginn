@@ -81,8 +81,10 @@ class TestNoRescueOnConfident:
         assert "corrective" not in response
         assert results == confident
         assert response["bestScore"] == 0.92
-        assert trace.to_dict()["response"]["corrective"]["rescueFired"] is False
-        assert trace.to_dict()["response"]["corrective"]["verdict"] == "confident"
+        trace_corrective = trace.to_dict()["response"]["corrective"]
+        assert trace_corrective["rescueFired"] is False
+        assert trace_corrective["verdict"] == "confident"
+        assert "rescueStrategy" not in trace_corrective
 
 
 class TestRescueOnWeakWithBroaderHint:
@@ -91,7 +93,12 @@ class TestRescueOnWeakWithBroaderHint:
     def test_weak_response_with_broader_hint_fires_rescue_and_adds_corrective(self):
         weak = [_shaped("orig-1", relevance=0.30)]
         rescue = [_shaped("rescue-1", relevance=0.88), _shaped("rescue-2", relevance=0.72)]
-        augmenter = _FakeAugmenter(hints={"broaderQuery": "X", "narrowerQuery": "X foo"})
+        augmenter = _FakeAugmenter(hints={
+            "broaderQuery": "X",
+            "broaderQueryStrategy": "drop_last_word",
+            "narrowerQuery": "X foo",
+            "narrowerQueryStrategy": "entity_label_append",
+        })
         trace = SearchTrace()
         rerun_calls = []
 
@@ -116,6 +123,9 @@ class TestRescueOnWeakWithBroaderHint:
         assert response["corrective"]["rescueFired"] is True
         assert response["corrective"]["verdict"] == "rescued"
         assert response["corrective"]["queriesTried"] == ["X bar baz", "X"]
+        # broader preferred over narrower, so broader's strategy is recorded.
+        assert response["corrective"]["rescueStrategy"] == "drop_last_word"
+        assert trace.to_dict()["response"]["corrective"]["rescueStrategy"] == "drop_last_word"
         assert response["bestScore"] >= WEAK_RESULT_RELEVANCE
         # Merged: rescue results win on relevance ordering.
         ids = [r["id"] for r in results]
@@ -129,7 +139,10 @@ class TestRescueFallsBackToNarrower:
     def test_uses_narrower_when_broader_absent(self):
         weak = [_shaped("orig-1", relevance=0.30)]
         rescue = [_shaped("rescue-1", relevance=0.85)]
-        augmenter = _FakeAugmenter(hints={"narrowerQuery": "X foo entity"})
+        augmenter = _FakeAugmenter(hints={
+            "narrowerQuery": "X foo entity",
+            "narrowerQueryStrategy": "entity_label_append",
+        })
         trace = SearchTrace()
         rerun_calls = []
 
@@ -153,6 +166,39 @@ class TestRescueFallsBackToNarrower:
         assert rerun_calls == ["X foo entity"]
         assert response["corrective"]["rescueFired"] is True
         assert response["corrective"]["queriesTried"][1] == "X foo entity"
+        assert response["corrective"]["rescueStrategy"] == "entity_label_append"
+
+
+class TestRescueStillWeakNamesStrategy:
+    """Phase 0c.1: rescue fired but the merged set is still weak — the strategy
+    that drove the (unsuccessful) rescue is still named on the response."""
+
+    def test_still_weak_response_carries_rescue_strategy(self):
+        weak = [_shaped("orig-1", relevance=0.30)]
+        rescue = [_shaped("rescue-1", relevance=0.25)]  # still weak after merge
+        augmenter = _FakeAugmenter(hints={
+            "broaderQuery": "X",
+            "broaderQueryStrategy": "conjunction_split",
+        })
+        trace = SearchTrace()
+
+        _, response = run_corrective_search(
+            weak,
+            query="X og Y",
+            augmenter=augmenter,
+            detected_entities=[],
+            min_relevance=None,
+            trace=trace,
+            reranked=True,
+            mode="auto",
+            rerun_search_fn=lambda q: rescue,
+            limit=10,
+        )
+
+        assert response["corrective"]["verdict"] == "still_weak"
+        assert response["corrective"]["rescueFired"] is True
+        assert response["corrective"]["rescueStrategy"] == "conjunction_split"
+        assert trace.to_dict()["response"]["corrective"]["rescueStrategy"] == "conjunction_split"
 
 
 class TestWeakButNoHint:
@@ -181,8 +227,10 @@ class TestWeakButNoHint:
         # No-rescue path: response shape unchanged (no corrective key).
         assert "corrective" not in response
         assert results == weak
-        assert trace.to_dict()["response"]["corrective"]["verdict"] == "weak_no_hint"
-        assert trace.to_dict()["response"]["corrective"]["rescueFired"] is False
+        trace_corrective = trace.to_dict()["response"]["corrective"]
+        assert trace_corrective["verdict"] == "weak_no_hint"
+        assert trace_corrective["rescueFired"] is False
+        assert "rescueStrategy" not in trace_corrective
 
 
 class TestModeOff:
