@@ -178,29 +178,39 @@ class TestGraphContextKey:
 
 class TestBroadenQuery:
     def test_keeps_first_conjunct(self):
-        assert _broaden_query("lovvalg and utsending") == "lovvalg"
-        assert _broaden_query("trygd og pensjon her") == "trygd"
-        assert _broaden_query("FAISS versus BM25 tradeoffs") == "FAISS"
+        assert _broaden_query("artikkel 13 og lovvalg") == ("artikkel 13", "conjunction_split")
+        assert _broaden_query("trygd avgift og pensjon her") == ("trygd avgift", "conjunction_split")
+        assert _broaden_query("FAISS BM25 versus other tradeoffs") == ("FAISS BM25", "conjunction_split")
 
     def test_strips_trailing_parenthetical(self):
-        assert _broaden_query("trygdeavgift beregning (for selvstendig)") == "trygdeavgift beregning"
+        assert _broaden_query("trygdeavgift beregning (for selvstendig)") == ("trygdeavgift beregning", "trailing_parens")
 
     def test_unquotes(self):
-        assert _broaden_query('"exact phrase here"') == "exact phrase here"
+        assert _broaden_query('"exact phrase here"') == ("exact phrase here", "unquote")
 
     def test_drops_last_word_when_query_long_enough(self):
-        assert _broaden_query("alpha beta gamma delta epsilon") == "alpha beta gamma delta"
+        assert _broaden_query("alpha beta gamma delta epsilon") == ("alpha beta gamma delta", "drop_last_word")
 
     def test_returns_none_for_short_query(self):
-        assert _broaden_query("two words") is None
-        assert _broaden_query("one") is None
-        assert _broaden_query("") is None
+        assert _broaden_query("two words") == (None, None)
+        assert _broaden_query("one") == (None, None)
+        assert _broaden_query("") == (None, None)
+
+    def test_drops_single_token_broaders(self):
+        """Phase 0c filter: < 2 tokens after broadening → no hint (avoid the
+        bare-word false-positive case where ``meningen`` matches unrelated docs)."""
+        assert _broaden_query("meningen med livet") == (None, None)
+        assert _broaden_query("lovvalg and utsending") == (None, None)
+        assert _broaden_query("trygd og pensjon her") == (None, None)
 
 
 class TestGetRetryHints:
     def test_no_graph_offers_broader_heuristic_only(self):
         aug = GraphSearchAugmenter(None)
-        assert aug.get_retry_hints("alpha beta gamma delta", []) == {"broaderQuery": "alpha beta gamma"}
+        assert aug.get_retry_hints("alpha beta gamma delta", []) == {
+            "broaderQuery": "alpha beta gamma",
+            "broaderQueryStrategy": "drop_last_word",
+        }
 
     def test_no_graph_short_query_returns_none(self):
         aug = GraphSearchAugmenter(None)
@@ -253,18 +263,20 @@ class TestDropLastContentWord:
 
 
 class TestBroadenQueryStopwordAware:
-    def test_three_token_query_now_broadens(self):
-        # Previously returned None; new heuristic drops the last content word.
-        assert _broaden_query("meningen med livet") == "meningen"
+    def test_three_token_query_drops_when_collapses_to_one_token(self):
+        # ``meningen med livet`` → drop ``livet`` → trim ``med`` → ``meningen``.
+        # 1 token after broadening → Phase 0c filter drops it.
+        assert _broaden_query("meningen med livet") == (None, None)
 
-    def test_four_token_with_trailing_stopword(self):
-        # The conjunction "and" splits → "alpha beta", BEFORE the fallback runs.
-        # So this test proves conjunction takes precedence over the fallback.
-        assert _broaden_query("alpha and beta gamma") == "alpha"
+    def test_conjunction_takes_precedence_over_fallback(self):
+        # ``and`` splits first → ``alpha`` (1 token). Phase 0c drops it before
+        # the fallback can run, so the result is None — but the strategy that
+        # produced the candidate was ``conjunction_split``.
+        assert _broaden_query("alpha and beta gamma") == (None, None)
 
     def test_pure_fallback_when_no_structure(self):
         # No conjunctions / parens / quotes — drop last content word.
-        assert _broaden_query("blockchain quantum computing AI") == "blockchain quantum computing"
+        assert _broaden_query("blockchain quantum computing AI") == ("blockchain quantum computing", "drop_last_word")
 
 
 class TestFallbackNarrowerSeed:
@@ -301,8 +313,21 @@ class TestGetRetryHintsFallback:
         assert hints is not None
         assert "narrowerQuery" in hints
         assert hints["narrowerQuery"].startswith("noe om lovvalg ")
+        assert hints["narrowerQueryStrategy"] == "fallback_seed"
 
     def test_no_entity_no_overlap_no_narrower(self, graph):
         aug = GraphSearchAugmenter(graph)
         hints = aug.get_retry_hints("elephant submarine quartz", []) or {}
         assert "narrowerQuery" not in hints
+        assert "narrowerQueryStrategy" not in hints
+
+
+class TestNarrowerStrategyLabel:
+    def test_entity_label_append_records_strategy(self, graph):
+        aug = GraphSearchAugmenter(graph)
+        # ``LA_BUC_02 details`` detects ``buc:LA_BUC_02``; its label
+        # ``LA_BUC_02 Beslutning om lovvalg`` is not already in the query, so
+        # it's appended.
+        detected = graph.detect_entities("LA_BUC_02 details")
+        hints = aug.get_retry_hints("LA_BUC_02 details", detected)
+        assert hints["narrowerQueryStrategy"] == "entity_label_append"

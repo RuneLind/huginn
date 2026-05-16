@@ -216,12 +216,20 @@ def _format_relevance_band(r: dict) -> str:
 def _format_retry_hints(data: dict) -> str:
     """Render retryHints / noConfidentResults into a compact suggestion line, or ''.
 
-    Suppressed when huginn's corrective rescue fired *and* succeeded (the
-    post-rescue response is no longer weak) — the model would already have the
-    rescued hits in context. When rescue fired but the result is still weak,
-    keep the footer so muninn's Path C defence-in-depth still has signal."""
+    On a successful rescue, emit a one-line marker naming the original + rescue
+    query instead of the weak-match footer — gives the model an explicit "these
+    came from a fallback" signal without re-listing hints it already tried.
+    When rescue fired but the result is still weak, keep the footer so muninn's
+    Path C defence-in-depth still has signal."""
     corrective = data.get("corrective") or {}
     if corrective.get("verdict") == "rescued":
+        queries_tried = corrective.get("queriesTried") or []
+        if len(queries_tried) >= 2:
+            original, rescue_q = queries_tried[0], queries_tried[-1]
+            return (
+                f'\n\n*Rescued via broader query "{rescue_q}" — '
+                f'original query "{original}" found no confident match.*'
+            )
         return ""
     hints = data.get("retryHints") or {}
     bits = []
