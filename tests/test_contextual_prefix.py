@@ -264,3 +264,43 @@ def test_parse_prefix_array_returns_empty_on_bad_json():
 
 def test_parse_prefix_array_returns_empty_on_non_list():
     assert _parse_prefix_array('"just a string"', expected_count=2) == []
+
+
+# ---------- Parallel prefixing (ChunkPrefixer is thread-safe via cache lock) ----------
+
+def test_parallel_prefixing_handles_concurrent_calls_safely():
+    """ChunkPrefixer.prefix_document must be safe to call from many threads at once."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    long_chunk = "x" * (MIN_CHUNK_CHARS_FOR_PREFIX + 10)
+    doc_count = 8
+    docs = [_converted_doc([long_chunk], doc_id=f"doc{i}") for i in range(doc_count)]
+
+    threads_seen: set = set()
+    lock = threading.Lock()
+
+    class TrackingBackend:
+        model_id = "echo:tracking"
+
+        def generate(self, document_text, chunks):
+            with lock:
+                threads_seen.add(threading.get_ident())
+            return [f"prefix-{i}" for i in range(len(chunks))]
+
+    with tempfile.TemporaryDirectory() as td:
+        cache = ContextualCache(os.path.join(td, "cache.json"))
+        prefixer = ChunkPrefixer(TrackingBackend(), cache)
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            list(executor.map(prefixer.prefix_document, docs))
+
+        for doc in docs:
+            assert doc["chunks"][0]["contextualPrefix"] == "prefix-0"
+            assert doc["chunks"][0]["indexedData"].startswith("prefix-0")
+
+        assert len(cache) == doc_count
+        # Actually used multiple threads (defensively: at least 2; depending on scheduling,
+        # could be up to 4). If this only ever sees 1 thread, the parallel path isn't doing
+        # anything useful.
+        assert len(threads_seen) > 1, f"Expected concurrent threads, saw {len(threads_seen)}"

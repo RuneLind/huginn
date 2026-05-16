@@ -1,4 +1,5 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from enum import Enum
 import numpy as np
@@ -21,7 +22,8 @@ class DocumentCollectionCreator:
                  persister,
                  operation_type: OPERATION_TYPE = OPERATION_TYPE.CREATE,
                  indexing_batch_size=500_000,
-                 chunk_prefixer=None):
+                 chunk_prefixer=None,
+                 contextual_workers: int = 1):
         self.operation_type = operation_type
         self.collection_name = collection_name
         self.document_reader = document_reader
@@ -30,6 +32,7 @@ class DocumentCollectionCreator:
         self.persister = persister
         self.indexing_batch_size = indexing_batch_size
         self.chunk_prefixer = chunk_prefixer
+        self.contextual_workers = max(1, contextual_workers)
 
     def run(self):
         if self.operation_type == OPERATION_TYPE.CREATE:
@@ -98,17 +101,38 @@ class DocumentCollectionCreator:
         document_ids = []
 
         number_of_expected_documents = self.document_reader.get_number_of_documents()
+        parallel_mode = self.chunk_prefixer is not None and self.contextual_workers > 1
+        pending = []  # only used in parallel_mode
+
+        def save_one(converted_document):
+            doc_path = f"{self.collection_name}/documents/{converted_document['id']}.json"
+            self.__save_json_file(converted_document, doc_path)
+            document_ids.append(converted_document["id"])
+
+        def flush_pending():
+            if not pending:
+                return
+            with ThreadPoolExecutor(max_workers=self.contextual_workers) as executor:
+                list(executor.map(self.chunk_prefixer.prefix_document, pending))
+            for converted in pending:
+                save_one(converted)
+            pending.clear()
+
         for document in wrap_generator_with_progress_bar(self.document_reader.read_all_documents(),
                                                          number_of_expected_documents,
                                                          progress_bar_name="Reading documents"):
             for converted_document in self.document_converter.convert(document):
-                if self.chunk_prefixer is not None:
-                    self.chunk_prefixer.prefix_document(converted_document)
+                if parallel_mode:
+                    pending.append(converted_document)
+                    if len(pending) >= self.contextual_workers * 2:
+                        flush_pending()
+                else:
+                    if self.chunk_prefixer is not None:
+                        self.chunk_prefixer.prefix_document(converted_document)
+                    save_one(converted_document)
 
-                document_path = f"{self.collection_name}/documents/{converted_document['id']}.json"
-                self.__save_json_file(converted_document, document_path)
-
-                document_ids.append(converted_document["id"])
+        if parallel_mode:
+            flush_pending()
 
         if self.chunk_prefixer is not None:
             self.chunk_prefixer.cache.flush()

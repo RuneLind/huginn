@@ -21,13 +21,15 @@ from main.core.contextual_prefix import ChunkPrefixer, ContextualCache, make_bac
 
 from main.utils.performance import log_execution_duration
 
-def create_collection_updater(collection_name, contextual_backend_spec=None, contextual_cache_path=None):
+def create_collection_updater(collection_name, contextual_backend_spec=None, contextual_cache_path=None,
+                              contextual_workers=1):
     return log_execution_duration(
-        lambda: __create_collection_updater(collection_name, contextual_backend_spec, contextual_cache_path),
+        lambda: __create_collection_updater(collection_name, contextual_backend_spec, contextual_cache_path,
+                                            contextual_workers),
         identifier=f"Preparing collection updater"
     )
 
-def __create_collection_updater(collection_name, contextual_backend_spec, contextual_cache_path):
+def __create_collection_updater(collection_name, contextual_backend_spec, contextual_cache_path, contextual_workers):
     disk_persister = DiskPersister(base_path="./data/collections")
 
     if not disk_persister.is_path_exists(collection_name):
@@ -47,7 +49,8 @@ def __create_collection_updater(collection_name, contextual_backend_spec, contex
                                      document_indexers=document_indexers,
                                      persister=disk_persister,
                                      operation_type=OPERATION_TYPE.UPDATE,
-                                     chunk_prefixer=chunk_prefixer)
+                                     chunk_prefixer=chunk_prefixer,
+                                     contextual_workers=contextual_workers)
 
 
 def __build_chunk_prefixer_for_update(collection_name, manifest, override_spec, cache_path):

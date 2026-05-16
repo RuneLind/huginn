@@ -7,15 +7,15 @@ from main.persisters.disk_persister import DiskPersister
 from main.utils.performance import log_execution_duration
 
 def create_collection_creator(collection_name, indexers, document_reader, document_converter, use_cache=True,
-                              contextual_backend_spec="none", contextual_cache_path=None):
+                              contextual_backend_spec="none", contextual_cache_path=None, contextual_workers=1):
     return log_execution_duration(
         lambda: __create_collection_creator(collection_name, indexers, document_reader, document_converter, use_cache,
-                                            contextual_backend_spec, contextual_cache_path),
+                                            contextual_backend_spec, contextual_cache_path, contextual_workers),
         identifier=f"Preparing collection creator"
     )
 
 def __create_collection_creator(collection_name, indexers, document_reader, document_converter, use_cache,
-                                contextual_backend_spec, contextual_cache_path):
+                                contextual_backend_spec, contextual_cache_path, contextual_workers):
     if use_cache:
         cache_disk_persister = DiskPersister(base_path="./data/caches")
         result_document_reader = CacheReaderDecorator(reader=document_reader,
@@ -35,7 +35,8 @@ def __create_collection_creator(collection_name, indexers, document_reader, docu
                                      document_indexers=document_indexers,
                                      persister=disk_persister,
                                      operation_type=OPERATION_TYPE.CREATE,
-                                     chunk_prefixer=chunk_prefixer)
+                                     chunk_prefixer=chunk_prefixer,
+                                     contextual_workers=contextual_workers)
 
 
 def _build_chunk_prefixer(collection_name, backend_spec, cache_path):

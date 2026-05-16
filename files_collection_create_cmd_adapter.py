@@ -23,6 +23,8 @@ ap.add_argument("--contextual-model", required=False, default="none",
                 help="Contextual-prefix backend spec, e.g. 'none', 'echo', 'ollama:qwen3.6:35b-a3b-nvfp4', 'claude-code:claude-haiku-4-5'.")
 ap.add_argument("--contextual-cache", required=False, default=None,
                 help="Path to the contextual-prefix cache JSON (defaults to data/contextual_caches/<name>.json — outside the collection folder so it survives re-creates).")
+ap.add_argument("--contextual-workers", required=False, type=int, default=1,
+                help="How many documents to prefix concurrently (default 1 = sequential). 4 is a sensible value for claude-code:claude-haiku-4-5 and cuts wall time roughly N×; watch rate limits.")
 
 args = vars(ap.parse_args())
 
@@ -39,7 +41,8 @@ files_collection_creator = create_collection_creator(collection_name=collection_
                                                      document_converter=files_document_converter,
                                                      use_cache=False,
                                                      contextual_backend_spec=args['contextual_model'],
-                                                     contextual_cache_path=args['contextual_cache'])
+                                                     contextual_cache_path=args['contextual_cache'],
+                                                     contextual_workers=args['contextual_workers'])
 
 files_collection_creator.run()
 
