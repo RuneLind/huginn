@@ -226,8 +226,10 @@ def _format_retry_hints(data: dict) -> str:
         queries_tried = corrective.get("queriesTried") or []
         if len(queries_tried) >= 2:
             original, rescue_q = queries_tried[0], queries_tried[-1]
+            strategy = corrective.get("rescueStrategy")
+            strategy_suffix = f" [{strategy}]" if strategy else ""
             return (
-                f'\n\n*Rescued via broader query "{rescue_q}" — '
+                f'\n\n*Rescued via broader query "{rescue_q}"{strategy_suffix} — '
                 f'original query "{original}" found no confident match.*'
             )
         return ""

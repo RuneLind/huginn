@@ -424,6 +424,41 @@ class TestMcpFooterSuppression:
         assert '"meningen med livet"' in out
         assert "found no confident match" in out
 
+    def test_rescue_marker_appends_strategy_when_present(self):
+        """Phase 0c.2: when corrective.rescueStrategy is set, the marker
+        names the heuristic so non-muninn agents see the same signal the
+        dashboard chip shows."""
+        from knowledge_api_mcp_adapter import _format_retry_hints
+
+        data = {
+            "corrective": {
+                "rescueFired": True,
+                "verdict": "rescued",
+                "queriesTried": ["tibetansk pensjonsavtale vurdering", "tibetansk pensjonsavtale"],
+                "rescueStrategy": "drop_last_word",
+            },
+        }
+
+        out = _format_retry_hints(data)
+        assert '"tibetansk pensjonsavtale" [drop_last_word]' in out
+
+    def test_rescue_marker_omits_strategy_when_absent(self):
+        """Defensive: pre-0c.1 traces without rescueStrategy render the
+        marker without a bracketed suffix — no `[None]` leak."""
+        from knowledge_api_mcp_adapter import _format_retry_hints
+
+        data = {
+            "corrective": {
+                "rescueFired": True,
+                "verdict": "rescued",
+                "queriesTried": ["X foo", "X"],
+            },
+        }
+
+        out = _format_retry_hints(data)
+        assert "[" not in out
+        assert '"X" — original query' in out
+
     def test_rescued_without_queries_tried_falls_back_to_empty(self):
         """Defensive: corrective dict without queriesTried (shouldn't happen in
         practice — run_corrective_search always populates it) yields no marker
