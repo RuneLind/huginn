@@ -268,6 +268,48 @@ def test_parse_prefix_array_returns_empty_on_non_list():
 
 # ---------- Parallel prefixing (ChunkPrefixer is thread-safe via cache lock) ----------
 
+def test_ollama_backend_batches_chunks_to_bounded_calls(monkeypatch):
+    """A doc with 25 chunks at chunks_per_call=10 must make 3 calls (10, 10, 5),
+    not one 25-chunk call that risks exceeding num_predict."""
+    from main.core.contextual_prefix.backends.ollama_backend import OllamaBackend
+
+    backend = OllamaBackend(model="test-model", chunks_per_call=10)
+
+    call_log: list[int] = []
+
+    def fake_generate_batch(document_text, batch_chunks):
+        call_log.append(len(batch_chunks))
+        return [f"prefix-{i}" for i in range(len(batch_chunks))]
+
+    monkeypatch.setattr(backend, "_generate_batch", fake_generate_batch)
+    chunks = [f"chunk{i}" for i in range(25)]
+    prefixes = backend.generate("doc text", chunks)
+
+    assert call_log == [10, 10, 5]
+    assert len(prefixes) == 25
+    assert prefixes[0] == "prefix-0"
+    assert prefixes[10] == "prefix-0"  # batch 2 starts a new sequence
+    assert prefixes[20] == "prefix-0"  # batch 3 too
+
+
+def test_ollama_backend_aborts_doc_if_any_batch_returns_wrong_count(monkeypatch):
+    from main.core.contextual_prefix.backends.ollama_backend import OllamaBackend
+
+    backend = OllamaBackend(model="test-model", chunks_per_call=5)
+
+    def fake_generate_batch(document_text, batch_chunks):
+        # second batch returns one less prefix than asked for
+        if batch_chunks[0] == "chunk5":
+            return [f"p-{i}" for i in range(len(batch_chunks) - 1)]
+        return [f"p-{i}" for i in range(len(batch_chunks))]
+
+    monkeypatch.setattr(backend, "_generate_batch", fake_generate_batch)
+    chunks = [f"chunk{i}" for i in range(12)]
+    prefixes = backend.generate("doc text", chunks)
+
+    assert prefixes == []  # aborted — don't try to pair mismatched prefixes
+
+
 def test_parallel_prefixing_handles_concurrent_calls_safely():
     """ChunkPrefixer.prefix_document must be safe to call from many threads at once."""
     import threading
