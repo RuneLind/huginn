@@ -7,7 +7,7 @@ import pytest
 from main.core.contextual_prefix import ChunkPrefixer, ContextualCache, make_backend
 from main.core.contextual_prefix.backends import BackendSpec
 from main.core.contextual_prefix.backends.echo import EchoBackend
-from main.core.contextual_prefix.backends.ollama_backend import _parse_prefix_array
+from main.core.contextual_prefix.parsing import parse_prefix_array as _parse_prefix_array
 from main.core.contextual_prefix.cache import chunk_fingerprint
 from main.core.contextual_prefix.chunk_prefixer import MIN_CHUNK_CHARS_FOR_PREFIX
 

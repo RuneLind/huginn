@@ -288,6 +288,23 @@ uv run scripts/tagging/tag_documents.py --source data/sources/my-docs \
 
 See `.env.example` for a template.
 
+## Advanced: Contextual Retrieval
+
+Optionally prepend an LLM-generated 50–100 token anchoring prefix to each chunk before it hits FAISS/BM25. Pick one of three backends via `--contextual-model`:
+
+- `ollama:qwen3.6:35b-a3b-nvfp4` — local Ollama (fast on Apple Silicon, no API key needed).
+- `claude-code:claude-haiku-4-5` — headless `claude -p` subprocess (uses your Claude Code install).
+- `anthropic:claude-haiku-4-5` — direct Anthropic Python SDK call (skips the CLI's ~5–7s cold-start and MCP-catalog injection; auth via `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or `CLAUDE_CODE_OAUTH_TOKEN`).
+
+```bash
+uv run files_collection_create_cmd_adapter.py \
+  --basePath ./data/sources/my-docs --collection my-docs \
+  --contextual-model anthropic:claude-haiku-4-5 \
+  --contextual-workers 4
+```
+
+Cache lives at `data/contextual_caches/<collection>.json` and survives re-creates; cache key includes the backend prefix so swapping `claude-code:` ↔ `anthropic:` re-prefixes by design.
+
 ## Advanced: Private Domain Collections
 
 For organizing private, domain-specific collections (work projects, team knowledge, etc.), create gitignored folders inside huginn with their own git repos:

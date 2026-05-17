@@ -20,7 +20,7 @@ ap.add_argument("-indexers", "--indexers", required=False, default=["indexer_FAI
 ap.add_argument("-failFast", "--failFast", action="store_true", required=False, default=False, help="If passed - the process will stop on the first error. Otherwise, it will try to process all files and log errors for those that failed.")
 
 ap.add_argument("--contextual-model", required=False, default="none",
-                help="Contextual-prefix backend spec, e.g. 'none', 'echo', 'ollama:qwen3.6:35b-a3b-nvfp4', 'claude-code:claude-haiku-4-5'.")
+                help="Contextual-prefix backend spec, e.g. 'none', 'echo', 'ollama:qwen3.6:35b-a3b-nvfp4', 'claude-code:claude-haiku-4-5', 'anthropic:claude-haiku-4-5'.")
 ap.add_argument("--contextual-cache", required=False, default=None,
                 help="Path to the contextual-prefix cache JSON (defaults to data/contextual_caches/<name>.json — outside the collection folder so it survives re-creates).")
 ap.add_argument("--contextual-workers", required=False, type=int, default=1,

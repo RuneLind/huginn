@@ -1,11 +1,9 @@
 import json
 import logging
-import os
-import re
-import time
 import urllib.error
 import urllib.request
 
+from main.core.contextual_prefix.parsing import parse_prefix_array
 from main.core.contextual_prefix.prompts import PREFIX_SYSTEM_PROMPT, render_user_prompt
 
 
@@ -13,9 +11,6 @@ logger = logging.getLogger(__name__)
 
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
-JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
-TRAILING_COMMA_RE = re.compile(r",(\s*[\]}])\s*\Z")
-PARSE_FAILURE_DUMP_DIR = os.environ.get("CONTEXTUAL_PREFIX_DEBUG_DIR", "./data/contextual_caches/parse_failures")
 
 
 class OllamaBackend:
@@ -98,60 +93,4 @@ class OllamaBackend:
             return []
 
         content = (result.get("message") or {}).get("content", "").strip()
-        return _parse_prefix_array(content, expected_count=len(batch_chunks))
-
-
-def _parse_prefix_array(raw: str, expected_count: int) -> list[str]:
-    if not raw:
-        return []
-
-    cleaned = JSON_FENCE_RE.sub("", raw).strip()
-    cleaned = TRAILING_COMMA_RE.sub(r"\1", cleaned)
-
-    try:
-        parsed = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        dump_path = _dump_parse_failure(cleaned, exc)
-        logger.warning(
-            "Could not parse JSON from model output (len=%d, expected_count=%d, err=%s).\n"
-            "  first 400: %s\n"
-            "  last  400: %s\n"
-            "  raw saved to: %s",
-            len(cleaned), expected_count, exc,
-            cleaned[:400].replace("\n", "\\n"),
-            cleaned[-400:].replace("\n", "\\n"),
-            dump_path,
-        )
-        return []
-
-    if isinstance(parsed, dict):
-        for key in ("prefixes", "results", "chunks"):
-            if key in parsed and isinstance(parsed[key], list):
-                parsed = parsed[key]
-                break
-
-    if not isinstance(parsed, list):
-        logger.warning("Expected JSON array of prefixes, got %s", type(parsed).__name__)
-        return []
-
-    prefixes = [str(p).strip() for p in parsed]
-
-    if len(prefixes) != expected_count:
-        logger.warning("Got %d prefixes, expected %d", len(prefixes), expected_count)
-
-    return prefixes
-
-
-def _dump_parse_failure(raw: str, exc: Exception) -> str:
-    try:
-        os.makedirs(PARSE_FAILURE_DUMP_DIR, exist_ok=True)
-        path = os.path.join(PARSE_FAILURE_DUMP_DIR, f"parse-fail-{int(time.time() * 1000)}.txt")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(f"# JSONDecodeError: {exc}\n")
-            f.write(f"# raw output length: {len(raw)}\n")
-            f.write("# -----\n")
-            f.write(raw)
-        return path
-    except OSError as e:
-        logger.warning("Failed to dump parse failure: %s", e)
-        return "(dump failed)"
+        return parse_prefix_array(content, expected_count=len(batch_chunks))
