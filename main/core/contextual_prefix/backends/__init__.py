@@ -5,7 +5,7 @@ from main.core.contextual_prefix.prefix_generator import PrefixGenerator
 
 @dataclass(frozen=True)
 class BackendSpec:
-    kind: str   # "none" | "ollama" | "claude-code" | "echo"
+    kind: str   # "none" | "ollama" | "claude-code" | "anthropic" | "echo"
     model: str  # e.g. "qwen3.6:35b-a3b-nvfp4" or "claude-haiku-4-5"
 
     @property
@@ -42,5 +42,10 @@ def make_backend(spec: BackendSpec | str) -> PrefixGenerator | None:
         if not spec.model:
             raise ValueError("claude-code backend requires a model name, e.g. claude-code:claude-haiku-4-5")
         return ClaudeCodeBackend(model=spec.model)
+    if spec.kind == "anthropic":
+        from main.core.contextual_prefix.backends.anthropic_sdk_backend import AnthropicSdkBackend
+        if not spec.model:
+            raise ValueError("anthropic backend requires a model name, e.g. anthropic:claude-haiku-4-5")
+        return AnthropicSdkBackend(model=spec.model)
 
     raise ValueError(f"Unknown contextual-prefix backend: {spec.kind}")
