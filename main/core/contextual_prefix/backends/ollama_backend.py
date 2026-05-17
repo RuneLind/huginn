@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
+TRAILING_COMMA_RE = re.compile(r",(\s*[\]}])")
 PARSE_FAILURE_DUMP_DIR = os.environ.get("CONTEXTUAL_PREFIX_DEBUG_DIR", "./data/contextual_caches/parse_failures")
 
 
@@ -105,6 +106,7 @@ def _parse_prefix_array(raw: str, expected_count: int) -> list[str]:
         return []
 
     cleaned = JSON_FENCE_RE.sub("", raw).strip()
+    cleaned = TRAILING_COMMA_RE.sub(r"\1", cleaned)
 
     try:
         parsed = json.loads(cleaned)
