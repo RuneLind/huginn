@@ -3,7 +3,7 @@ import logging
 import shutil
 import subprocess
 
-from main.core.contextual_prefix.backends.ollama_backend import _parse_prefix_array
+from main.core.contextual_prefix.parsing import parse_prefix_array
 from main.core.contextual_prefix.prompts import PREFIX_SYSTEM_PROMPT, render_user_prompt
 
 
@@ -56,7 +56,7 @@ class ClaudeCodeBackend:
             return []
 
         text = _extract_result_text(result.stdout)
-        return _parse_prefix_array(text, expected_count=len(chunks))
+        return parse_prefix_array(text, expected_count=len(chunks))
 
 
 def _extract_result_text(stdout: str) -> str:

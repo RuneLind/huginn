@@ -1,4 +1,3 @@
-import os
 from unittest.mock import MagicMock
 
 import pytest
@@ -18,6 +17,22 @@ _AUTH_ENV_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUT
 def _clear_auth_env(monkeypatch):
     for var in _AUTH_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
+
+
+def _patch_anthropic(monkeypatch) -> dict:
+    """Install a stub for the `Anthropic` class. Returns a dict that will be
+    populated with the kwargs the next `Anthropic(...)` call receives."""
+    captured: dict = {}
+
+    def fake_anthropic(**kwargs):
+        captured.update(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(
+        "main.core.contextual_prefix.backends.anthropic_sdk_backend.Anthropic",
+        fake_anthropic,
+    )
+    return captured
 
 
 def _make_response(text: str, *, input_tokens: int = 10, output_tokens: int = 20):
@@ -47,73 +62,36 @@ def test_build_client_raises_when_no_env_set(monkeypatch):
     assert "CLAUDE_CODE_OAUTH_TOKEN" in str(exc.value)
 
 
-def test_build_client_uses_api_key_when_set(monkeypatch):
+@pytest.mark.parametrize(
+    "env, expected_kwargs",
+    [
+        (
+            {"ANTHROPIC_API_KEY": "sk-test-123"},
+            {"api_key": "sk-test-123"},
+        ),
+        (
+            {"ANTHROPIC_AUTH_TOKEN": "oat-anthropic-xyz"},
+            {"api_key": None, "auth_token": "oat-anthropic-xyz"},
+        ),
+        (
+            {"CLAUDE_CODE_OAUTH_TOKEN": "oat-claude-code-abc"},
+            {"api_key": None, "auth_token": "oat-claude-code-abc"},
+        ),
+        (
+            # Precedence: ANTHROPIC_AUTH_TOKEN wins when both OAuth vars are set.
+            {"ANTHROPIC_AUTH_TOKEN": "from-anthropic", "CLAUDE_CODE_OAUTH_TOKEN": "from-claude-code"},
+            {"api_key": None, "auth_token": "from-anthropic"},
+        ),
+    ],
+    ids=["api_key", "anthropic_auth_token", "claude_code_oauth_token", "anthropic_auth_token_wins_over_claude_code"],
+)
+def test_build_client_resolves_auth_in_priority_order(monkeypatch, env, expected_kwargs):
     _clear_auth_env(monkeypatch)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-123")
-    captured: dict = {}
-
-    def fake_anthropic(**kwargs):
-        captured.update(kwargs)
-        return MagicMock()
-
-    monkeypatch.setattr(
-        "main.core.contextual_prefix.backends.anthropic_sdk_backend.Anthropic",
-        fake_anthropic,
-    )
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    captured = _patch_anthropic(monkeypatch)
     _build_client()
-    assert captured == {"api_key": "sk-test-123"}
-
-
-def test_build_client_uses_auth_token_from_anthropic_auth_token(monkeypatch):
-    _clear_auth_env(monkeypatch)
-    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "oat-anthropic-xyz")
-    captured: dict = {}
-
-    def fake_anthropic(**kwargs):
-        captured.update(kwargs)
-        return MagicMock()
-
-    monkeypatch.setattr(
-        "main.core.contextual_prefix.backends.anthropic_sdk_backend.Anthropic",
-        fake_anthropic,
-    )
-    _build_client()
-    assert captured == {"api_key": None, "auth_token": "oat-anthropic-xyz"}
-
-
-def test_build_client_uses_auth_token_from_claude_code_oauth_token(monkeypatch):
-    _clear_auth_env(monkeypatch)
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oat-claude-code-abc")
-    captured: dict = {}
-
-    def fake_anthropic(**kwargs):
-        captured.update(kwargs)
-        return MagicMock()
-
-    monkeypatch.setattr(
-        "main.core.contextual_prefix.backends.anthropic_sdk_backend.Anthropic",
-        fake_anthropic,
-    )
-    _build_client()
-    assert captured == {"api_key": None, "auth_token": "oat-claude-code-abc"}
-
-
-def test_build_client_prefers_anthropic_auth_token_over_claude_code(monkeypatch):
-    _clear_auth_env(monkeypatch)
-    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "from-anthropic")
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "from-claude-code")
-    captured: dict = {}
-
-    def fake_anthropic(**kwargs):
-        captured.update(kwargs)
-        return MagicMock()
-
-    monkeypatch.setattr(
-        "main.core.contextual_prefix.backends.anthropic_sdk_backend.Anthropic",
-        fake_anthropic,
-    )
-    _build_client()
-    assert captured == {"api_key": None, "auth_token": "from-anthropic"}
+    assert captured == expected_kwargs
 
 
 # ---------- model_id ----------
@@ -175,11 +153,7 @@ def test_generate_returns_empty_when_response_is_malformed_json():
 def test_make_backend_returns_anthropic_sdk_backend(monkeypatch):
     _clear_auth_env(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-xyz")
-    # Stub Anthropic so we don't hit the network during construction.
-    monkeypatch.setattr(
-        "main.core.contextual_prefix.backends.anthropic_sdk_backend.Anthropic",
-        lambda **kwargs: MagicMock(),
-    )
+    _patch_anthropic(monkeypatch)
     backend = make_backend("anthropic:claude-haiku-4-5")
     assert isinstance(backend, AnthropicSdkBackend)
     assert backend.model_id == "anthropic:claude-haiku-4-5"

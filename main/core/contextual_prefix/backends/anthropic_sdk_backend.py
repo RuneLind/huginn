@@ -3,7 +3,7 @@ import os
 
 from anthropic import Anthropic
 
-from main.core.contextual_prefix.backends.ollama_backend import _parse_prefix_array
+from main.core.contextual_prefix.parsing import parse_prefix_array
 from main.core.contextual_prefix.prompts import PREFIX_SYSTEM_PROMPT, render_user_prompt
 
 
@@ -20,7 +20,7 @@ class AnthropicSdkBackend:
     catalog injection. ~7x faster wall time on Haiku per measured muninn PR #120
     A/B (same model, same prompt shape).
 
-    Auth resolution (process-lifetime cached):
+    Auth resolution (instance-cached client):
       1. ANTHROPIC_API_KEY        -> x-api-key header (production / shared)
       2. ANTHROPIC_AUTH_TOKEN     -> Authorization: Bearer (SDK-native OAuth var)
       3. CLAUDE_CODE_OAUTH_TOKEN  -> Authorization: Bearer (personal Max-subscription
@@ -47,6 +47,16 @@ class AnthropicSdkBackend:
     def generate(self, document_text: str, chunks: list[str]) -> list[str]:
         if not chunks:
             return []
+        # Each prefix is ~60-100 output tokens; budget ~80 to leave JSON-structure headroom.
+        # Past this, the JSON array would be silently truncated and ChunkPrefixer would
+        # drop all prefixes for the doc on the count mismatch. Warn so a future giant doc
+        # is visible in logs rather than mysteriously un-prefixed.
+        if len(chunks) > self.max_tokens // 80:
+            logger.warning(
+                "doc has %d chunks; near max_tokens=%d ceiling for the response. "
+                "Consider raising max_tokens or batching.",
+                len(chunks), self.max_tokens,
+            )
         user_prompt = render_user_prompt(document_text, chunks)
         try:
             response = self._client.messages.create(
@@ -69,14 +79,12 @@ class AnthropicSdkBackend:
                 getattr(usage, "cache_read_input_tokens", None),
                 getattr(usage, "cache_creation_input_tokens", None),
             )
-        return _parse_prefix_array(text, expected_count=len(chunks))
+        return parse_prefix_array(text, expected_count=len(chunks))
 
 
 def _build_client() -> Anthropic:
-    # Explicit env reads (not just Anthropic() with SDK auto-resolution) because
-    # CLAUDE_CODE_OAUTH_TOKEN is a Claude-Code convention the SDK doesn't know about.
-    # The other two we read explicitly so tests can assert "missing env -> RuntimeError"
-    # deterministically.
+    # CLAUDE_CODE_OAUTH_TOKEN is a Claude-Code convention the SDK doesn't auto-resolve;
+    # the explicit reads are what make that token usable here.
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if api_key:
         return Anthropic(api_key=api_key)
