@@ -271,6 +271,10 @@ def test_parse_prefix_array_tolerates_trailing_comma():
     assert _parse_prefix_array('[\n  "a",\n  "b",\n]', expected_count=2) == ["a", "b"]
 
 
+def test_parse_prefix_array_preserves_literal_comma_bracket_inside_string():
+    assert _parse_prefix_array('["hello,]", "world"]', expected_count=2) == ["hello,]", "world"]
+
+
 # ---------- Parallel prefixing (ChunkPrefixer is thread-safe via cache lock) ----------
 
 def test_ollama_backend_batches_chunks_to_bounded_calls(monkeypatch):

@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
-TRAILING_COMMA_RE = re.compile(r",(\s*[\]}])")
+TRAILING_COMMA_RE = re.compile(r",(\s*[\]}])\s*\Z")
 PARSE_FAILURE_DUMP_DIR = os.environ.get("CONTEXTUAL_PREFIX_DEBUG_DIR", "./data/contextual_caches/parse_failures")
 
 
