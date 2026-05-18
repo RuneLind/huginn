@@ -15,12 +15,46 @@ from main.runtime.knowledge_store import KnowledgeStore, get_store
 router = APIRouter()
 
 
+def _parse_edge_types(edge_types: str | None) -> set[str] | None:
+    if not edge_types:
+        return None
+    return {t.strip() for t in edge_types.split(",") if t.strip()}
+
+
+@router.get("/api/graph/{node_id:path}/subtree")
+def get_graph_subtree(
+    node_id: str,
+    depth: int = Query(2, ge=1, le=5),
+    direction: str = Query("incoming", pattern="^(incoming|outgoing|both)$"),
+    edge_types: str | None = Query(None, description="Comma-separated edge type names to include"),
+    max_nodes: int = Query(1000, ge=1, le=5000),
+    store: KnowledgeStore = Depends(get_store),
+):
+    """Return a BFS subtree from a node. For epics, defaults walk stories + subtasks in one call."""
+    if not store.graph:
+        raise HTTPException(status_code=503, detail="Knowledge graph not loaded")
+    subtree = store.graph.get_subtree(
+        node_id,
+        direction=direction,
+        edge_types=_parse_edge_types(edge_types),
+        max_depth=depth,
+        max_nodes=max_nodes,
+    )
+    if not subtree:
+        raise HTTPException(status_code=404, detail=f"Node '{node_id}' not found")
+    return subtree
+
+
 @router.get("/api/graph/{node_id:path}")
-def get_graph_node(node_id: str, store: KnowledgeStore = Depends(get_store)):
+def get_graph_node(
+    node_id: str,
+    edge_types: str | None = Query(None, description="Comma-separated edge type names to include"),
+    store: KnowledgeStore = Depends(get_store),
+):
     """Inspect a knowledge graph node and its relationships."""
     if not store.graph:
         raise HTTPException(status_code=503, detail="Knowledge graph not loaded")
-    detail = store.graph.get_node_detail(node_id)
+    detail = store.graph.get_node_detail(node_id, edge_types=_parse_edge_types(edge_types))
     if not detail:
         raise HTTPException(status_code=404, detail=f"Node '{node_id}' not found")
     return detail
