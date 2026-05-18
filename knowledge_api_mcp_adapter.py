@@ -471,28 +471,36 @@ def list_collections() -> str:
     return "\n".join(lines)
 
 
-def get_graph_node(node_id: str) -> str:
-    """Inspect a knowledge graph node and its relationships.
-
-    Use this to explore BUC/SED/Article/Forordning/Epic/Issue entities and their connections.
-    Node ID format: buc:LA_BUC_01, sed:A003, artikkel:13, forordning:883/2004, epic:PROJECT-6079, issue:PROJECT-1234
-
-    Returns the node's type, label, properties, and all incoming/outgoing edges.
-    """
-    try:
-        resp = _api_get(f"/api/graph/{node_id}")
-        resp.raise_for_status()
-        data = resp.json()
-    except httpx.ConnectError:
+def _format_graph_error(e: Exception, node_id: str) -> str:
+    if isinstance(e, httpx.ConnectError):
         return f"Knowledge API server is not running at {API_URL}."
-    except httpx.HTTPStatusError as e:
+    if isinstance(e, httpx.HTTPStatusError):
         if e.response.status_code == 404:
             return f"Node '{node_id}' not found in graph."
         if e.response.status_code == 503:
             return "Knowledge graph not loaded on the server."
         return f"API returned {e.response.status_code}: {e.response.text}"
+    return f"Error calling Knowledge API: {e}"
+
+
+def get_graph_node(node_id: str, edge_types: str | None = None) -> str:
+    """Inspect a knowledge graph node and its relationships.
+
+    Use this to explore BUC/SED/Article/Forordning/Epic/Issue entities and their connections.
+    Node ID format: buc:LA_BUC_01, sed:A003, artikkel:13, forordning:883/2004, epic:PROJECT-6079, issue:PROJECT-1234
+
+    edge_types: optional comma-separated edge type names to include (e.g. "tilhører_epic,er_subtask_av").
+    When omitted, all edges are returned.
+
+    Returns the node's type, label, properties, and incoming/outgoing edges.
+    """
+    params = {"edge_types": edge_types} if edge_types else None
+    try:
+        resp = _api_get(f"/api/graph/{node_id}", params=params)
+        resp.raise_for_status()
+        data = resp.json()
     except Exception as e:
-        return f"Error calling Knowledge API: {e}"
+        return _format_graph_error(e, node_id)
 
     parts = [f"**{data['label']}** ({data['type']})"]
 
@@ -510,6 +518,59 @@ def get_graph_node(node_id: str) -> str:
     if incoming:
         edge_lines = [f"  <--{e['type']}-- {e['source_label']}" for e in incoming]
         parts.append(f"Incoming ({len(incoming)}):\n" + "\n".join(edge_lines))
+
+    return "\n\n".join(parts)
+
+
+def get_graph_subtree(
+    node_id: str,
+    depth: int = 2,
+    direction: str = "incoming",
+    edge_types: str | None = None,
+) -> str:
+    """Fetch a multi-hop subtree from a graph node in one call.
+
+    Use this for full epic context: from an epic, default args walk stories + their subtasks
+    (2 hops via tilhører_epic + er_subtask_av) in one response — no N+1.
+
+    Node ID format: epic:PROJECT-6079, issue:PROJECT-1234, buc:LA_BUC_01, etc.
+    depth: BFS levels to traverse (1-5, default 2).
+    direction: "incoming" follows edges TO frontier (typical for epic→stories→subtasks),
+        "outgoing" follows edges FROM frontier, "both" follows either.
+    edge_types: optional comma-separated edge type names (e.g. "tilhører_epic,er_subtask_av")
+        to restrict traversal — strongly recommended for hierarchical walks to skip refererer_til noise.
+
+    Returns the root, full node list, edge list, and stats grouped by type.
+    """
+    params: dict[str, object] = {"depth": depth, "direction": direction}
+    if edge_types:
+        params["edge_types"] = edge_types
+    try:
+        resp = _api_get(f"/api/graph/{node_id}/subtree", params=params)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        return _format_graph_error(e, node_id)
+
+    stats = data.get("stats", {})
+    parts = [
+        f"**Subtree from {data['root']}** (depth={stats.get('max_depth')}, direction={stats.get('direction')})",
+        f"Nodes: {stats.get('node_count')} ({stats.get('by_node_type', {})})",
+        f"Edges: {stats.get('edge_count')} ({stats.get('by_edge_type', {})})",
+    ]
+
+    nodes_by_id = {n["id"]: n for n in data.get("nodes", [])}
+    node_lines = [f"  {n['id']}: {n['label']}" for n in data.get("nodes", []) if n["id"] != data["root"]]
+    if node_lines:
+        parts.append("Nodes:\n" + "\n".join(node_lines))
+
+    edge_lines = []
+    for e in data.get("edges", []):
+        src_label = nodes_by_id.get(e["source"], {}).get("label", e["source"])
+        tgt_label = nodes_by_id.get(e["target"], {}).get("label", e["target"])
+        edge_lines.append(f"  {src_label} --{e['type']}--> {tgt_label}")
+    if edge_lines:
+        parts.append("Edges:\n" + "\n".join(edge_lines))
 
     return "\n\n".join(parts)
 
@@ -635,6 +696,7 @@ if _has_notion:
 
 if _has_graph:
     mcp.add_tool(get_graph_node)
+    mcp.add_tool(get_graph_subtree)
 
 
 if __name__ == "__main__":

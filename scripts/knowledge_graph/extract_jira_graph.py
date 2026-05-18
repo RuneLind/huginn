@@ -87,7 +87,7 @@ def main():
 
     # Phase 1: Parse all files, collect metadata
     issues = {}  # issue_key -> {metadata, body, cross_refs}
-    epic_issues = defaultdict(list)  # epic_key -> [issue_key, ...]
+    epic_issues = defaultdict(set)  # epic_key -> {issue_key, ...} (dedup duplicate source files)
     epic_summaries = {}  # epic_key -> summary text
 
     md_files = list(source_dir.rglob("*.md"))
@@ -115,7 +115,7 @@ def main():
         }
 
         if epic_key:
-            epic_issues[epic_key].append(issue_key)
+            epic_issues[epic_key].add(issue_key)
             epic_summary = meta.get("epic_summary", "")
             if epic_summary and epic_key not in epic_summaries:
                 epic_summaries[epic_key] = epic_summary

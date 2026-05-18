@@ -10,6 +10,7 @@ import json
 import re
 from collections import defaultdict
 from pathlib import Path
+from typing import Literal
 
 
 ENTITY_PREFIX = "entity:"
@@ -383,8 +384,12 @@ class KnowledgeGraph:
 
     # --- Debug/inspection ---
 
-    def get_node_detail(self, node_id: str) -> dict | None:
-        """Return full node info with all neighbors. For debug endpoint."""
+    def get_node_detail(self, node_id: str, edge_types: set[str] | None = None) -> dict | None:
+        """Return full node info with all neighbors. For debug endpoint.
+
+        edge_types: optional set of edge type names; when given, only edges of those types
+        are included on the returned node.
+        """
         node = self.nodes.get(node_id)
         if not node:
             return None
@@ -392,10 +397,101 @@ class KnowledgeGraph:
             {"target": e["target"], "type": e["type"],
              "target_label": self.nodes.get(e["target"], {}).get("label", "")}
             for e in self.outgoing.get(node_id, [])
+            if not edge_types or e["type"] in edge_types
         ]
         incoming = [
             {"source": e["source"], "type": e["type"],
              "source_label": self.nodes.get(e["source"], {}).get("label", "")}
             for e in self.incoming.get(node_id, [])
+            if not edge_types or e["type"] in edge_types
         ]
         return {**node, "outgoing": outgoing, "incoming": incoming}
+
+    def get_subtree(
+        self,
+        root_id: str,
+        direction: Literal["incoming", "outgoing", "both"] = "incoming",
+        edge_types: set[str] | None = None,
+        max_depth: int = 2,
+        max_nodes: int = 1000,
+    ) -> dict | None:
+        """BFS subtree from root.
+
+        For an epic with the default args, walks incoming tilhører_epic + er_subtask_av to
+        return stories + subtasks in one response.
+
+        direction: "incoming" follows edges TO each frontier node, "outgoing" follows edges
+        FROM each frontier node, "both" follows either.
+
+        max_nodes caps the result so a hub node with depth=5/direction="both" can't
+        accidentally return the entire graph; stats.truncated is set when the cap is hit.
+
+        Returns live references to graph nodes/edges — callers must not mutate them.
+
+        Returns {root, nodes, edges, stats} or None if root_id is unknown.
+        """
+        if root_id not in self.nodes:
+            return None
+
+        visited_nodes = {root_id}
+        visited_edges: set[tuple[str, str, str]] = set()
+        out_nodes = [self.nodes[root_id]]
+        out_edges: list[dict] = []
+        frontier = [root_id]
+        truncated = False
+
+        for _ in range(max_depth):
+            if truncated:
+                break
+            next_frontier: list[str] = []
+            for node_id in frontier:
+                if direction == "incoming":
+                    candidate_edges: list[dict] = self.incoming.get(node_id, [])
+                elif direction == "outgoing":
+                    candidate_edges = self.outgoing.get(node_id, [])
+                else:
+                    candidate_edges = self.incoming.get(node_id, []) + self.outgoing.get(node_id, [])
+                for e in candidate_edges:
+                    if edge_types and e["type"] not in edge_types:
+                        continue
+                    edge_key = (e["source"], e["target"], e["type"])
+                    if edge_key in visited_edges:
+                        continue
+                    visited_edges.add(edge_key)
+                    out_edges.append(e)
+                    other_id = e["source"] if e["target"] == node_id else e["target"]
+                    if other_id not in visited_nodes:
+                        visited_nodes.add(other_id)
+                        if other_id in self.nodes:
+                            out_nodes.append(self.nodes[other_id])
+                        next_frontier.append(other_id)
+                        if len(out_nodes) >= max_nodes:
+                            truncated = True
+                            break
+                if truncated:
+                    break
+            if not next_frontier:
+                break
+            frontier = next_frontier
+
+        node_types: dict[str, int] = defaultdict(int)
+        for n in out_nodes:
+            node_types[n.get("type", "Unknown")] += 1
+        edge_type_counts: dict[str, int] = defaultdict(int)
+        for e in out_edges:
+            edge_type_counts[e["type"]] += 1
+
+        return {
+            "root": root_id,
+            "nodes": out_nodes,
+            "edges": out_edges,
+            "stats": {
+                "node_count": len(out_nodes),
+                "edge_count": len(out_edges),
+                "max_depth": max_depth,
+                "direction": direction,
+                "truncated": truncated,
+                "by_node_type": dict(node_types),
+                "by_edge_type": dict(edge_type_counts),
+            },
+        }

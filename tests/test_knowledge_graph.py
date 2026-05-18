@@ -331,3 +331,80 @@ class TestGraphCounts:
 
     def test_node_detail_unknown(self, sample_graph):
         assert sample_graph.get_node_detail("buc:LA_BUC_99") is None
+
+    def test_node_detail_filters_by_edge_type(self, sample_graph):
+        detail = sample_graph.get_node_detail("buc:LA_BUC_01", edge_types={"inneholder_sed"})
+        assert len(detail["outgoing"]) == 2
+        assert all(e["type"] == "inneholder_sed" for e in detail["outgoing"])
+
+
+@pytest.fixture
+def epic_subtree_graph(tmp_path):
+    """Epic with 2 stories; one story has 2 subtasks (mirrors the MELOSYS-7464 shape)."""
+    graph_data = {
+        "nodes": [
+            {"id": "epic:E-1", "type": "Epic", "label": "E-1: Root epic", "properties": {}},
+            {"id": "issue:S-1", "type": "Issue", "label": "S-1: Story 1", "properties": {"issue_type": "Historie"}},
+            {"id": "issue:S-2", "type": "Issue", "label": "S-2: Story 2", "properties": {"issue_type": "Historie"}},
+            {"id": "issue:T-1", "type": "Issue", "label": "T-1: Subtask 1", "properties": {"issue_type": "Deloppgave"}},
+            {"id": "issue:T-2", "type": "Issue", "label": "T-2: Subtask 2", "properties": {"issue_type": "Deloppgave"}},
+            {"id": "issue:OTHER", "type": "Issue", "label": "OTHER: Unrelated", "properties": {}},
+        ],
+        "edges": [
+            {"source": "issue:S-1", "target": "epic:E-1", "type": "tilhører_epic", "properties": {}},
+            {"source": "issue:S-2", "target": "epic:E-1", "type": "tilhører_epic", "properties": {}},
+            {"source": "issue:T-1", "target": "issue:S-1", "type": "er_subtask_av", "properties": {}},
+            {"source": "issue:T-2", "target": "issue:S-1", "type": "er_subtask_av", "properties": {}},
+            {"source": "issue:S-1", "target": "issue:S-2", "type": "refererer_til", "properties": {}},
+        ],
+    }
+    graph_file = tmp_path / "subtree.json"
+    graph_file.write_text(json.dumps(graph_data))
+    return KnowledgeGraph(graph_file)
+
+
+class TestGetSubtree:
+    def test_epic_depth_2_returns_stories_and_subtasks(self, epic_subtree_graph):
+        result = epic_subtree_graph.get_subtree("epic:E-1", direction="incoming", max_depth=2)
+        ids = {n["id"] for n in result["nodes"]}
+        assert ids == {"epic:E-1", "issue:S-1", "issue:S-2", "issue:T-1", "issue:T-2"}
+        assert result["stats"]["node_count"] == 5
+
+    def test_depth_1_only_returns_direct_neighbors(self, epic_subtree_graph):
+        result = epic_subtree_graph.get_subtree("epic:E-1", direction="incoming", max_depth=1)
+        ids = {n["id"] for n in result["nodes"]}
+        assert ids == {"epic:E-1", "issue:S-1", "issue:S-2"}
+
+    def test_edge_type_filter_excludes_refererer(self, epic_subtree_graph):
+        result = epic_subtree_graph.get_subtree(
+            "epic:E-1",
+            direction="incoming",
+            edge_types={"tilhører_epic", "er_subtask_av"},
+            max_depth=2,
+        )
+        edge_types = {e["type"] for e in result["edges"]}
+        assert edge_types == {"tilhører_epic", "er_subtask_av"}
+
+    def test_unknown_root_returns_none(self, epic_subtree_graph):
+        assert epic_subtree_graph.get_subtree("epic:DOES-NOT-EXIST") is None
+
+    def test_stats_count_edge_types(self, epic_subtree_graph):
+        result = epic_subtree_graph.get_subtree("epic:E-1", direction="incoming", max_depth=2)
+        assert result["stats"]["by_edge_type"]["tilhører_epic"] == 2
+        assert result["stats"]["by_edge_type"]["er_subtask_av"] == 2
+
+    def test_other_unrelated_node_not_included(self, epic_subtree_graph):
+        result = epic_subtree_graph.get_subtree("epic:E-1", direction="incoming", max_depth=5)
+        ids = {n["id"] for n in result["nodes"]}
+        assert "issue:OTHER" not in ids
+
+    def test_max_nodes_truncates_and_flags(self, epic_subtree_graph):
+        result = epic_subtree_graph.get_subtree(
+            "epic:E-1", direction="incoming", max_depth=5, max_nodes=2
+        )
+        assert result["stats"]["truncated"] is True
+        assert result["stats"]["node_count"] <= 2
+
+    def test_not_truncated_by_default(self, epic_subtree_graph):
+        result = epic_subtree_graph.get_subtree("epic:E-1", direction="incoming", max_depth=2)
+        assert result["stats"]["truncated"] is False
