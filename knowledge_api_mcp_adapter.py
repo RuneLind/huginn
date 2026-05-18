@@ -560,9 +560,20 @@ def get_graph_subtree(
     ]
 
     nodes_by_id = {n["id"]: n for n in data.get("nodes", [])}
-    node_lines = [f"  {n['id']}: {n['label']}" for n in data.get("nodes", []) if n["id"] != data["root"]]
+    node_lines = []
+    from_excluded_ids = []
+    for n in data.get("nodes", []):
+        if n["id"] == data["root"]:
+            continue
+        marker = " [stub: from_excluded]" if n.get("properties", {}).get("from_excluded") else ""
+        node_lines.append(f"  {n['id']}: {n['label']}{marker}")
+        if marker:
+            from_excluded_ids.append(n["id"])
     if node_lines:
-        parts.append("Nodes:\n" + "\n".join(node_lines))
+        header = "Nodes"
+        if from_excluded_ids:
+            header += f" ({len(from_excluded_ids)} stub-subtasks enriched from .excluded/)"
+        parts.append(f"{header}:\n" + "\n".join(node_lines))
 
     edge_lines = []
     for e in data.get("edges", []):
