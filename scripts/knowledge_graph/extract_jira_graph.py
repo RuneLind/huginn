@@ -122,6 +122,37 @@ def main():
 
     print(f"Parsed {len(issues)} issues, {len(epic_issues)} epics with children")
 
+    # Phase 1b: Enrich graph (not search corpus) with stub subtasks from .excluded/
+    # whose parent is in the active set. These were excluded by content-quality rules
+    # (low_word_count, empty_stub) but still carry structural value for epic-subtree
+    # traversal. Stub-from-excluded nodes get a `from_excluded` marker so consumers
+    # can distinguish sparse stubs from full active issues.
+    active_keys = set(issues.keys())
+    excluded_dir = source_dir / ".excluded"
+    enrichment_count = 0
+    if excluded_dir.exists():
+        for filepath in excluded_dir.rglob("*.md"):
+            if ".opencode" in filepath.parts:
+                continue
+            meta = read_frontmatter_from_path(str(filepath))
+            issue_key = meta.get("issue_key", "")
+            parent_key = meta.get("parent", "")
+            if not issue_key or issue_key in issues:
+                continue
+            if not parent_key or parent_key not in active_keys:
+                continue
+            issues[issue_key] = {
+                "summary": meta.get("title", meta.get("summary", "")),
+                "status": meta.get("status", ""),
+                "issue_type": meta.get("issue_type", ""),
+                "epic_link": "",  # subtasks don't carry epic_link by Jira design
+                "parent": parent_key,
+                "cross_refs": set(),  # skip body scan for stubs
+                "from_excluded": True,
+            }
+            enrichment_count += 1
+    print(f"Enriched with {enrichment_count} stub subtasks from .excluded/")
+
     # Phase 2: Build nodes
     nodes = []
     issue_keys_set = set(issues.keys())
@@ -141,14 +172,17 @@ def main():
 
     # Issue nodes
     for issue_key, data in issues.items():
+        props = {
+            "status": data["status"],
+            "issue_type": data["issue_type"],
+        }
+        if data.get("from_excluded"):
+            props["from_excluded"] = True
         nodes.append({
             "id": f"issue:{issue_key}",
             "type": "Issue",
             "label": f"{issue_key}: {data['summary']}" if data['summary'] else issue_key,
-            "properties": {
-                "status": data["status"],
-                "issue_type": data["issue_type"],
-            }
+            "properties": props,
         })
 
     # Phase 3: Build edges
@@ -210,6 +244,7 @@ def main():
     print(f"  Edges: {stats['total_edges']} ({', '.join(f'{t}: {c}' for t, c in edge_types.items())})")
     print(f"  Subtask edges: {subtask_count}")
     print(f"  Cross-references: {cross_ref_count}")
+    print(f"  Enriched stubs from .excluded/: {enrichment_count}")
 
 
 if __name__ == "__main__":
