@@ -204,7 +204,16 @@ def main():
 
     logging.info(f"Scanning {save_md_path} for .md files (minContentLength={min_content_length}, minWordCount={min_word_count})...")
 
-    manifest_entries = []
+    # Load the exclude manifest once. Pass 2b removes resurrected entries
+    # and Pass 3 appends new ones; we write a single time at the end.
+    manifest_path = os.path.join(excluded_path, "excluded_manifest.json")
+    manifest = []
+    if os.path.exists(manifest_path):
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+    manifest_changed = False
+
+    new_manifest_entries = []
     category_counts = {
         "empty_stub": 0, "minimal_content": 0, "low_word_count": 0,
         "too_old": 0,
@@ -254,13 +263,9 @@ def main():
     # kept subtasks. Without this, parents that failed an earlier word-count
     # check stay in .excluded/ forever, leaving subtask edges dangling.
     resurrected = 0
-    manifest_path = os.path.join(excluded_path, "excluded_manifest.json")
-    if preserved_parents and os.path.exists(manifest_path):
-        with open(manifest_path, "r", encoding="utf-8") as f:
-            existing_manifest = json.load(f)
-
+    if preserved_parents and manifest:
         kept_in_manifest = []
-        for entry in existing_manifest:
+        for entry in manifest:
             key = entry.get("issue_key", "")
             original_path = entry.get("original_path", "")
             if key and original_path and key in preserved_parents:
@@ -277,10 +282,9 @@ def main():
                     resurrected += 1
                     continue
             kept_in_manifest.append(entry)
-
-        if not args.dryRun and resurrected > 0:
-            with open(manifest_path, "w", encoding="utf-8") as f:
-                json.dump(kept_in_manifest, f, indent=2, ensure_ascii=False)
+        if resurrected > 0:
+            manifest = kept_in_manifest
+            manifest_changed = True
 
     # Pass 3 — act on exclusions, but override for parents of kept subtasks.
     for filepath, rel_path, metadata, category, reason in classifications:
@@ -297,10 +301,11 @@ def main():
             continue
 
         category_counts[category] = category_counts.get(category, 0) + 1
-        manifest_entries.append({
+        tag = f"{category}: {reason}" if category.startswith("noise_") else reason
+        new_manifest_entries.append({
             "issue_key": metadata.get("issue_key", ""),
             "modifiedTime": metadata.get("modifiedTime", metadata.get("updated", "")),
-            "reason": f"{category}: {reason}" if category.startswith("noise_") else reason,
+            "reason": tag,
             "original_path": rel_path,
             "title": metadata.get("title", metadata.get("summary", "")),
             "status": metadata.get("status", ""),
@@ -308,29 +313,24 @@ def main():
         })
 
         if args.dryRun:
-            tag = f"{category}: {reason}" if category.startswith("noise_") else reason
             logging.info(f"[DRY RUN] [{tag}] {rel_path}")
         else:
             dest = os.path.join(excluded_path, rel_path)
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             shutil.move(filepath, dest)
 
-    # Write manifest
-    if not args.dryRun and manifest_entries:
+    if new_manifest_entries:
+        existing_keys = {e["issue_key"] for e in manifest}
+        additions = [e for e in new_manifest_entries if e["issue_key"] not in existing_keys]
+        if additions:
+            manifest = manifest + additions
+            manifest_changed = True
+
+    if not args.dryRun and manifest_changed:
         os.makedirs(excluded_path, exist_ok=True)
-        manifest_path = os.path.join(excluded_path, "excluded_manifest.json")
-
-        # Merge with existing manifest
-        existing = []
-        if os.path.exists(manifest_path):
-            with open(manifest_path, "r", encoding="utf-8") as f:
-                existing = json.load(f)
-            existing_keys = {e["issue_key"] for e in existing}
-            manifest_entries = existing + [e for e in manifest_entries if e["issue_key"] not in existing_keys]
-
         with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(manifest_entries, f, indent=2, ensure_ascii=False)
-        logging.info(f"Wrote manifest with {len(manifest_entries)} entries to {manifest_path}")
+            json.dump(manifest, f, indent=2, ensure_ascii=False)
+        logging.info(f"Wrote manifest with {len(manifest)} entries to {manifest_path}")
 
     # Clean up empty directories
     if not args.dryRun:
