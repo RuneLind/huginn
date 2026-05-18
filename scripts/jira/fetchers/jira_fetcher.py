@@ -116,6 +116,13 @@ class JiraFetcher:
 
         lines.append(f"epic_link: {self._yaml_value(epic_link)}")
         lines.append(f"epic_summary: {self._yaml_value(epic_summary)}")
+
+        parent = fields.get('parent') or {}
+        parent_key = parent.get('key', '')
+        parent_summary = parent.get('fields', {}).get('summary', '') if parent_key else ''
+        lines.append(f"parent: {self._yaml_value(parent_key)}")
+        lines.append(f"parent_summary: {self._yaml_value(parent_summary)}")
+
         lines.append(f"project: {project}")
         lines.append(f"url: {self._yaml_value(url)}")
         lines.append("---\n")
@@ -227,7 +234,7 @@ class JiraFetcher:
                         'maxResults': str(max_results),
                         'expand': 'renderedFields',
                         'fields': 'summary,description,status,issuetype,priority,created,updated,'
-                                  'assignee,reporter,labels,comment,customfield_13510',
+                                  'assignee,reporter,labels,comment,customfield_13510,parent',
                     }
                 )
 

@@ -102,6 +102,7 @@ def main():
 
         body = parse_body(str(filepath))
         epic_key = meta.get("epic_link", "")
+        parent_key = meta.get("parent", "")
         cross_refs = extract_cross_references(body, issue_key, epic_key)
 
         issues[issue_key] = {
@@ -109,6 +110,7 @@ def main():
             "status": meta.get("status", ""),
             "issue_type": meta.get("issue_type", ""),
             "epic_link": epic_key,
+            "parent": parent_key,
             "cross_refs": cross_refs,
         }
 
@@ -166,6 +168,14 @@ def main():
         if epic_key and f"epic:{epic_key}" in epic_node_ids:
             add_edge(f"issue:{issue_key}", f"epic:{epic_key}", "tilhører_epic")
 
+    # Subtask parent membership (Deloppgave -> parent Issue)
+    subtask_count = 0
+    for issue_key, data in issues.items():
+        parent_key = data["parent"]
+        if parent_key and parent_key in issue_keys_set:
+            add_edge(f"issue:{issue_key}", f"issue:{parent_key}", "er_subtask_av")
+            subtask_count += 1
+
     # Cross-references (only to issues that exist in the collection)
     cross_ref_count = 0
     for issue_key, data in issues.items():
@@ -198,6 +208,7 @@ def main():
     print(f"\nGraph written to {output_path}")
     print(f"  Nodes: {stats['total_nodes']} ({', '.join(f'{t}: {c}' for t, c in node_types.items())})")
     print(f"  Edges: {stats['total_edges']} ({', '.join(f'{t}: {c}' for t, c in edge_types.items())})")
+    print(f"  Subtask edges: {subtask_count}")
     print(f"  Cross-references: {cross_ref_count}")
 
 

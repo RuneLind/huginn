@@ -89,6 +89,45 @@ def match_type_pattern(issue_type, noise_patterns):
     return None
 
 
+def compute_exclusion(metadata, body, age_cutoff, noise_patterns,
+                      min_content_length, min_word_count):
+    """Classify a file against all exclusion rules.
+
+    Returns (category, reason) where reason is None if the file should be kept.
+    Pulled out of the main walk so we can run it in two passes — once to
+    determine tentative exclusions, then again to preserve parents-of-kept
+    subtasks before actually moving files.
+    """
+    if age_cutoff:
+        updated_str = metadata.get("modifiedTime", metadata.get("updated", ""))
+        if updated_str:
+            try:
+                updated_dt = datetime.fromisoformat(updated_str).replace(tzinfo=None)
+                if updated_dt < age_cutoff:
+                    return ("too_old", f"last updated {updated_str[:10]}")
+            except (ValueError, TypeError):
+                pass
+
+    reason = match_status_pattern(metadata.get("status", ""), noise_patterns)
+    if reason:
+        return ("noise_status", reason)
+    reason = match_type_pattern(metadata.get("issue_type", ""), noise_patterns)
+    if reason:
+        return ("noise_type", reason)
+    reason = match_title_pattern(metadata.get("title", ""), noise_patterns)
+    if reason:
+        return ("noise_title", reason)
+    reason = match_label_pattern(metadata.get("labels", ""), noise_patterns)
+    if reason:
+        return ("noise_label", reason)
+
+    body_reason = classify_body(body, min_content_length, min_word_count)
+    if body_reason:
+        return (body_reason, body_reason)
+
+    return (None, None)
+
+
 def classify_body(body_text, min_content_length, min_word_count=0):
     """Classify body content. Returns reason string or None if content is fine."""
     stripped = body_text.strip()
@@ -165,13 +204,29 @@ def main():
 
     logging.info(f"Scanning {save_md_path} for .md files (minContentLength={min_content_length}, minWordCount={min_word_count})...")
 
-    manifest_entries = []
+    # Load the exclude manifest once. Pass 2b removes resurrected entries
+    # and Pass 3 appends new ones; we write a single time at the end.
+    manifest_path = os.path.join(excluded_path, "excluded_manifest.json")
+    manifest = []
+    if os.path.exists(manifest_path):
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+    manifest_changed = False
+
+    new_manifest_entries = []
     category_counts = {
         "empty_stub": 0, "minimal_content": 0, "low_word_count": 0,
         "too_old": 0,
         "noise_status": 0, "noise_title": 0, "noise_label": 0, "noise_type": 0,
+        "preserved_as_parent": 0,
     }
     total_scanned = 0
+
+    # Pass 1 — classify every file and remember its tentative verdict.
+    # We need a second pass to preserve issues whose key is referenced as
+    # `parent` by another kept file (subtask → parent), so the knowledge
+    # graph keeps its er_subtask_av edges intact.
+    classifications = []  # list of (filepath, rel_path, metadata, category, reason)
 
     for root, dirs, files in os.walk(save_md_path):
         dirs[:] = [d for d in dirs if d != EXCLUDED_DIR]
@@ -190,100 +245,92 @@ def main():
                 logging.warning(f"Could not parse {filepath}: {e}")
                 continue
 
-            # Check age cutoff (updated/modifiedTime too old)
-            if age_cutoff:
-                updated_str = metadata.get("modifiedTime", metadata.get("updated", ""))
-                if updated_str:
-                    try:
-                        updated_dt = datetime.fromisoformat(updated_str)
-                        # Strip timezone for comparison
-                        updated_dt = updated_dt.replace(tzinfo=None)
-                        if updated_dt < age_cutoff:
-                            reason = f"last updated {updated_str[:10]}"
-                            category = "too_old"
-                            category_counts[category] += 1
-                            manifest_entries.append({
-                                "issue_key": metadata.get("issue_key", ""),
-                                "modifiedTime": metadata.get("modifiedTime", metadata.get("updated", "")),
-                                "reason": f"too_old: {reason}",
-                                "original_path": rel_path,
-                                "title": metadata.get("title", metadata.get("summary", "")),
-                                "status": metadata.get("status", ""),
-                                "project": metadata.get("project", ""),
-                            })
-                            if args.dryRun:
-                                logging.info(f"[DRY RUN] [too_old: {reason}] {rel_path}")
-                            else:
-                                dest = os.path.join(excluded_path, rel_path)
-                                os.makedirs(os.path.dirname(dest), exist_ok=True)
-                                shutil.move(filepath, dest)
-                            continue
-                    except (ValueError, TypeError):
-                        pass
+            category, reason = compute_exclusion(
+                metadata, body, age_cutoff, noise_patterns,
+                min_content_length, min_word_count,
+            )
+            classifications.append((filepath, rel_path, metadata, category, reason))
 
-            # Check status-based noise
-            reason = match_status_pattern(metadata.get("status", ""), noise_patterns)
-            if reason:
-                category = "noise_status"
-            else:
-                # Check type-based noise
-                reason = match_type_pattern(metadata.get("issue_type", ""), noise_patterns)
-                if reason:
-                    category = "noise_type"
-                else:
-                    # Check title-based noise
-                    reason = match_title_pattern(metadata.get("title", ""), noise_patterns)
-                    if reason:
-                        category = "noise_title"
+    # Pass 2 — collect parent keys referenced by files that survive Pass 1.
+    preserved_parents = set()
+    for _, _, metadata, _, reason in classifications:
+        if reason is None:
+            parent_key = (metadata.get("parent", "") or "").strip()
+            if parent_key:
+                preserved_parents.add(parent_key)
+
+    # Pass 2b — resurrect previously-excluded parents that are referenced by
+    # kept subtasks. Without this, parents that failed an earlier word-count
+    # check stay in .excluded/ forever, leaving subtask edges dangling.
+    resurrected = 0
+    if preserved_parents and manifest:
+        kept_in_manifest = []
+        for entry in manifest:
+            key = entry.get("issue_key", "")
+            original_path = entry.get("original_path", "")
+            if key and original_path and key in preserved_parents:
+                src_path = os.path.join(excluded_path, original_path)
+                dest_path = os.path.join(save_md_path, original_path)
+                if os.path.exists(src_path) and not os.path.exists(dest_path):
+                    if args.dryRun:
+                        logging.info(
+                            f"[DRY RUN] [RESURRECT as parent-of-kept-subtask] {original_path}"
+                        )
                     else:
-                        # Check label-based noise
-                        reason = match_label_pattern(metadata.get("labels", ""), noise_patterns)
-                        if reason:
-                            category = "noise_label"
-                        else:
-                            # Content-based classification
-                            reason = classify_body(body, min_content_length, min_word_count)
-                            category = reason
+                        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                        shutil.move(src_path, dest_path)
+                    resurrected += 1
+                    continue
+            kept_in_manifest.append(entry)
+        if resurrected > 0:
+            manifest = kept_in_manifest
+            manifest_changed = True
 
-            if reason is None:
-                continue
+    # Pass 3 — act on exclusions, but override for parents of kept subtasks.
+    for filepath, rel_path, metadata, category, reason in classifications:
+        if reason is None:
+            continue
 
-            category_counts[category] = category_counts.get(category, 0) + 1
-
-            manifest_entries.append({
-                "issue_key": metadata.get("issue_key", ""),
-                "modifiedTime": metadata.get("modifiedTime", metadata.get("updated", "")),
-                "reason": f"{category}: {reason}" if category.startswith("noise_") else reason,
-                "original_path": rel_path,
-                "title": metadata.get("title", metadata.get("summary", "")),
-                "status": metadata.get("status", ""),
-                "project": metadata.get("project", ""),
-            })
-
+        issue_key = (metadata.get("issue_key", "") or "").strip()
+        if issue_key and issue_key in preserved_parents:
+            category_counts["preserved_as_parent"] += 1
             if args.dryRun:
-                tag = f"{category}: {reason}" if category.startswith("noise_") else reason
-                logging.info(f"[DRY RUN] [{tag}] {rel_path}")
-            else:
-                dest = os.path.join(excluded_path, rel_path)
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
-                shutil.move(filepath, dest)
+                logging.info(
+                    f"[DRY RUN] [PRESERVED as parent (would have been {category}: {reason})] {rel_path}"
+                )
+            continue
 
-    # Write manifest
-    if not args.dryRun and manifest_entries:
+        category_counts[category] = category_counts.get(category, 0) + 1
+        tag = f"{category}: {reason}" if category.startswith("noise_") else reason
+        new_manifest_entries.append({
+            "issue_key": metadata.get("issue_key", ""),
+            "modifiedTime": metadata.get("modifiedTime", metadata.get("updated", "")),
+            "reason": tag,
+            "original_path": rel_path,
+            "title": metadata.get("title", metadata.get("summary", "")),
+            "status": metadata.get("status", ""),
+            "project": metadata.get("project", ""),
+        })
+
+        if args.dryRun:
+            logging.info(f"[DRY RUN] [{tag}] {rel_path}")
+        else:
+            dest = os.path.join(excluded_path, rel_path)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            shutil.move(filepath, dest)
+
+    if new_manifest_entries:
+        existing_keys = {e["issue_key"] for e in manifest}
+        additions = [e for e in new_manifest_entries if e["issue_key"] not in existing_keys]
+        if additions:
+            manifest = manifest + additions
+            manifest_changed = True
+
+    if not args.dryRun and manifest_changed:
         os.makedirs(excluded_path, exist_ok=True)
-        manifest_path = os.path.join(excluded_path, "excluded_manifest.json")
-
-        # Merge with existing manifest
-        existing = []
-        if os.path.exists(manifest_path):
-            with open(manifest_path, "r", encoding="utf-8") as f:
-                existing = json.load(f)
-            existing_keys = {e["issue_key"] for e in existing}
-            manifest_entries = existing + [e for e in manifest_entries if e["issue_key"] not in existing_keys]
-
         with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(manifest_entries, f, indent=2, ensure_ascii=False)
-        logging.info(f"Wrote manifest with {len(manifest_entries)} entries to {manifest_path}")
+            json.dump(manifest, f, indent=2, ensure_ascii=False)
+        logging.info(f"Wrote manifest with {len(manifest)} entries to {manifest_path}")
 
     # Clean up empty directories
     if not args.dryRun:
@@ -301,11 +348,19 @@ def main():
                     pass
 
     action = "Would move" if args.dryRun else "Moved"
-    total_excluded = sum(category_counts.values())
+    preserved = category_counts.get("preserved_as_parent", 0)
+    total_excluded = sum(v for k, v in category_counts.items() if k != "preserved_as_parent")
     parts = [f"{k}={v}" for k, v in category_counts.items() if v > 0]
+    suffix_bits = []
+    if preserved:
+        suffix_bits.append(f"preserved {preserved} parents-of-kept-subtasks")
+    if resurrected:
+        verb = "would resurrect" if args.dryRun else "resurrected"
+        suffix_bits.append(f"{verb} {resurrected} from .excluded/")
+    suffix = f" ({'; '.join(suffix_bits)})" if suffix_bits else ""
     logging.info(
         f"Done. Scanned {total_scanned} files. "
-        f"{action} {total_excluded}: {', '.join(parts) if parts else 'none'}"
+        f"{action} {total_excluded}: {', '.join(parts) if parts else 'none'}{suffix}"
     )
 
 
