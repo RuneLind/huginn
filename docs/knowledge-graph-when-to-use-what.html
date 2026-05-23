@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Knowledge Graphs in Huginn — When to Use What</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <style>
+        :root {
+            --bg: #f8f9fa;
+            --bg-card: #ffffff;
+            --text: #1a1a2e;
+            --text-secondary: #555;
+            --text-muted: #666;
+            --text-dim: #888;
+            --accent: #6c63ff;
+            --border: #e9ecef;
+            --bg-code: #f1f3f5;
+            --bg-example: #f8f9fa;
+            --bg-th: #f1f3f5;
+            --shadow: rgba(0,0,0,0.08);
+            --stat-bg: linear-gradient(135deg, #6c63ff15, #6c63ff05);
+        }
+        [data-theme="dark"] {
+            --bg: #0a0a0f;
+            --bg-card: #141420;
+            --text: #e4e4ef;
+            --text-secondary: #b0b0c0;
+            --text-muted: #8888a0;
+            --text-dim: #6a6a80;
+            --accent: #8b7fff;
+            --border: #2a2a3a;
+            --bg-code: #1e1e2e;
+            --bg-example: #12121e;
+            --bg-th: #1a1a2a;
+            --shadow: rgba(0,0,0,0.3);
+            --stat-bg: linear-gradient(135deg, #6c63ff20, #6c63ff08);
+        }
+        body {
+            font-family: -apple-system, system-ui, 'Segoe UI', sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.7;
+            transition: background 0.3s, color 0.3s;
+        }
+        h1 { text-align: center; color: var(--text); margin-bottom: 8px; font-size: 2em; }
+        .subtitle { text-align: center; color: var(--text-muted); margin-bottom: 40px; font-size: 1.1em; }
+        h2 { color: var(--text); border-bottom: 2px solid var(--accent); padding-bottom: 6px; margin-top: 40px; }
+        h3 { color: var(--text); margin-top: 28px; }
+        h4 { color: var(--text); margin-top: 22px; margin-bottom: 8px; }
+        a { color: var(--accent); }
+        .card {
+            background: var(--bg-card);
+            border-radius: 10px;
+            padding: 28px;
+            margin: 20px 0;
+            box-shadow: 0 2px 8px var(--shadow);
+            transition: background 0.3s;
+        }
+        .card h2 { margin-top: 0; }
+        .mermaid { display: flex; justify-content: center; }
+        table { width: 100%; border-collapse: collapse; margin: 16px 0; }
+        th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+        th { background: var(--bg-th); font-weight: 600; }
+        code { background: var(--bg-code); padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+        pre { background: var(--bg-code); padding: 16px; border-radius: 8px; overflow-x: auto; }
+        pre code { background: none; padding: 0; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin: 20px 0; }
+        .stat-card { background: var(--stat-bg); border: 1px solid #6c63ff30; border-radius: 10px; padding: 16px; text-align: center; }
+        .stat-card .number { font-size: 2em; font-weight: 700; color: var(--accent); }
+        .stat-card .label { font-size: 0.85em; color: var(--text-muted); }
+        .example { background: var(--bg-example); border-left: 4px solid var(--accent); padding: 16px; margin: 16px 0; border-radius: 0 8px 8px 0; }
+        .example .query { font-weight: 600; color: var(--accent); }
+        .example .result { color: var(--text-secondary); margin-top: 8px; }
+        /* Callout boxes (markdown blockquotes) */
+        .note { background: var(--bg-example); border-left: 4px solid var(--accent); padding: 16px; margin: 16px 0; border-radius: 0 8px 8px 0; color: var(--text-secondary); }
+        .note.info { border-left-color: #1565c0; }
+        .note.warn { border-left-color: #e0a800; }
+        .note.danger { border-left-color: #c62828; }
+        .note p { margin: 0.4em 0; }
+        .note p:first-child { margin-top: 0; }
+        .note p:last-child { margin-bottom: 0; }
+        .highlight { background: #6c63ff20; padding: 2px 6px; border-radius: 4px; font-weight: 500; }
+        .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        @media (max-width: 768px) { .two-col { grid-template-columns: 1fr; } }
+        .img-container { text-align: center; margin: 20px 0; }
+        .img-container img { max-width: 100%; border-radius: 10px; box-shadow: 0 4px 16px rgba(0,0,0,0.15); }
+        .caption { text-align: center; font-size: 0.85em; color: var(--text-dim); margin-top: 8px; font-style: italic; }
+
+        /* Theme toggle */
+        .theme-toggle {
+            position: fixed;
+            top: 16px;
+            right: 16px;
+            background: var(--bg-card);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 6px 14px;
+            cursor: pointer;
+            font-size: 14px;
+            z-index: 100;
+            box-shadow: 0 2px 8px var(--shadow);
+            transition: background 0.3s, color 0.3s;
+        }
+        .theme-toggle:hover { border-color: var(--accent); }
+    </style>
+</head>
+<body>
+
+<button class="theme-toggle" id="theme-toggle" title="Toggle dark/light mode">&#9790; Dark</button>
+
+<h1>Knowledge Graphs in Huginn — When to Use What</h1>
+<p class="subtitle">Two independent knowledge graphs, plus a deterministic third — which fits which collection, and how to operate each</p>
+
+<div class="card">
+    <p>Huginn search can be enriched by <strong>two independent kinds of knowledge graph</strong>. They serve different collections in different ways. Confusing them — particularly running the LLM extractor on a hand-curated wiki collection — is the most common operational mistake. This doc maps which graph fits which collection and how to operate each.</p>
+
+    <div class="note info">
+        <p><strong>Prerequisite reading</strong>: <a href="HOW_IT_WORKS.md"><code>HOW_IT_WORKS.md</code></a> explains the FAISS+BM25 pipeline that the graph layer sits on top of. The graph is a <em>search-time enrichment</em>, not part of indexing.</p>
+    </div>
+</div>
+
+<div class="card">
+    <h2>TL;DR</h2>
+    <table>
+        <tr><th>Collection style</th><th>Graph type</th><th>Built by</th><th>Run the extractor?</th></tr>
+        <tr>
+            <td>Hand-curated wiki (markdown with <code>[[wikilinks]]</code> + entity pages)</td>
+            <td>Wikilinks</td>
+            <td>Human or LLM-as-maintainer</td>
+            <td><strong>No.</strong> The wiki <em>is</em> the graph.</td>
+        </tr>
+        <tr>
+            <td>Raw chunks (Confluence, Jira, Notion, YouTube transcripts, X timeline, Claude sessions)</td>
+            <td>LLM-extracted entity graph</td>
+            <td><code>extract_entities_llm.py</code> calling local Ollama</td>
+            <td><strong>Yes.</strong> Without it, the only structure is FAISS+BM25 over raw text.</td>
+        </tr>
+    </table>
+</div>
+
+<div class="card">
+    <h2>The two graphs</h2>
+    <div class="mermaid">
+flowchart TB
+    subgraph G1[" Graph #1: Wikilinks (hand-curated) "]
+        WIKI[Wiki .md files]
+        ENT[entities/*.md]
+        LINKS["[[page]] references"]
+        WIKI -.contains.-> LINKS
+        WIKI -.indexes.-> ENT
+    end
+
+    subgraph G2[" Graph #2: LLM-extracted entity graph "]
+        SCRIPT[extract_entities_llm.py]
+        OLLAMA[Local Ollama LLM]
+        JSON1["youtube-summaries_llm_graph.json"]
+        JSON2["jira-issues_llm_graph.json"]
+        JSON3["capra-notion_llm_graph.json"]
+        SCRIPT -->|prompts| OLLAMA
+        OLLAMA -->|entities + rels| SCRIPT
+        SCRIPT --> JSON1
+        SCRIPT --> JSON2
+        SCRIPT --> JSON3
+    end
+
+    WIKICOLL[(wiki collection)] --> G1
+    YT[(youtube-summaries)] --> G2
+    JIRA[(jira-issues)] --> G2
+    CAPRA[(capra-notion)] --> G2
+    CONF[(melosys-confluence)] --> G2
+
+    G1 -.queried at search time.-> SEARCH[Huginn search]
+    G2 -.queried at search time.-> SEARCH
+
+    style G1 fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    style G2 fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    style WIKICOLL fill:#c8e6c9
+    style SEARCH fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    </div>
+
+    <p>Key facts:</p>
+    <ul>
+        <li>The two graphs are <strong>independent</strong> — they don't share data, don't compete, and serve different collections.</li>
+        <li><strong>Wikilinks live inside the <code>.md</code> files</strong> as <code>[[page]]</code> references. There is no separate file. The wiki <em>is</em> the graph. See <a href="wiki-collection-pattern.md"><code>wiki-collection-pattern.md</code></a> for how to structure such a collection.</li>
+        <li><strong>LLM-extracted graphs live as <code>&lt;collection&gt;_llm_graph.json</code></strong> alongside <code>&lt;collection&gt;_llm_graph.cache.json</code>, generated by <code>scripts/knowledge_graph/extract_entities_llm.py</code>.</li>
+        <li>Both graphs are <strong>consumed at search time</strong>, not at ingest time. They enrich queries (expansion) and annotate results (entity context).</li>
+    </ul>
+
+    <div class="note info">
+        <p>&#8505;&#65039; There is actually a <strong>third kind</strong>: deterministic <em>structural</em> graphs built from structured fields — not prose, no LLM. The Jira epic/parent graph and the EESSI domain graph. They are easy to overlook because they're cheap and silent. See <a href="#the-third-kind">The third kind: deterministic structural graphs</a> below.</p>
+    </div>
+</div>
+
+<div class="card">
+    <h2>The asymmetry — which collections get which</h2>
+    <div class="mermaid">
+flowchart LR
+    Q{Collection<br/>type?}
+    Q -->|Curated wiki<br/>with wikilinks| HAND[Hand-curated wikilinks<br/>+ entity pages]
+    Q -->|Raw chunks<br/>no wikilinks| LLM[Run LLM extractor]
+
+    HAND --> WK[wiki collection]
+    HAND --> NW[nav-wiki collection]
+
+    LLM --> J1[capra-notion]
+    LLM --> J2[melosys-confluence]
+    LLM --> J3[jira-issues]
+    LLM --> J4[youtube-summaries]
+    LLM --> J5[claude-sessions]
+    LLM --> J6[x-feed]
+
+    style HAND fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px
+    style LLM fill:#bbdefb,stroke:#1565c0,stroke-width:2px
+    style WK fill:#e8f5e9
+    style NW fill:#e8f5e9
+    </div>
+
+    <h3>Why the asymmetry?</h3>
+    <table>
+        <tr><th>Collection</th><th>Run extractor?</th><th>Why</th></tr>
+        <tr>
+            <td><code>wiki</code>, <code>nav-wiki</code> (any LLM-Wiki-Pattern collection)</td>
+            <td><strong>No</strong></td>
+            <td>Already a hand-curated knowledge graph. Running the LLM extractor would add <strong>redundant entities</strong> and risk <strong>naming drift</strong> — e.g. <code>Boris</code> vs <code>Boris Cherny</code> vs <code>Boris (Anthropic)</code>. The wikilinks express the canonical relationships; the entity pages canonicalize the names.</td>
+        </tr>
+        <tr>
+            <td><code>capra-notion</code>, <code>melosys-confluence-v3</code></td>
+            <td><strong>Yes</strong></td>
+            <td>Raw Notion / Confluence pages with no wikilinks. LLM graph is the only structured enrichment.</td>
+        </tr>
+        <tr>
+            <td><code>jira-issues</code></td>
+            <td><strong>Yes</strong></td>
+            <td>Raw Jira issue export. There's also a separate purpose-built <code>extract_jira_graph.py</code> for Jira-specific epic/cross-reference structure — the two graphs compose.</td>
+        </tr>
+        <tr>
+            <td><code>youtube-summaries</code>, <code>claude-sessions</code>, <code>x-feed</code></td>
+            <td><strong>Yes</strong></td>
+            <td>Raw transcripts / posts. Same logic.</td>
+        </tr>
+    </table>
+
+    <div class="note warn">
+        <p>&#9888;&#65039; <strong>The wiki-skip is a deliberate design choice, not a TODO.</strong> If a future operator (or a future LLM session) suggests <em>"wiki collection has never had a graph extracted, let's run it"</em>, that suggestion is wrong. The asymmetry is the point.</p>
+    </div>
+</div>
+
+<div class="card">
+    <h2>The script flow</h2>
+    <div class="mermaid">
+sequenceDiagram
+    participant User
+    participant Script as extract_entities_llm.py
+    participant Coll as "data/collections/COLL/"
+    participant Cache as "COLL_llm_graph.cache.json"
+    participant Ollama as "Ollama (local LLM)"
+    participant Out as "COLL_llm_graph.json"
+
+    User->>Script: uv run script --collection COLL
+    Script->>Coll: Read indexed documents
+
+    loop For each document
+        Script->>Cache: Already processed?
+        alt Cached
+            Cache-->>Script: Return cached entities
+        else Not cached
+            Script->>Ollama: Extract entities + relationships (JSON prompt)
+            Ollama-->>Script: entities + relationships
+            Script->>Cache: Store extraction
+        end
+    end
+
+    Script->>Out: Aggregate + write final graph JSON
+    Script->>User: Done. N docs processed, M from cache.
+
+    Note over Cache: Cache is keyed by chunk content,<br/>NOT by model. Model swap requires<br/>deleting cache to force re-run.
+    Note over Out: Auto-routes to private sub-repos<br/>per huginn/CLAUDE.md
+    </div>
+
+    <h3>Script details</h3>
+    <ul>
+        <li><strong>Entry point</strong>: <code>scripts/knowledge_graph/extract_entities_llm.py</code></li>
+        <li><strong>Default model</strong>: <code>qwen3.6:35b-a3b-coding-nvfp4</code> (configurable via <code>--model</code>)</li>
+        <li><strong>Ollama endpoint</strong>: <code>http://localhost:11434/api/chat</code> with <code>format: "json"</code> and <code>temperature: 0</code></li>
+        <li><strong>Per-doc prompt budget</strong>: first 3000 characters of the document — keeps per-call cost bounded</li>
+        <li><strong>Entity extraction limits</strong>: 5–15 per document; types restricted to <code>Technology | Person | Concept | Organization | Product</code></li>
+        <li><strong>Relationship types</strong>: <code>uses | built_by | part_of | related_to | alternative_to | created_by | improves</code></li>
+        <li><strong>Cache write frequency</strong>: after each doc — safe to interrupt; resume picks up where you left off</li>
+        <li><strong>Auto-routing</strong>: outputs land in collection-appropriate private sub-repos per <code>huginn/CLAUDE.md</code> (NAV collections → <code>huginn-nav/scripts/knowledge_graph/</code>, others → <code>huginn-jarvis/scripts/knowledge_graph/</code>); the API server auto-loads all <code>*_llm_graph.json</code> from those paths at startup</li>
+    </ul>
+
+    <div class="note warn">
+        <p>&#9888;&#65039; <strong>Cache invalidation on model swap is not automatic.</strong> The cache file stores <code>{doc_id: entities}</code> — it doesn't track which model produced the entities. If you swap models and re-run, the script will <em>skip</em> every cached document and only call the new model on previously-uncached ones. Result: a hybrid graph mixing two models' output. <strong>Delete the <code>*_llm_graph.cache.json</code> files before re-running with a different model.</strong></p>
+    </div>
+</div>
+
+<div class="card" id="the-third-kind">
+    <h2>The third kind: deterministic structural graphs (no LLM)</h2>
+    <p>Besides the two graphs above, Huginn loads <strong>deterministic structural graphs</strong> built from <em>structured fields</em>, not prose. No model is involved — they transcribe relationships that already exist explicitly in the source. Two exist today:</p>
+
+    <table>
+        <tr><th>Graph</th><th>File</th><th>Built by</th><th>Contents</th></tr>
+        <tr>
+            <td><strong>Jira structure</strong></td>
+            <td><code>jira_graph.json</code></td>
+            <td><code>scripts/knowledge_graph/extract_jira_graph.py</code></td>
+            <td>issue / epic nodes (+ subtasks); <code>tilhører_epic</code> and <code>refererer_til</code> edges</td>
+        </tr>
+        <tr>
+            <td><strong>EESSI domain</strong></td>
+            <td><code>melosys_graph.json</code></td>
+            <td><code>huginn-nav/scripts/knowledge_graph/extract_melosys_graph.py</code></td>
+            <td>BUC / SED / Artikkel / Forordning (~71 nodes, 135 edges)</td>
+        </tr>
+    </table>
+
+    <h3>Where the structure comes from — the fetcher, not a model</h3>
+    <p>The Jira graph's source is <strong>Jira itself</strong>. When the fetcher downloads an issue, <code>jira_fetcher._build_frontmatter()</code> maps Jira's own structured fields <strong>1:1</strong> into YAML frontmatter — no inference, no LLM:</p>
+
+    <div class="mermaid">
+flowchart LR
+    JIRA["Jira issue<br/>(fields.* via REST)"] -->|"_build_frontmatter()<br/>1:1 field copy"| FM["YAML frontmatter<br/>(epic_link, parent, issue_type…)"]
+    FM -->|"extract_jira_graph.py<br/>deterministic parse"| G["jira_graph.json<br/>(nodes + edges)"]
+    G -->|"env var JIRA_GRAPH_PATH"| SRV["In-memory graph<br/>(at server startup)"]
+    </div>
+
+    <p>What <code>extract_jira_graph.py</code> reads from the frontmatter, and what it becomes:</p>
+    <table>
+        <tr><th>Frontmatter field (copied from Jira)</th><th>Becomes in the graph</th></tr>
+        <tr><td><code>issue_key</code></td><td>an issue node <code>issue:MELOSYS-301</code> (carries status, issue_type)</td></tr>
+        <tr><td><code>epic_link</code></td><td>an epic node + a <code>tilhører_epic</code> edge (issue → epic)</td></tr>
+        <tr><td><code>parent</code></td><td>subtask → parent link; also pulls in <code>from_excluded</code> subtask stubs whose parent is in the active set</td></tr>
+        <tr><td>issue keys found in the <strong>body</strong> (regex <code>[A-Z][A-Z0-9]+-\d+</code>)</td><td><code>refererer_til</code> edges (issue → issue)</td></tr>
+    </table>
+
+    <p>So the relationships in the graph are exactly the ones a saksbehandler/utvikler already expressed in Jira — linking an issue to its epic, setting its type and parent. The builder just transcribes them deterministically. This is the key contrast with the LLM graph, which <em>infers</em> entities and relations from free text and is therefore probabilistic.</p>
+
+    <div class="note">
+        <p>The EESSI graph (<code>melosys_graph.json</code>) is the same idea taken further: a <strong>hand-curated, near-static</strong> map of EU-regulation structure — which SEDs belong to which BUC, which articles govern what. It is rebuilt rarely, only when the EESSI domain model changes, never from daily activity.</p>
+    </div>
+
+    <h3>Loading &amp; maintenance</h3>
+    <ul>
+        <li><strong>Loaded via env vars</strong>, not the <code>*_llm_graph.json</code> auto-glob: <code>KNOWLEDGE_GRAPH_PATH</code> → <code>melosys_graph.json</code>, <code>JIRA_GRAPH_PATH</code> → <code>jira_graph.json</code> (set in the personal <code>start.sh</code>). Same startup-only loading as the LLM graphs — <strong>restart the server after regenerating</strong> (see the consumption section below).</li>
+        <li><strong>Jira graph</strong>: re-extraction is step 4 of <code>huginn-nav/scripts/daily_jira_update.sh</code>. It runs <strong>when you run that script</strong> — the script is <em>meant for</em> cron, but no scheduler is installed, so the real cadence is whatever you run by hand. Deterministic and idempotent: full rebuild every run, no cache needed, safe to re-run anytime.</li>
+        <li><strong>EESSI graph</strong>: run <code>extract_melosys_graph.py</code> by hand only when the domain model changes.</li>
+    </ul>
+
+    <div class="note">
+        <p>Unlike the LLM extractor, these graphs need <strong>no cache and no model</strong> — re-running is cheap and always reproduces the same output from the same source. The only thing that matters is that <em>the source is current</em>: the Jira graph reflects whatever frontmatter the last fetch wrote, so a stale fetch means a stale graph.</p>
+    </div>
+</div>
+
+<div class="card">
+    <h2>How the API server consumes the graphs</h2>
+    <div class="mermaid">
+sequenceDiagram
+    participant Startup as Server startup
+    participant API as knowledge_api_server.py
+    participant FS as File system
+    participant Bot as MCP / agent client
+    participant User as Direct user query
+
+    Note over Startup: Once, at server startup
+    Startup->>API: Boot
+    API->>FS: Glob *_llm_graph.json from configured paths
+    FS-->>API: All graph files
+    API->>API: Build in-memory graph index
+
+    Note over Bot,API: Search-time, on every query
+    Bot->>API: Search query (entity-shaped)
+    API->>API: Look up query terms in graph
+    API->>API: Expand query with related entities
+    API->>API: Run FAISS + BM25 with expanded query
+    API->>API: Enrich results with graph context
+    API-->>Bot: Results + entity context
+
+    User->>API: Direct search query
+    API-->>User: Same flow, lower-leverage<br/>(humans skim freely)
+    </div>
+
+    <p>Notes:</p>
+    <ul>
+        <li><strong>Loaded once at startup</strong> — the server doesn't re-read graph files on every query. Restart the server after regenerating a graph if the server is running.</li>
+        <li><strong>Used at search time, not ingest time.</strong></li>
+        <li><strong>Two enrichment effects</strong>:
+            <ol>
+                <li><em>Query expansion</em> — search for "Karpathy" and the graph adds related entities like "AutoResearch", "LLM Wiki", "Eureka Labs"</li>
+                <li><em>Result enrichment</em> — search hits are annotated with the entities they mention, useful for downstream display</li>
+            </ol>
+        </li>
+        <li><strong>MCP/agent clients benefit more than direct human queries</strong> — bots structure queries entity-first; humans just type words. Entity-recall improvements matter most for bot-mediated retrieval.</li>
+    </ul>
+</div>
+
+<div class="card">
+    <h2>Decision flow — should I re-run the extractor?</h2>
+    <div class="mermaid">
+flowchart TD
+    Start([Question: should I run the extractor?])
+    Q1{Collection<br/>== curated wiki?}
+    Skip1[NEVER run.<br/>Wiki is hand-curated.<br/>Stop here.]
+
+    Q2{Did the model<br/>change?}
+    DelCache[1. Delete all<br/>*_llm_graph.cache.json files<br/>2. Re-run for ALL raw-chunk<br/>collections]
+
+    Q3{New content<br/>in this collection?}
+    Inc[Run incremental refresh.<br/>Cache makes it cheap —<br/>only new chunks processed.]
+
+    Q4{Collection has<br/>never been extracted?}
+    First[First-time extraction.<br/>Slower —<br/>no cache to amortize.]
+
+    NoOp[No action needed.<br/>Graph is current.]
+
+    Start --> Q1
+    Q1 -->|Yes| Skip1
+    Q1 -->|No| Q2
+    Q2 -->|Yes| DelCache
+    Q2 -->|No| Q3
+    Q3 -->|Yes| Inc
+    Q3 -->|No| Q4
+    Q4 -->|Yes| First
+    Q4 -->|No| NoOp
+
+    style Skip1 fill:#ffcdd2,stroke:#c62828,stroke-width:2px
+    style DelCache fill:#fff9c4,stroke:#f57f17,stroke-width:2px
+    style Inc fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px
+    style First fill:#bbdefb,stroke:#1565c0,stroke-width:2px
+    style NoOp fill:#f5f5f5,stroke:#999
+    </div>
+
+    <h3>The four operating modes</h3>
+
+    <h4>Mode A — Curated wiki collection (always skip)</h4>
+    <p>The wiki <em>is</em> the curated graph. Running the LLM extractor would add noise. There is no scenario in which it improves search quality. See <a href="wiki-collection-pattern.md"><code>wiki-collection-pattern.md</code></a> for how the wiki collection pattern works and why it composes with — but never replaces — the LLM extractor.</p>
+
+    <h4>Mode B — Model swap (delete caches + re-extract everything)</h4>
+    <pre><code># Backup first if you care about the old graphs
+cp -r path/to/knowledge_graph /tmp/graph-backup-$(date +%F)
+
+# Delete caches to force re-extraction
+rm path/to/knowledge_graph/*.cache.json
+
+# Re-extract every collection that has a graph
+cd /path/to/huginn
+uv run scripts/knowledge_graph/extract_entities_llm.py --collection capra-notion
+uv run scripts/knowledge_graph/extract_entities_llm.py --collection jira-issues
+uv run scripts/knowledge_graph/extract_entities_llm.py --collection youtube-summaries
+# ... repeat for each raw-chunk collection that has an existing graph</code></pre>
+
+    <h4>Mode C — Incremental refresh after new content</h4>
+    <p>Cache stays in place. Script processes only the new chunks. Cheap.</p>
+    <pre><code>uv run scripts/knowledge_graph/extract_entities_llm.py --collection youtube-summaries</code></pre>
+
+    <h4>Mode D — First-time extraction for an unprocessed collection</h4>
+    <p>No cache exists yet — full pass over the collection. Slower than incremental but only happens once.</p>
+    <pre><code>uv run scripts/knowledge_graph/extract_entities_llm.py --collection x-feed</code></pre>
+</div>
+
+<div class="card">
+    <h2>Cheat sheet</h2>
+    <table>
+        <tr><th>Situation</th><th>Action</th></tr>
+        <tr><td>Just finished maintaining a wiki collection</td><td>Nothing — wikilinks are the graph</td></tr>
+        <tr><td>Just fetched new content into a raw-chunk collection</td><td>Incremental refresh on that collection</td></tr>
+        <tr><td>Just changed the Ollama model</td><td>Delete all caches, re-extract every raw-chunk collection</td></tr>
+        <tr><td>API server is running, just regenerated a graph</td><td>Restart the server to pick up the new graph</td></tr>
+        <tr><td>Considering running the extractor on a wiki collection</td><td>Don't — re-read this doc</td></tr>
+        <tr><td>New raw-chunk collection added</td><td>One-time first extraction</td></tr>
+        <tr><td>Per-source bespoke graph available (e.g. <code>extract_jira_graph.py</code> for Jira epics/cross-refs)</td><td>Run alongside the LLM extractor — they compose</td></tr>
+    </table>
+</div>
+
+<div class="card">
+    <h2>See also</h2>
+    <ul>
+        <li><a href="HOW_IT_WORKS.md"><code>HOW_IT_WORKS.md</code></a> — the FAISS+BM25 pipeline this graph layer enriches</li>
+        <li><a href="graph-enhanced-rag.html"><code>graph-enhanced-rag.html</code></a> — full architecture</li>
+        <li><a href="wiki-collection-pattern.md"><code>wiki-collection-pattern.md</code></a> — how to structure a hand-curated wiki collection (the alternative to LLM extraction)</li>
+        <li><a href="../README.md"><code>README.md</code></a> § Knowledge Graph — the entry-point summary</li>
+        <li><code>huginn/CLAUDE.md</code> § <em>LLM entity extraction (knowledge graph)</em> — per-script reference and current model name</li>
+    </ul>
+</div>
+
+<script>
+    function getTheme() {
+        return localStorage.getItem('rag-doc-theme') ||
+            (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    }
+
+    function applyTheme(theme) {
+        document.documentElement.setAttribute('data-theme', theme);
+        const btn = document.getElementById('theme-toggle');
+        btn.innerHTML = theme === 'dark' ? '&#9788; Light' : '&#9790; Dark';
+        localStorage.setItem('rag-doc-theme', theme);
+    }
+
+    // Apply saved theme before mermaid renders
+    const initialTheme = getTheme();
+    applyTheme(initialTheme);
+
+    mermaid.initialize({
+        startOnLoad: true,
+        theme: initialTheme === 'dark' ? 'dark' : 'default',
+        flowchart: {
+            useMaxWidth: true,
+            htmlLabels: true,
+            curve: 'basis'
+        }
+    });
+
+    document.getElementById('theme-toggle').addEventListener('click', async () => {
+        const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+        applyTheme(next);
+
+        // Re-render mermaid diagrams with new theme
+        mermaid.initialize({
+            startOnLoad: false,
+            theme: next === 'dark' ? 'dark' : 'default',
+            flowchart: { useMaxWidth: true, htmlLabels: true, curve: 'basis' }
+        });
+        document.querySelectorAll('.mermaid').forEach(el => {
+            el.removeAttribute('data-processed');
+            const svg = el.querySelector('svg');
+            if (svg) {
+                el.setAttribute('data-original', el.getAttribute('data-original') || svg.nextSibling ? el.textContent : '');
+            }
+        });
+        // Re-render by reloading — simplest reliable approach for mermaid
+        location.reload();
+    });
+</script>
+</body>
+</html>

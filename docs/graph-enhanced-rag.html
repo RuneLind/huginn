@@ -143,8 +143,9 @@
         <tr><th>Collection</th><th>Documents</th><th>Entities</th><th>Relationships</th><th>Top entity types</th></tr>
         <tr><td>jira-issues</td><td>2,158</td><td>5,637</td><td>10,016</td><td>Concept (3005), Product (1503), Technology (733)</td></tr>
         <tr><td>youtube-summaries</td><td>402</td><td>2,383</td><td>3,118</td><td>Concept (754), Product (685), Technology (556)</td></tr>
-        <tr><td>melosys-confluence</td><td>296</td><td>1,348</td><td>1,888</td><td>Concept (729), Product (243), Organization (168)</td></tr>
+        <tr><td>melosys-confluence-v3</td><td>296</td><td>1,348</td><td>1,888</td><td>Concept (729), Product (243), Organization (168)</td></tr>
     </table>
+    <p class="caption">Tall er et illustrerende øyeblikksbilde (≈ mai 2026); kjør ekstraksjonen på nytt for ferske tall.</p>
 </div>
 
 <div class="card">
@@ -174,7 +175,7 @@ flowchart TD
 
     subgraph RANK ["Reranking & Enrichment"]
         direction TB
-        RR["Cross-Encoder Reranker\nBAI/bge-reranker-v2-m3"]
+        RR["Cross-Encoder Reranker\nBAAI/bge-reranker-v2-m3"]
         GC["Graph Context Enrichment\nAnnotate results with entity relationships"]
     end
 
@@ -323,7 +324,7 @@ flowchart LR
     end
 
     subgraph LLM ["Ollama (local)"]
-        Q["qwen3.5\nStructured JSON output\nthink: false"]
+        Q["qwen3.6:35b-a3b-coding-nvfp4\nStructured JSON output\nthink: false"]
     end
 
     subgraph OUTPUT ["Knowledge Graph"]
@@ -348,7 +349,7 @@ flowchart LR
 
     <h3>Key design decisions</h3>
     <ul>
-        <li><strong>Fully local</strong> — Uses Ollama with qwen3.5, no data leaves the machine</li>
+        <li><strong>Fully local</strong> — Uses Ollama with qwen3.6:35b-a3b-coding-nvfp4, no data leaves the machine</li>
         <li><strong>Incremental</strong> — Per-document cache (<code>.cache.json</code>) allows stopping and resuming</li>
         <li><strong>Cross-document merging</strong> — Entities appearing in multiple documents get aggregated mention counts, revealing importance</li>
         <li><strong>Structured output</strong> — Uses Ollama's <code>format: "json"</code> and <code>think: false</code> for reliable parsing</li>
@@ -363,7 +364,7 @@ uv run scripts/knowledge_graph/extract_entities_llm.py --collection melosys-conf
 uv run scripts/knowledge_graph/extract_entities_llm.py --collection jira-issues --limit 20
 
 # Use the larger model for better quality
-uv run scripts/knowledge_graph/extract_entities_llm.py --collection jira-issues --model qwen3.5:35b</code></pre>
+uv run scripts/knowledge_graph/extract_entities_llm.py --collection jira-issues --model qwen3.6:35b-a3b-coding-nvfp4</code></pre>
 </div>
 
 <div class="card">
@@ -376,7 +377,7 @@ flowchart TD
         DOCS["Source documents\nConfluence, Jira, YouTube, ..."]
         CHUNK["Chunk + embed\nheading-aware splitting"]
         TAG["LLM tagging\nClaude Haiku"]
-        EXTRACT["LLM entity extraction\nOllama qwen3.5"]
+        EXTRACT["LLM entity extraction\nOllama qwen3.6:35b-a3b-coding-nvfp4"]
         DOCS --> CHUNK
         DOCS --> TAG
         DOCS --> EXTRACT
@@ -464,7 +465,7 @@ flowchart TD
     <p>Huginn adapts these ideas to a <strong>fully local architecture</strong>:</p>
     <table>
         <tr><th>GraphRAG (Microsoft)</th><th>Huginn</th></tr>
-        <tr><td>OpenAI API for entity extraction</td><td>Local Ollama (qwen3.5)</td></tr>
+        <tr><td>OpenAI API for entity extraction</td><td>Local Ollama (qwen3.6:35b-a3b-coding-nvfp4)</td></tr>
         <tr><td>Leiden algorithm for communities</td><td>Louvain algorithm (networkx)</td></tr>
         <tr><td>Parquet output files</td><td>JSON files, KnowledgeGraph class</td></tr>
         <tr><td>Map-reduce global search</td><td>Planned (task 3 on roadmap)</td></tr>
