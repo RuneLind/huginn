@@ -504,7 +504,10 @@ class _FakeStore:
         return name in self._collections
 
     def read_text_file(self, path: str) -> str:
-        return self._files[path]  # KeyError → treated as a read failure by the route
+        try:
+            return self._files[path]
+        except KeyError:
+            raise FileNotFoundError(path)  # match the real persister's missing-file error
 
 
 class TestCollectionDocumentDates:
@@ -523,6 +526,9 @@ class TestCollectionDocumentDates:
             # Document file missing → date is None, but the doc still lists.
             "4": {"documentId": "tech/C.md", "documentUrl": "https://youtu.be/c",
                   "documentPath": "yt/documents/tech/C.md.json"},
+            # Malformed JSON → date is None (logged), doc still lists.
+            "5": {"documentId": "tech/D.md", "documentUrl": "https://youtu.be/d",
+                  "documentPath": "yt/documents/tech/D.md.json"},
         }
         files = {
             "yt/indexes/index_document_mapping.json": json.dumps(mapping),
@@ -532,6 +538,7 @@ class TestCollectionDocumentDates:
             "yt/documents/health/B.md.json": json.dumps(
                 {"metadata": {}, "modifiedTime": "2026-02-15T10:00:00"}
             ),
+            "yt/documents/tech/D.md.json": "{ not valid json",
         }
         return _FakeStore(files, {"yt"})
 
@@ -547,7 +554,7 @@ class TestCollectionDocumentDates:
     def test_default_listing_has_no_date(self):
         client = self._client(self._store())
         docs = client.get("/api/collection/yt/documents").json()["documents"]
-        assert len(docs) == 3  # A deduped
+        assert len(docs) == 4  # A deduped
         assert all("date" not in d for d in docs)
 
     def test_include_dates_attaches_added_date(self):
@@ -557,6 +564,7 @@ class TestCollectionDocumentDates:
         assert by_id["career/A.md"]["date"] == "2026-01-09"        # frontmatter date wins
         assert by_id["health/B.md"]["date"] == "2026-02-15T10:00:00"  # fallback to mtime
         assert by_id["tech/C.md"]["date"] is None                  # missing file → None
+        assert by_id["tech/D.md"]["date"] is None                  # malformed JSON → None
 
     def test_unknown_collection_404(self):
         client = self._client(self._store())

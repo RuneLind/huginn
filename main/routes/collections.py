@@ -1,10 +1,13 @@
 """Collection-level routes — listing, tags, document lookup, manual update."""
 import json
+import logging
 import os
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
 from main.runtime.knowledge_store import KnowledgeStore, get_store, run_collection_update
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -58,10 +61,18 @@ def _resolve_doc_date(doc: dict) -> str | None:
 
 
 def _read_doc_date(store: KnowledgeStore, doc_path: str) -> str | None:
-    """Read a single document JSON and return its added date, or None on error."""
+    """Read a single document JSON and return its added date, or None on error.
+
+    A missing/unreadable file or malformed JSON yields None (logged), so one bad
+    document doesn't fail the whole listing — but genuinely unexpected errors are
+    left to propagate rather than silently swallowed.
+    """
+    if not doc_path:
+        return None
     try:
         doc = json.loads(store.disk_persister.read_text_file(doc_path))
-    except Exception:
+    except (OSError, ValueError) as e:
+        logger.warning("Could not read date for document %s: %s", doc_path, e)
         return None
     return _resolve_doc_date(doc)
 
