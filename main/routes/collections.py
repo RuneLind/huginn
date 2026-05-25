@@ -1,10 +1,13 @@
 """Collection-level routes — listing, tags, document lookup, manual update."""
 import json
+import logging
 import os
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
 from main.runtime.knowledge_store import KnowledgeStore, get_store, run_collection_update
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -47,9 +50,49 @@ def list_tags(
     return result
 
 
+def _resolve_doc_date(doc: dict) -> str | None:
+    """Best-effort 'added' date for a document.
+
+    Prefers the frontmatter ``date`` (day-precision, set at ingest) and falls
+    back to ``modifiedTime`` (file mtime, which can be reset by bulk reindexing).
+    """
+    metadata = doc.get("metadata") or {}
+    return metadata.get("date") or doc.get("modifiedTime")
+
+
+def _read_doc_date(store: KnowledgeStore, doc_path: str) -> str | None:
+    """Read a single document JSON and return its added date, or None on error.
+
+    A missing/unreadable file or malformed JSON yields None (logged), so one bad
+    document doesn't fail the whole listing — but genuinely unexpected errors are
+    left to propagate rather than silently swallowed.
+    """
+    if not doc_path:
+        return None
+    try:
+        doc = json.loads(store.disk_persister.read_text_file(doc_path))
+    except (OSError, ValueError) as e:
+        logger.warning("Could not read date for document %s: %s", doc_path, e)
+        return None
+    return _resolve_doc_date(doc)
+
+
 @router.get("/api/collection/{name}/documents")
-def list_collection_documents(name: str, store: KnowledgeStore = Depends(get_store)):
-    """List all documents in a collection with their IDs and URLs."""
+def list_collection_documents(
+    name: str,
+    include_dates: bool = Query(
+        False,
+        description="Attach each document's added date. Slower — reads every document file.",
+    ),
+    store: KnowledgeStore = Depends(get_store),
+):
+    """List all documents in a collection with their IDs and URLs.
+
+    When ``include_dates`` is set, each entry also carries a ``date`` field
+    (frontmatter date, falling back to file mtime) so callers can sort/group by
+    recency. This reads every document file, so it is opt-in to keep the default
+    listing (used by hot paths like duplicate checks) cheap.
+    """
     if not store.has_collection(name):
         raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
 
@@ -69,7 +112,10 @@ def list_collection_documents(name: str, store: KnowledgeStore = Depends(get_sto
         if doc_id in seen_ids or not doc_url:
             continue
         seen_ids.add(doc_id)
-        documents.append({"id": doc_id, "url": doc_url})
+        doc = {"id": doc_id, "url": doc_url}
+        if include_dates:
+            doc["date"] = _read_doc_date(store, entry.get("documentPath", ""))
+        documents.append(doc)
 
     return {"documents": documents}
 
