@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -484,4 +486,95 @@ class TestModelConfig:
         assert reranker.model.max_length <= 512, (
             f"CrossEncoder max_length should be ≤512, got {reranker.model.max_length}"
         )
+
+
+class _FakeStore:
+    """Minimal store stub for the collection-documents endpoint.
+
+    Backs both ``has_collection`` and ``disk_persister.read_text_file`` from an
+    in-memory file map; unknown paths raise like a real persister would.
+    """
+
+    def __init__(self, files: dict[str, str], collections: set[str]):
+        self._files = files
+        self._collections = collections
+        self.disk_persister = self
+
+    def has_collection(self, name: str) -> bool:
+        return name in self._collections
+
+    def read_text_file(self, path: str) -> str:
+        return self._files[path]  # KeyError → treated as a read failure by the route
+
+
+class TestCollectionDocumentDates:
+    """Opt-in date enrichment on /api/collection/{name}/documents."""
+
+    def _store(self) -> _FakeStore:
+        mapping = {
+            # Two chunks for the same doc → must dedupe to one entry.
+            "1": {"documentId": "career/A.md", "documentUrl": "https://youtu.be/a",
+                  "documentPath": "yt/documents/career/A.md.json"},
+            "2": {"documentId": "career/A.md", "documentUrl": "https://youtu.be/a",
+                  "documentPath": "yt/documents/career/A.md.json"},
+            # No frontmatter date → falls back to modifiedTime.
+            "3": {"documentId": "health/B.md", "documentUrl": "https://youtu.be/b",
+                  "documentPath": "yt/documents/health/B.md.json"},
+            # Document file missing → date is None, but the doc still lists.
+            "4": {"documentId": "tech/C.md", "documentUrl": "https://youtu.be/c",
+                  "documentPath": "yt/documents/tech/C.md.json"},
+        }
+        files = {
+            "yt/indexes/index_document_mapping.json": json.dumps(mapping),
+            "yt/documents/career/A.md.json": json.dumps(
+                {"metadata": {"date": "2026-01-09"}, "modifiedTime": "2026-03-23T21:40:36"}
+            ),
+            "yt/documents/health/B.md.json": json.dumps(
+                {"metadata": {}, "modifiedTime": "2026-02-15T10:00:00"}
+            ),
+        }
+        return _FakeStore(files, {"yt"})
+
+    def _client(self, store) -> TestClient:
+        from main.runtime.knowledge_store import get_store
+        app.dependency_overrides[get_store] = lambda: store
+        return TestClient(app)
+
+    def teardown_method(self):
+        from main.runtime.knowledge_store import get_store
+        app.dependency_overrides.pop(get_store, None)
+
+    def test_default_listing_has_no_date(self):
+        client = self._client(self._store())
+        docs = client.get("/api/collection/yt/documents").json()["documents"]
+        assert len(docs) == 3  # A deduped
+        assert all("date" not in d for d in docs)
+
+    def test_include_dates_attaches_added_date(self):
+        client = self._client(self._store())
+        docs = client.get("/api/collection/yt/documents", params={"include_dates": "1"}).json()["documents"]
+        by_id = {d["id"]: d for d in docs}
+        assert by_id["career/A.md"]["date"] == "2026-01-09"        # frontmatter date wins
+        assert by_id["health/B.md"]["date"] == "2026-02-15T10:00:00"  # fallback to mtime
+        assert by_id["tech/C.md"]["date"] is None                  # missing file → None
+
+    def test_unknown_collection_404(self):
+        client = self._client(self._store())
+        assert client.get("/api/collection/nope/documents").status_code == 404
+
+
+class TestResolveDocDate:
+    def test_prefers_frontmatter_date(self):
+        from main.routes.collections import _resolve_doc_date
+        assert _resolve_doc_date(
+            {"metadata": {"date": "2026-01-09"}, "modifiedTime": "2026-03-23T21:40:36"}
+        ) == "2026-01-09"
+
+    def test_falls_back_to_modified_time(self):
+        from main.routes.collections import _resolve_doc_date
+        assert _resolve_doc_date({"metadata": {}, "modifiedTime": "2026-02-15T10:00:00"}) == "2026-02-15T10:00:00"
+
+    def test_none_when_nothing_available(self):
+        from main.routes.collections import _resolve_doc_date
+        assert _resolve_doc_date({}) is None
 
