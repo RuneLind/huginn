@@ -369,12 +369,12 @@ class DocumentCollectionSearcher:
 
                 result[doc_id] = doc_result
 
-                if include_all_chunks_content or include_text_content:
+                if document and (include_all_chunks_content or include_text_content):
                     if include_all_chunks_content:
-                        result[doc_id]["allChunks"] = document["chunks"]
+                        result[doc_id]["allChunks"] = document.get("chunks", [])
 
                     if include_text_content:
-                        result[doc_id]["text"] = document["text"]
+                        result[doc_id]["text"] = document.get("text", "")
 
             else:
                 result[doc_id]["matchedChunks"].append(self.__build_chunk_result(mapping, scores, result_number, include_matched_chunks_content))
@@ -385,5 +385,26 @@ class DocumentCollectionSearcher:
         return {
             "chunkNumber": mapping["chunkNumber"],
             "score":  float(scores[0][result_number]),
-            **({ "content": self._get_document_cached(mapping["documentPath"])["chunks"][mapping["chunkNumber"]] } if include_matched_chunks_content else {})
+            **({ "content": self._get_chunk_content(mapping) } if include_matched_chunks_content else {})
         }
+
+    def _get_chunk_content(self, mapping):
+        """Return the matched chunk's content, or "" if the document is unreadable.
+
+        Guards against a missing/corrupt/locked document JSON (cached as None),
+        an absent "chunks" array, or a chunkNumber out of range — any of which
+        would otherwise crash the whole search response on the default
+        include_matched_chunks_content path.
+        """
+        document = self._get_document_cached(mapping["documentPath"])
+        if not document:
+            return ""
+        chunks = document.get("chunks")
+        chunk_number = mapping["chunkNumber"]
+        if not chunks or chunk_number >= len(chunks):
+            logger.warning(
+                f"Chunk {chunk_number} unavailable for {mapping['documentPath']} "
+                f"({len(chunks) if chunks else 0} chunks); returning empty content"
+            )
+            return ""
+        return chunks[chunk_number]
