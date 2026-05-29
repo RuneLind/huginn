@@ -586,3 +586,99 @@ class TestResolveDocDate:
         from main.routes.collections import _resolve_doc_date
         assert _resolve_doc_date({}) is None
 
+
+class TestCollectionUpdateConcurrency:
+    """Per-collection rebuild mutex + status surfacing (H4/H5)."""
+
+    def _store(self):
+        from main.runtime.knowledge_store import KnowledgeStore
+        store = KnowledgeStore()
+        store.searchers["c"] = object()  # make has_collection("c") true
+        return store
+
+    def _client(self, store) -> TestClient:
+        from main.runtime.knowledge_store import get_store
+        app.dependency_overrides[get_store] = lambda: store
+        return TestClient(app)
+
+    def teardown_method(self):
+        from main.runtime.knowledge_store import get_store
+        app.dependency_overrides.pop(get_store, None)
+
+    def test_update_returns_409_when_one_already_running(self, monkeypatch):
+        monkeypatch.setattr("main.routes.collections.run_collection_update", lambda *a, **k: None)
+        store = self._store()
+        store.try_begin_update("c")  # simulate an in-flight rebuild
+        resp = self._client(store).post("/api/collections/c/update")
+        assert resp.status_code == 409
+
+    def test_update_starts_and_reserves_slot(self, monkeypatch):
+        monkeypatch.setattr("main.routes.collections.run_collection_update", lambda *a, **k: None)
+        store = self._store()
+        resp = self._client(store).post("/api/collections/c/update")
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "update_started", "collection": "c"}
+        assert store.get_update_status("c")["status"] == "running"
+
+    def test_update_unknown_collection_404(self):
+        resp = self._client(self._store()).post("/api/collections/nope/update")
+        assert resp.status_code == 404
+
+    def test_update_status_reports_failure(self):
+        store = self._store()
+        store.mark_update_failed("c", RuntimeError("boom"))
+        body = self._client(store).get("/api/collections/c/update-status").json()
+        assert body["status"] == "failed"
+        assert body["error"] == "boom"
+
+    def test_update_status_idle_when_never_run(self):
+        body = self._client(self._store()).get("/api/collections/c/update-status").json()
+        assert body == {
+            "collection": "c", "status": "idle",
+            "startedAt": None, "finishedAt": None, "error": None,
+        }
+
+    def test_update_status_unknown_collection_404(self):
+        resp = self._client(self._store()).get("/api/collections/nope/update-status")
+        assert resp.status_code == 404
+
+
+class TestMaybeEnqueueReindex:
+    """Ingest reindex enqueueing skips (does not fail) when a rebuild is in flight."""
+
+    class _FakeBackgroundTasks:
+        def __init__(self):
+            self.tasks = []
+
+        def add_task(self, *args, **kwargs):
+            self.tasks.append((args, kwargs))
+
+    def _store(self):
+        from main.runtime.knowledge_store import KnowledgeStore
+        store = KnowledgeStore()
+        store.searchers["c"] = object()
+        return store
+
+    def test_not_configured_when_no_collection(self):
+        from main.routes.ingest import _maybe_enqueue_reindex
+        bg = self._FakeBackgroundTasks()
+        assert _maybe_enqueue_reindex(self._store(), bg, None) == "not_configured"
+        assert _maybe_enqueue_reindex(self._store(), bg, "missing") == "not_configured"
+        assert bg.tasks == []
+
+    def test_started_when_idle(self):
+        from main.routes.ingest import _maybe_enqueue_reindex
+        store = self._store()
+        bg = self._FakeBackgroundTasks()
+        assert _maybe_enqueue_reindex(store, bg, "c") == "started"
+        assert len(bg.tasks) == 1
+        assert store.get_update_status("c")["status"] == "running"
+
+    def test_skipped_when_already_running(self):
+        from main.routes.ingest import _maybe_enqueue_reindex
+        store = self._store()
+        store.try_begin_update("c")
+        bg = self._FakeBackgroundTasks()
+        assert _maybe_enqueue_reindex(store, bg, "c") == "skipped_already_running"
+        assert bg.tasks == []
+

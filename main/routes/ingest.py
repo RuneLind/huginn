@@ -55,6 +55,21 @@ def _similar_for_collection(store, collection_name, query, exclude_match) -> lis
     return _find_similar_documents(searcher, query=query, exclude_match=exclude_match)
 
 
+def _maybe_enqueue_reindex(store, background_tasks, collection_name) -> str:
+    """Enqueue a background reindex unless one is already running for the collection.
+
+    Ingest succeeds regardless of reindex state, so a busy collection skips the
+    duplicate rebuild (avoiding the concurrent read-modify-write clobber, H4)
+    rather than failing the ingest. Returns a status the caller surfaces.
+    """
+    if not (collection_name and store.has_collection(collection_name)):
+        return "not_configured"
+    if not store.try_begin_update(collection_name):
+        return "skipped_already_running"
+    background_tasks.add_task(run_collection_update, collection_name, store)
+    return "started"
+
+
 @router.post("/api/youtube/ingest")
 def youtube_ingest(
     req: YouTubeIngestRequest,
@@ -75,8 +90,7 @@ def youtube_ingest(
         query=result["summary"][:2000],
         exclude_match=lambda doc: doc.get("url", "") == req.url,
     )
-    if yt_collection and store.has_collection(yt_collection):
-        background_tasks.add_task(run_collection_update, yt_collection, store)
+    reindex = _maybe_enqueue_reindex(store, background_tasks, yt_collection)
 
     return {
         "status": "ingested",
@@ -84,6 +98,7 @@ def youtube_ingest(
         "category": result["category"],
         "summary": result["summary"],
         "similar": similar,
+        "reindex": reindex,
     }
 
 
@@ -123,8 +138,7 @@ def x_article_ingest(
         query=req.summary[:2000],
         exclude_match=lambda doc: doc.get("url", "") == req.url,
     )
-    if xa_collection and store.has_collection(xa_collection):
-        background_tasks.add_task(run_collection_update, xa_collection, store)
+    reindex = _maybe_enqueue_reindex(store, background_tasks, xa_collection)
 
     return {
         "status": "ingested",
@@ -133,6 +147,7 @@ def x_article_ingest(
         "category": result["category"],
         "summary": result["summary"],
         "similar": similar,
+        "reindex": reindex,
     }
 
 
