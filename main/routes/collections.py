@@ -153,5 +153,23 @@ def update_collection(
     if not store.has_collection(name):
         raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
 
+    if not store.try_begin_update(name):
+        raise HTTPException(
+            status_code=409, detail=f"An update for collection '{name}' is already in progress"
+        )
+
     background_tasks.add_task(run_collection_update, name, store)
     return {"status": "update_started", "collection": name}
+
+
+@router.get("/api/collections/{name}/update-status")
+def collection_update_status(name: str, store: KnowledgeStore = Depends(get_store)):
+    """Report the outcome of the most recent (or in-flight) update for a collection.
+
+    status is one of idle / running / succeeded / failed; a failed update carries
+    its error so a stale collection surfaces instead of hiding behind an earlier 200.
+    """
+    if not store.has_collection(name):
+        raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
+
+    return store.get_update_status(name)

@@ -7,6 +7,7 @@ HTTP routers depend on, exposed via the ``get_store`` FastAPI dependency.
 import json
 import logging
 import threading
+from datetime import datetime, timezone
 
 from main.core.documents_collection_searcher import DocumentCollectionSearcher
 from main.indexes.indexer_factory import (
@@ -39,6 +40,9 @@ class KnowledgeStore:
         self._extra_graph_paths = None
         self._build_aux_indexes = True
         self._lock = threading.Lock()
+        # collection_name -> {status, startedAt, finishedAt, error}; guarded by _lock.
+        # The "running" status doubles as a per-collection rebuild mutex (H4).
+        self._update_states = {}
 
     def load_collections(self, collection_names, data_path="./data/collections",
                          faiss_index_name=None, extra_graph_paths=None,
@@ -53,7 +57,7 @@ class KnowledgeStore:
         self._build_aux_indexes = build_aux_indexes
 
         if faiss_index_name is None:
-            faiss_index_name = detect_faiss_index(collection_names[0], self.disk_persister)
+            faiss_index_name = self.__detect_shared_faiss_index(collection_names)
 
         logger.info(f"Loading shared embedding model for index: {faiss_index_name}")
         self.shared_embedder = create_embedder(faiss_index_name)
@@ -64,7 +68,13 @@ class KnowledgeStore:
 
         for name in collection_names:
             logger.info(f"Loading collection: {name}")
-            searcher = self._build_searcher(name)
+            try:
+                searcher = self._build_searcher(name)
+            except Exception:
+                # A corrupt index/mapping for one collection must not take down the
+                # whole server — log it and keep loading the rest (H5/M6).
+                logger.exception(f"Failed to load collection {name}; skipping it")
+                continue
             with self._lock:
                 self.searchers[name] = searcher
             logger.info(f"Collection {name} loaded with {searcher.indexer.get_size()} embeddings")
@@ -73,6 +83,17 @@ class KnowledgeStore:
                 self._build_notion_id_lookup(name)
 
         self._load_knowledge_graph(extra_paths=extra_graph_paths)
+
+    def __detect_shared_faiss_index(self, collection_names):
+        """Pick the shared embedding model from the first collection with a detectable
+        FAISS index. Probing only collection_names[0] would abort startup if that one
+        happened to be the broken collection (H5/M6)."""
+        for name in collection_names:
+            try:
+                return detect_faiss_index(name, self.disk_persister)
+            except Exception:
+                logger.warning(f"Could not detect FAISS index for {name}; trying next collection")
+        raise ValueError(f"No loadable FAISS index found in any of: {collection_names}")
 
     def _load_knowledge_graph(self, extra_paths=None):
         from main.graph.graph_loader import load_default_knowledge_graph
@@ -89,6 +110,57 @@ class KnowledgeStore:
             self._build_notion_id_lookup(collection_name)
         self._load_knowledge_graph(extra_paths=self._extra_graph_paths)
         logger.info(f"Collection {collection_name} reloaded ({searcher.indexer.get_size()} embeddings)")
+
+    def try_begin_update(self, collection_name):
+        """Reserve the rebuild slot for a collection.
+
+        Returns False if an update is already running for it (the caller should
+        return 409 or skip), True if the caller now owns the rebuild. The reserved
+        slot is released by mark_update_succeeded / mark_update_failed once the
+        background task finishes. Acts as the per-collection rebuild mutex (H4),
+        so concurrent updates can't race on disk and clobber each other.
+        """
+        with self._lock:
+            state = self._update_states.get(collection_name)
+            if state and state.get("status") == "running":
+                return False
+            self._update_states[collection_name] = {
+                "status": "running",
+                "startedAt": self.__now(),
+                "finishedAt": None,
+                "error": None,
+            }
+            return True
+
+    def mark_update_succeeded(self, collection_name):
+        self.__finish_update(collection_name, "succeeded", None)
+
+    def mark_update_failed(self, collection_name, error):
+        self.__finish_update(collection_name, "failed", str(error))
+
+    def __finish_update(self, collection_name, status, error):
+        with self._lock:
+            started_at = self._update_states.get(collection_name, {}).get("startedAt")
+            self._update_states[collection_name] = {
+                "status": status,
+                "startedAt": started_at,
+                "finishedAt": self.__now(),
+                "error": error,
+            }
+
+    def get_update_status(self, collection_name):
+        with self._lock:
+            state = self._update_states.get(collection_name) or {
+                "status": "idle",
+                "startedAt": None,
+                "finishedAt": None,
+                "error": None,
+            }
+            return {"collection": collection_name, **state}
+
+    @staticmethod
+    def __now():
+        return datetime.now(timezone.utc).isoformat()
 
     def get_searchers(self, collection_names=None):
         with self._lock:
@@ -200,7 +272,13 @@ def get_store() -> KnowledgeStore:
 
 
 def run_collection_update(collection_name: str, store: KnowledgeStore):
-    """Run incremental collection update in background, then reload the searcher."""
+    """Run incremental collection update in background, then reload the searcher.
+
+    Records the outcome on the store so the failure is surfaced (via the
+    update-status endpoint) instead of a successful-looking HTTP 200 hiding a
+    silently stale collection (H5). The caller is expected to have reserved the
+    slot with try_begin_update; the terminal mark here releases it.
+    """
     from main.factories.update_collection_factory import create_collection_updater
 
     logger.info(f"Starting background update for collection: {collection_name}")
@@ -209,4 +287,7 @@ def run_collection_update(collection_name: str, store: KnowledgeStore):
         updater.run()
         store.reload_collection(collection_name)
     except Exception as e:
-        logger.error(f"Failed to update collection {collection_name}: {e}")
+        logger.exception(f"Failed to update collection {collection_name}")
+        store.mark_update_failed(collection_name, e)
+        return
+    store.mark_update_succeeded(collection_name)
