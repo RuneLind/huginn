@@ -31,7 +31,13 @@ class DocumentCollectionSearcher:
         self.persister = persister
         self.reranker = reranker
         self._doc_cache = {}
-        self._mapping_cache = None
+        # Load the index→document mapping once and pair it with the in-memory
+        # index for this searcher's lifetime. A background update rewrites the
+        # mapping on disk with a new chunk-id range; re-reading it per search
+        # would desync it from the frozen in-memory index and yield stale or
+        # blanked-out results mid-update. reload_collection builds a fresh
+        # searcher, so a new (index, mapping) pair is swapped in atomically.
+        self._mapping = self._load_mapping()
 
     def search(self, text,
                max_number_of_chunks=15,
@@ -51,7 +57,6 @@ class DocumentCollectionSearcher:
         """
         t_start = time.monotonic()
         self._doc_cache = {}
-        self._mapping_cache = None
 
         if trace is None:
             trace = NULL_TRACE
@@ -169,7 +174,7 @@ class DocumentCollectionSearcher:
             coll_trace.record_stage("rrf", chunk_id=chunk_id, rank=rank, score=score)
 
     def _record_final_and_annotate(self, coll_trace, scores, indexes):
-        mapping = self._load_mapping()
+        mapping = self._mapping
         for rank, chunk_id in enumerate(indexes[0]):
             cid = int(chunk_id)
             coll_trace.record_stage("final", chunk_id=cid, rank=rank, score=float(scores[0][rank]))
@@ -207,7 +212,7 @@ class DocumentCollectionSearcher:
         Boost magnitude scales with the score spread so it works across
         different score types (cross-encoder, hybrid RRF, FAISS L2).
         """
-        mapping = self._load_mapping()
+        mapping = self._mapping
         query_tokens = set(re.findall(r'\w+', query.lower()))
         if not query_tokens or len(scores[0]) < 2:
             return scores, indexes
@@ -270,18 +275,19 @@ class DocumentCollectionSearcher:
         return False
 
     def _load_mapping(self):
-        """Load index-to-document mapping (cached per search call)."""
-        if self._mapping_cache is not None:
-            return self._mapping_cache
+        """Read the index-to-document mapping from disk.
+
+        Called once from __init__; the result is held in self._mapping for the
+        searcher's lifetime so it stays consistent with the in-memory index.
+        """
         indexes_base_path = f"{self.collection_name}/indexes"
-        self._mapping_cache = json.loads(
+        return json.loads(
             self.persister.read_text_file(f"{indexes_base_path}/index_document_mapping.json")
         )
-        return self._mapping_cache
 
     def _get_chunk_texts(self, indexes):
         """Look up chunk text for each candidate index."""
-        mapping = self._load_mapping()
+        mapping = self._mapping
 
         chunk_texts = []
 
@@ -317,7 +323,7 @@ class DocumentCollectionSearcher:
         return self._doc_cache[document_path]
 
     def __build_results(self, scores, indexes, include_text_content, include_all_chunks_content, include_matched_chunks_content):
-        index_document_mapping = self._load_mapping()
+        index_document_mapping = self._mapping
 
         result = {}
         seen_text_hashes = {}  # text_hash -> documentId (first seen)

@@ -687,6 +687,76 @@ class TestUnreadableDocument:
         assert result["results"][1]["text"] == "Full text of doc-B"
 
 
+class TestMappingConsistency:
+    """The index→document mapping must be frozen at construction.
+
+    Regression for H1: the searcher used the in-memory FAISS index from startup
+    but re-read index_document_mapping.json from disk on every search. A
+    background update rewrites that file with a new chunk-id range, so a search
+    landing mid-update got chunk ids that no longer matched the live index —
+    blanked/dropped results with no error. The mapping is now loaded once and
+    paired with the index for the searcher's lifetime; reload_collection builds
+    a fresh searcher to pick up a new (index, mapping) pair atomically.
+    """
+
+    def _make_persister(self, mapping_box):
+        """Persister whose mapping read reflects whatever mapping_box[0] holds."""
+        doc_a = _make_document("doc-A", [{"indexedData": "chunk A"}])
+        doc_b = _make_document("doc-B", [{"indexedData": "chunk B"}])
+        reads = {"mapping": 0}
+
+        persister = MagicMock()
+
+        def read_text(path):
+            if "index_document_mapping" in path:
+                reads["mapping"] += 1
+                return json.dumps(mapping_box[0])
+            if "doc-A" in path:
+                return json.dumps(doc_a)
+            if "doc-B" in path:
+                return json.dumps(doc_b)
+            raise FileNotFoundError(path)
+
+        persister.read_text_file.side_effect = read_text
+        return persister, reads
+
+    def _make_indexer(self):
+        indexer = MagicMock()
+        indexer.get_name.return_value = "test_indexer"
+        indexer.search.return_value = (
+            np.array([[0.5]], dtype=np.float32),
+            np.array([[0]], dtype=np.int64),
+        )
+        return indexer
+
+    def test_mapping_frozen_at_construction(self):
+        """A mapping rewritten on disk after construction does not change results."""
+        mapping_box = [_make_mapping(0, "doc-A", 0)]
+        persister, reads = self._make_persister(mapping_box)
+
+        searcher = DocumentCollectionSearcher("col", self._make_indexer(), persister)
+
+        # Simulate a background update rewriting the mapping: chunk 0 now points
+        # at a different document on disk.
+        mapping_box[0] = _make_mapping(0, "doc-B", 0)
+
+        result = searcher.search("test", max_number_of_chunks=1)
+        # Frozen mapping → still doc-A, not the rewritten doc-B.
+        assert result["results"][0]["id"] == "doc-A"
+
+    def test_mapping_read_once_not_per_search(self):
+        """The mapping file is read exactly once (at construction), not per search."""
+        mapping_box = [_make_mapping(0, "doc-A", 0)]
+        persister, reads = self._make_persister(mapping_box)
+
+        searcher = DocumentCollectionSearcher("col", self._make_indexer(), persister)
+        assert reads["mapping"] == 1  # loaded at construction
+
+        searcher.search("test", max_number_of_chunks=1)
+        searcher.search("test again", max_number_of_chunks=1)
+        assert reads["mapping"] == 1  # no extra disk reads across two searches
+
+
 class TestCrossLingualSkip:
     def _setup(self):
         mapping = {}
