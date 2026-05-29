@@ -601,6 +601,92 @@ class TestTitleBoost:
         assert result["results"][0]["id"] == "doc-B"
 
 
+class TestUnreadableDocument:
+    """A corrupt/missing/locked document must not crash the search response.
+
+    Regression for C1: _get_document_cached caches None on read failure, but the
+    content-inclusion paths used to subscript it unconditionally. The default
+    /api/search path always passes include_matched_chunks_content=True, so one
+    bad document among the top candidates took down the whole request.
+    """
+
+    def _setup(self, doc_a):
+        mapping = {}
+        mapping.update(_make_mapping(0, "doc-A", 0))
+        mapping.update(_make_mapping(1, "doc-B", 0))
+
+        doc_b = _make_document("doc-B", [{"indexedData": "chunk B0"}])
+
+        persister = MagicMock()
+
+        def read_text(path):
+            if "index_document_mapping" in path:
+                return json.dumps(mapping)
+            if "doc-A" in path:
+                if doc_a == "RAISE":
+                    raise OSError("locked file")
+                return json.dumps(doc_a)
+            if "doc-B" in path:
+                return json.dumps(doc_b)
+            raise FileNotFoundError(path)
+
+        persister.read_text_file.side_effect = read_text
+
+        indexer = MagicMock()
+        indexer.get_name.return_value = "test_indexer"
+        indexer.search.return_value = (
+            np.array([[0.5, 1.0]], dtype=np.float32),
+            np.array([[0, 1]], dtype=np.int64),
+        )
+
+        return DocumentCollectionSearcher("col", indexer, persister, reranker=None)
+
+    def test_unreadable_doc_does_not_crash_matched_content(self):
+        """Read failure on a top candidate → request completes, content is ""."""
+        searcher = self._setup(doc_a="RAISE")
+        result = searcher.search(
+            "test", max_number_of_chunks=2, include_matched_chunks_content=True
+        )
+
+        ids = [r["id"] for r in result["results"]]
+        assert ids == ["doc-A", "doc-B"]
+        # doc-A unreadable → empty content, no crash
+        assert result["results"][0]["matchedChunks"][0]["content"] == ""
+        # doc-B still carries real content
+        assert result["results"][1]["matchedChunks"][0]["content"] == {"indexedData": "chunk B0"}
+
+    def test_missing_chunks_key_yields_empty_content(self):
+        """Document without a "chunks" array → empty content, no KeyError."""
+        searcher = self._setup(doc_a={"id": "doc-A", "text": "no chunks here"})
+        result = searcher.search(
+            "test", max_number_of_chunks=2, include_matched_chunks_content=True
+        )
+        assert result["results"][0]["matchedChunks"][0]["content"] == ""
+
+    def test_chunk_number_out_of_range_yields_empty_content(self):
+        """chunkNumber past the end of the chunks array → empty content, no IndexError."""
+        searcher = self._setup(doc_a={"id": "doc-A", "text": "t", "chunks": []})
+        result = searcher.search(
+            "test", max_number_of_chunks=2, include_matched_chunks_content=True
+        )
+        assert result["results"][0]["matchedChunks"][0]["content"] == ""
+
+    def test_unreadable_doc_does_not_crash_all_chunks_or_text(self):
+        """include_all_chunks_content / include_text_content must also tolerate a None doc."""
+        searcher = self._setup(doc_a="RAISE")
+        result = searcher.search(
+            "test",
+            max_number_of_chunks=2,
+            include_all_chunks_content=True,
+            include_text_content=True,
+        )
+        # Unreadable doc-A carries neither key; readable doc-B does.
+        assert "allChunks" not in result["results"][0]
+        assert "text" not in result["results"][0]
+        assert result["results"][1]["allChunks"] == [{"indexedData": "chunk B0"}]
+        assert result["results"][1]["text"] == "Full text of doc-B"
+
+
 class TestCrossLingualSkip:
     def _setup(self):
         mapping = {}
