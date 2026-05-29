@@ -205,15 +205,26 @@ class DocumentCollectionCreator:
             for indexer in self.document_indexers:
                 indexer.index_texts(index_item_ids, items_to_index)
 
-        for indexer in self.document_indexers:
-            self.persister.save_bin_file(indexer.serialize(), f"{self.__build_index_base_path(indexer)}/indexer")
-
         index_info = { "lastIndexItemId": last_index_item_id, }
-        self.__save_json_file(index_info, self.__build_index_info_path())
-        self.__save_json_file(index_mapping, self.__build_index_mapping_path())
-        self.__save_json_file(reverse_index_mapping, self.__build_reverse_index_mapping_path())
+        self.__atomically_persist_index_artifacts(index_info, index_mapping, reverse_index_mapping)
 
         return last_modified_document_time, self.document_indexers[0].get_size()
+
+    def __atomically_persist_index_artifacts(self, index_info, index_mapping, reverse_index_mapping):
+        """Persist the indexer blobs and the three sidecar JSONs as one atomic set.
+
+        The index pickle, index_info, mapping and reverse-mapping must agree with each
+        other. Committing them together (write_set stages every file, fsynced, then
+        renames them into place only if all stages succeed) means a crash or error
+        mid-write leaves the prior on-disk index untouched instead of a half-written,
+        mutually-inconsistent collection."""
+        with self.persister.atomic_write_set() as write_set:
+            for indexer in self.document_indexers:
+                write_set.add_bin_file(indexer.serialize(), f"{self.__build_index_base_path(indexer)}/indexer")
+
+            write_set.add_text_file(json.dumps(index_info, indent=2, ensure_ascii=False), self.__build_index_info_path())
+            write_set.add_text_file(json.dumps(index_mapping, indent=2, ensure_ascii=False), self.__build_index_mapping_path())
+            write_set.add_text_file(json.dumps(reverse_index_mapping, indent=2, ensure_ascii=False), self.__build_reverse_index_mapping_path())
 
     def __remove_documents_from_index(self, document_ids, index_mapping, reverse_index_mapping):
         for batch_document_ids in wrap_iterator_with_progress_bar(self.__batch_items(document_ids, 
