@@ -475,13 +475,17 @@ class KnowledgeGraph:
                     edge_key = (e["source"], e["target"], e["type"])
                     if edge_key in visited_edges:
                         continue
+                    other_id = e["source"] if e["target"] == node_id else e["target"]
+                    if other_id not in self.nodes:
+                        # Dangling edge: references a node absent from the graph.
+                        # Skip it so the subtree never emits an edge to a node
+                        # that isn't in the returned node set.
+                        continue
                     visited_edges.add(edge_key)
                     out_edges.append(e)
-                    other_id = e["source"] if e["target"] == node_id else e["target"]
                     if other_id not in visited_nodes:
                         visited_nodes.add(other_id)
-                        if other_id in self.nodes:
-                            out_nodes.append(self.nodes[other_id])
+                        out_nodes.append(self.nodes[other_id])
                         next_frontier.append(other_id)
                         if len(out_nodes) >= max_nodes:
                             truncated = True
