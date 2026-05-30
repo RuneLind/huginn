@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from main.persisters.disk_persister import DiskPersister
+from main.persisters.disk_persister import CorruptArtifactError, DiskPersister
 
 
 @pytest.fixture
@@ -57,6 +57,28 @@ class TestReadFolderFiles:
 
         files = persister.read_folder_files("docs")
         assert files == ["0.json"]
+
+
+class TestReadBinCorrupt:
+    """A truncated/corrupt binary artifact surfaces a clear error (M6)."""
+
+    def test_truncated_pickle_raises_corrupt_artifact_error(self, persister, tmp_path):
+        persister.save_bin_file({"corpus_tokens": [["a"]], "ids": [0]}, "indexes/indexer_BM25/indexer")
+        target = tmp_path / "indexes" / "indexer_BM25" / "indexer"
+        # Truncate the pickle blob to half its bytes, as a partial write would.
+        data = target.read_bytes()
+        target.write_bytes(data[: len(data) // 2])
+
+        with pytest.raises(CorruptArtifactError) as excinfo:
+            persister.read_bin_file("indexes/indexer_BM25/indexer")
+        assert "indexer" in str(excinfo.value)
+
+    def test_garbage_bytes_raise_corrupt_artifact_error(self, persister, tmp_path):
+        target = tmp_path / "blob" / "indexer"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"not a pickle at all \x00\xff")
+        with pytest.raises(CorruptArtifactError):
+            persister.read_bin_file("blob/indexer")
 
 
 class TestAtomicWriteSet:
