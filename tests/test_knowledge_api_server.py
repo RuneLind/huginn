@@ -476,6 +476,85 @@ class TestShapeSearchResultsConfidenceBand:
         assert all(r["confidenceBand"] in ("medium", "low") for r in results)
 
 
+def _doc_with_chunks(doc_id, chunks):
+    """Build a raw search doc. chunks: list of (indexedData, score, heading, metadata)."""
+    return {
+        "id": doc_id,
+        "url": f"https://example.com/{doc_id}",
+        "path": f"wiki/{doc_id}.json",
+        "matchedChunks": [
+            {"content": {"indexedData": data, "heading": heading, "metadata": meta}, "score": score}
+            for (data, score, heading, meta) in chunks
+        ],
+    }
+
+
+class TestShapeSearchResultsContract:
+    """Response-shaping contract for shape_search_results / _shape_doc (M18)."""
+
+    def test_internal_score_fields_stripped(self):
+        raw = {"results": [_shape_doc_raw("a", -1.0)], "reranked": True}
+        results, _ = shape_search_results([("wiki", raw)], limit=10)
+        r = results[0]
+        assert "_score" not in r
+        assert "_reranked" not in r
+        for chunk in r.get("matchedChunks", []):
+            assert "score" not in chunk
+
+    def test_brief_mode_returns_snippet_not_chunks(self):
+        raw = {"results": [_shape_doc_raw("a", -1.0, text="Hello world body.")], "reranked": True}
+        results, _ = shape_search_results([("wiki", raw)], limit=10, brief=True)
+        r = results[0]
+        assert r["snippet"] == "Hello world body."
+        assert "matchedChunks" not in r
+
+    def test_full_mode_returns_matched_chunks_with_relevance(self):
+        raw = {"results": [_shape_doc_raw("a", -1.0)], "reranked": True}
+        results, _ = shape_search_results([("wiki", raw)], limit=10, brief=False)
+        r = results[0]
+        assert "matchedChunks" in r
+        assert "snippet" not in r
+        assert "relevance" in r["matchedChunks"][0]
+
+    def test_max_chunks_per_doc_caps_chunks(self):
+        doc = _doc_with_chunks("a", [(f"chunk {i}", -1.0 + i * 0.01, None, None) for i in range(5)])
+        raw = {"results": [doc], "reranked": True}
+        results, _ = shape_search_results([("wiki", raw)], limit=10, max_chunks_per_doc=2)
+        assert len(results[0]["matchedChunks"]) == 2
+
+    def test_breadcrumb_promoted_and_stripped_from_content(self):
+        doc = _doc_with_chunks("a", [("[Guide > Setup]\nThe body text.", -1.0, None, None)])
+        raw = {"results": [doc], "reranked": True}
+        results, _ = shape_search_results([("wiki", raw)], limit=10)
+        assert results[0]["breadcrumb"] == "Guide > Setup"
+        assert "Guide > Setup" not in results[0]["matchedChunks"][0]["content"]
+
+    def test_text_metadata_merged_into_chunk_metadata(self):
+        doc = _doc_with_chunks("a", [("**Project:** huginn\nBody.", -1.0, None, {"gitBranch": "main"})])
+        raw = {"results": [doc], "reranked": True}
+        results, _ = shape_search_results([("wiki", raw)], limit=10)
+        meta = results[0]["matchedChunks"][0]["metadata"]
+        assert meta["Project"] == "huginn"   # parsed from **Project:** line
+        assert meta["gitBranch"] == "main"   # preserved from the chunk's own metadata
+
+    def test_max_chunk_chars_truncates_full_mode(self):
+        doc = _doc_with_chunks("a", [("x" * 500, -1.0, None, None)])
+        raw = {"results": [doc], "reranked": True}
+        results, _ = shape_search_results([("wiki", raw)], limit=10, max_chunk_chars=100)
+        content = results[0]["matchedChunks"][0]["content"]
+        assert content == "x" * 100 + "…"
+
+    def test_limit_caps_returned_results(self):
+        raw = {"results": [_shape_doc_raw(f"d{i}", -1.0 + i * 0.01) for i in range(5)], "reranked": True}
+        results, _ = shape_search_results([("wiki", raw)], limit=3)
+        assert len(results) == 3
+
+    def test_low_confidence_flag_propagates(self):
+        raw = {"results": [_shape_doc_raw("a", -1.0)], "reranked": True, "lowConfidence": True}
+        _, any_low = shape_search_results([("wiki", raw)], limit=10)
+        assert any_low is True
+
+
 class TestModelConfig:
     """Verify model configuration to prevent MPS memory explosion on Apple Silicon."""
 
