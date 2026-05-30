@@ -45,12 +45,15 @@ class KnowledgeGraph:
                 self.outgoing[edge["source"]].append(edge)
                 self.incoming[edge["target"]].append(edge)
 
-        # Build fast lookup for LLM-extracted entities (entity:* nodes)
-        # Only include labels with 3+ chars to avoid false positives
+        # Build fast lookup for LLM-extracted entities (entity:* nodes).
+        # Only include labels with 3+ chars, and match on word boundaries so a
+        # short label can't match inside an unrelated word ("api" in "rapid",
+        # "nav" in "navnet", "sed" in "used"). Patterns are compiled once here.
         self._entity_patterns = []
         for node_id, node in self.nodes.items():
             if node_id.startswith(ENTITY_PREFIX) and len(node["label"]) >= 3:
-                self._entity_patterns.append((node["label"].lower(), node_id))
+                pattern = re.compile(rf'(?<!\w){re.escape(node["label"])}(?!\w)', re.IGNORECASE)
+                self._entity_patterns.append((pattern, node_id))
 
     def node_count(self) -> int:
         return len(self.nodes)
@@ -119,12 +122,11 @@ class KnowledgeGraph:
                 _add(issue_id, m.group(0))
             elif epic_id in self.nodes:
                 _add(epic_id, m.group(0))
-        # LLM-extracted entities: match by label (case-insensitive word boundary)
-        if self._entity_patterns:
-            text_lower = text.lower()
-            for label_lower, node_id in self._entity_patterns:
-                if label_lower in text_lower:
-                    _add(node_id, label_lower)
+        # LLM-extracted entities: match each label on word boundaries (case-insensitive)
+        for pattern, node_id in self._entity_patterns:
+            m = pattern.search(text)
+            if m:
+                _add(node_id, m.group(0))
 
         deduped = list(dict.fromkeys(found))  # preserve insertion order
         if with_spans:

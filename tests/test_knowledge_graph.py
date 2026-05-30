@@ -90,6 +90,51 @@ class TestEntityDetection:
         assert sample_graph.detect_entities("ingen entiteter her") == []
 
 
+@pytest.fixture
+def llm_entity_graph(tmp_path):
+    """Graph with LLM-extracted entity:* nodes whose labels are short, common
+    substrings — the case that exposed the unanchored-match bug (H6)."""
+    graph_data = {
+        "nodes": [
+            {"id": "entity:nav", "type": "Entity", "label": "NAV", "properties": {}},
+            {"id": "entity:api", "type": "Entity", "label": "API", "properties": {}},
+            {"id": "entity:sed", "type": "Entity", "label": "SED", "properties": {}},
+            {"id": "entity:trygdeavgift", "type": "Entity", "label": "trygdeavgift", "properties": {}},
+        ],
+        "edges": [],
+    }
+    graph_file = tmp_path / "llm_graph.json"
+    graph_file.write_text(json.dumps(graph_data))
+    return KnowledgeGraph(graph_file)
+
+
+class TestLlmEntityWordBoundary:
+    """LLM-entity labels must match on word boundaries, not as bare substrings (H6)."""
+
+    def test_matches_standalone_word(self, llm_entity_graph):
+        assert "entity:nav" in llm_entity_graph.detect_entities("ansatt i NAV siden 2020")
+
+    def test_case_insensitive(self, llm_entity_graph):
+        assert "entity:api" in llm_entity_graph.detect_entities("kall mot api-et")
+
+    def test_does_not_match_inside_larger_word(self, llm_entity_graph):
+        # "nav" inside "navnet", "api" inside "rapid", "sed" inside "used" must NOT match.
+        entities = llm_entity_graph.detect_entities("navnet på rapid prototyping ble used")
+        assert "entity:nav" not in entities
+        assert "entity:api" not in entities
+        assert "entity:sed" not in entities
+
+    def test_multi_token_label_still_matches(self, llm_entity_graph):
+        assert "entity:trygdeavgift" in llm_entity_graph.detect_entities(
+            "beregning av trygdeavgift for utsendte"
+        )
+
+    def test_recorded_span_preserves_original_case(self, llm_entity_graph):
+        spans = llm_entity_graph.detect_entities("søk i NAV-systemet", with_spans=True)
+        nav = [span for nid, span in spans if nid == "entity:nav"]
+        assert nav == ["NAV"]
+
+
 class TestQueryExpansion:
     def test_expansion_includes_node_label(self, sample_graph):
         terms = sample_graph.get_expansion_terms(["buc:LA_BUC_01"])
