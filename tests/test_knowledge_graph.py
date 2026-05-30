@@ -360,6 +360,57 @@ class TestMergedGraph:
         assert merged_graph.node_count() == 4  # 2 EESSI + 2 Jira
 
 
+class TestGraphMerge:
+    """Merging multiple graph files: duplicate-node merge + edge dedup (M1, M3)."""
+
+    def test_duplicate_node_merges_properties(self, tmp_path):
+        a = {"nodes": [{"id": "n:1", "type": "T", "label": "L", "properties": {"x": 1}}], "edges": []}
+        b = {"nodes": [{"id": "n:1", "type": "T", "label": "L", "properties": {"y": 2}}], "edges": []}
+        fa, fb = tmp_path / "a.json", tmp_path / "b.json"
+        fa.write_text(json.dumps(a))
+        fb.write_text(json.dumps(b))
+        g = KnowledgeGraph([fa, fb])
+        assert g.node_count() == 1
+        assert g.nodes["n:1"]["properties"] == {"x": 1, "y": 2}
+
+    def test_duplicate_node_without_properties_key_does_not_raise(self, tmp_path):
+        # First copy lacks a "properties" key entirely — must not KeyError on merge.
+        a = {"nodes": [{"id": "n:1", "type": "T", "label": "L"}], "edges": []}
+        b = {"nodes": [{"id": "n:1", "type": "T", "label": "L", "properties": {"y": 2}}], "edges": []}
+        fa, fb = tmp_path / "a.json", tmp_path / "b.json"
+        fa.write_text(json.dumps(a))
+        fb.write_text(json.dumps(b))
+        g = KnowledgeGraph([fa, fb])
+        assert g.nodes["n:1"]["properties"] == {"y": 2}
+
+    def test_merge_does_not_mutate_source_dict(self, tmp_path):
+        a = {"nodes": [{"id": "n:1", "type": "T", "label": "L", "properties": {"x": 1}}], "edges": []}
+        b = {"nodes": [{"id": "n:1", "type": "T", "label": "L", "properties": {"y": 2}}], "edges": []}
+        fa, fb = tmp_path / "a.json", tmp_path / "b.json"
+        fa.write_text(json.dumps(a))
+        fb.write_text(json.dumps(b))
+        KnowledgeGraph([fa, fb])
+        # Re-read the first file from disk: its node must be untouched by the merge.
+        reread = json.loads(fa.read_text())
+        assert reread["nodes"][0]["properties"] == {"x": 1}
+
+    def test_duplicate_edge_across_files_is_deduped(self, tmp_path):
+        edge = {"source": "n:1", "target": "n:2", "type": "rel", "properties": {}}
+        nodes = [
+            {"id": "n:1", "type": "T", "label": "1", "properties": {}},
+            {"id": "n:2", "type": "T", "label": "2", "properties": {}},
+        ]
+        a = {"nodes": nodes, "edges": [edge]}
+        b = {"nodes": nodes, "edges": [edge]}
+        fa, fb = tmp_path / "a.json", tmp_path / "b.json"
+        fa.write_text(json.dumps(a))
+        fb.write_text(json.dumps(b))
+        g = KnowledgeGraph([fa, fb])
+        assert g.edge_count() == 1
+        assert len(g.outgoing["n:1"]) == 1
+        assert len(g.incoming["n:2"]) == 1
+
+
 class TestGraphCounts:
     def test_node_count(self, sample_graph):
         assert sample_graph.node_count() == 11
