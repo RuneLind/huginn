@@ -20,14 +20,13 @@ Usage:
 import os
 import re
 import json
-import shutil
 import argparse
 import logging
 from fnmatch import fnmatch
 
+from main.sources.cleanup import md_cleanup
 from main.utils.frontmatter import read_frontmatter_and_body
 from main.utils.logger import setup_root_logger
-from main.utils.manifest import merge_manifest_entries
 
 setup_root_logger()
 
@@ -186,122 +185,85 @@ def main():
     category_counts = {"empty_stub": 0, "reference_only": 0, "minimal_content": 0, "low_word_count": 0, "noise_path": 0, "noise_title": 0}
     total_scanned = 0
 
-    for root, dirs, files in os.walk(save_md_path):
-        # Skip the .excluded directory
-        dirs[:] = [d for d in dirs if d != EXCLUDED_DIR]
+    for filepath, rel_path in md_cleanup.iter_markdown_files(save_md_path):
+        total_scanned += 1
 
-        for filename in files:
-            if not filename.endswith(".md"):
-                continue
-
-            total_scanned += 1
-            filepath = os.path.join(root, filename)
-            rel_path = os.path.relpath(filepath, save_md_path)
-
-            # Check path-based noise patterns first (cheap, no file read needed)
-            noise_reason = match_noise_pattern(rel_path, noise_patterns)
-            if noise_reason:
-                category_counts["noise_path"] += 1
-                try:
-                    metadata, _ = read_frontmatter_and_body(filepath)
-                except Exception:
-                    metadata = {}
-
-                manifest_entries.append({
-                    "page_id": metadata.get("page_id", ""),
-                    "modifiedTime": metadata.get("modifiedTime", ""),
-                    "reason": f"noise_path: {noise_reason}",
-                    "original_path": rel_path,
-                    "title": metadata.get("title", ""),
-                    "space": metadata.get("space", ""),
-                })
-
-                if args.dryRun:
-                    logging.info(f"[DRY RUN] [noise_path: {noise_reason}] {rel_path}")
-                else:
-                    dest = os.path.join(excluded_path, rel_path)
-                    os.makedirs(os.path.dirname(dest), exist_ok=True)
-                    shutil.move(filepath, dest)
-                continue
-
-            # Content-based classification (also used for title noise check)
+        # Check path-based noise patterns first (cheap, no file read needed)
+        noise_reason = match_noise_pattern(rel_path, noise_patterns)
+        if noise_reason:
+            category_counts["noise_path"] += 1
             try:
-                metadata, body = read_frontmatter_and_body(filepath)
-            except Exception as e:
-                logging.warning(f"Could not parse {filepath}: {e}")
-                continue
-
-            # Check title-based noise patterns
-            title_noise_reason = match_title_noise_pattern(metadata.get("title", ""), noise_patterns)
-            if title_noise_reason:
-                category_counts["noise_title"] += 1
-                manifest_entries.append({
-                    "page_id": metadata.get("page_id", ""),
-                    "modifiedTime": metadata.get("modifiedTime", ""),
-                    "reason": f"noise_title: {title_noise_reason}",
-                    "original_path": rel_path,
-                    "title": metadata.get("title", ""),
-                    "space": metadata.get("space", ""),
-                })
-                if args.dryRun:
-                    logging.info(f"[DRY RUN] [noise_title: {title_noise_reason}] {rel_path}")
-                else:
-                    dest = os.path.join(excluded_path, rel_path)
-                    os.makedirs(os.path.dirname(dest), exist_ok=True)
-                    shutil.move(filepath, dest)
-                continue
-
-            reason = classify_body(body, min_content_length, min_word_count)
-            if reason is None:
-                continue
-
-            category_counts[reason] += 1
+                metadata, _ = read_frontmatter_and_body(filepath)
+            except Exception:
+                metadata = {}
 
             manifest_entries.append({
                 "page_id": metadata.get("page_id", ""),
                 "modifiedTime": metadata.get("modifiedTime", ""),
-                "reason": reason,
+                "reason": f"noise_path: {noise_reason}",
                 "original_path": rel_path,
                 "title": metadata.get("title", ""),
                 "space": metadata.get("space", ""),
             })
 
             if args.dryRun:
-                logging.info(f"[DRY RUN] [{reason}] {rel_path}")
+                logging.info(f"[DRY RUN] [noise_path: {noise_reason}] {rel_path}")
             else:
-                dest = os.path.join(excluded_path, rel_path)
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
-                shutil.move(filepath, dest)
+                md_cleanup.move_to_excluded(filepath, rel_path, excluded_path)
+            continue
+
+        # Content-based classification (also used for title noise check)
+        try:
+            metadata, body = read_frontmatter_and_body(filepath)
+        except Exception as e:
+            logging.warning(f"Could not parse {filepath}: {e}")
+            continue
+
+        # Check title-based noise patterns
+        title_noise_reason = match_title_noise_pattern(metadata.get("title", ""), noise_patterns)
+        if title_noise_reason:
+            category_counts["noise_title"] += 1
+            manifest_entries.append({
+                "page_id": metadata.get("page_id", ""),
+                "modifiedTime": metadata.get("modifiedTime", ""),
+                "reason": f"noise_title: {title_noise_reason}",
+                "original_path": rel_path,
+                "title": metadata.get("title", ""),
+                "space": metadata.get("space", ""),
+            })
+            if args.dryRun:
+                logging.info(f"[DRY RUN] [noise_title: {title_noise_reason}] {rel_path}")
+            else:
+                md_cleanup.move_to_excluded(filepath, rel_path, excluded_path)
+            continue
+
+        reason = classify_body(body, min_content_length, min_word_count)
+        if reason is None:
+            continue
+
+        category_counts[reason] += 1
+
+        manifest_entries.append({
+            "page_id": metadata.get("page_id", ""),
+            "modifiedTime": metadata.get("modifiedTime", ""),
+            "reason": reason,
+            "original_path": rel_path,
+            "title": metadata.get("title", ""),
+            "space": metadata.get("space", ""),
+        })
+
+        if args.dryRun:
+            logging.info(f"[DRY RUN] [{reason}] {rel_path}")
+        else:
+            md_cleanup.move_to_excluded(filepath, rel_path, excluded_path)
 
     # Write manifest
-    if not args.dryRun and manifest_entries:
-        os.makedirs(excluded_path, exist_ok=True)
-        manifest_path = os.path.join(excluded_path, "excluded_manifest.json")
-
-        # Merge with existing manifest if present
-        if os.path.exists(manifest_path):
-            with open(manifest_path, "r", encoding="utf-8") as f:
-                existing = json.load(f)
-            manifest_entries = merge_manifest_entries(existing, manifest_entries, "page_id")
-
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(manifest_entries, f, indent=2, ensure_ascii=False)
-        logging.info(f"Wrote manifest with {len(manifest_entries)} entries to {manifest_path}")
+    if not args.dryRun:
+        md_cleanup.write_excluded_manifest(excluded_path, manifest_entries, "page_id")
 
     # Clean up empty directories
     if not args.dryRun:
-        for root, dirs, files in os.walk(save_md_path, topdown=False):
-            if EXCLUDED_DIR in root.split(os.sep):
-                continue
-            for d in dirs:
-                if d == EXCLUDED_DIR:
-                    continue
-                dir_path = os.path.join(root, d)
-                try:
-                    if not os.listdir(dir_path):
-                        os.rmdir(dir_path)
-                except Exception:
-                    pass
+        md_cleanup.remove_empty_dirs(save_md_path)
 
     action = "Would move" if args.dryRun else "Moved"
     total_excluded = sum(category_counts.values())

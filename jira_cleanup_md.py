@@ -22,6 +22,7 @@ import argparse
 import logging
 from datetime import datetime, timedelta
 
+from main.sources.cleanup import md_cleanup
 from main.utils.frontmatter import read_frontmatter_and_body
 from main.utils.logger import setup_root_logger
 from main.utils.manifest import merge_manifest_entries
@@ -229,28 +230,20 @@ def main():
     # graph keeps its er_subtask_av edges intact.
     classifications = []  # list of (filepath, rel_path, metadata, category, reason)
 
-    for root, dirs, files in os.walk(save_md_path):
-        dirs[:] = [d for d in dirs if d != EXCLUDED_DIR]
+    for filepath, rel_path in md_cleanup.iter_markdown_files(save_md_path):
+        total_scanned += 1
 
-        for filename in files:
-            if not filename.endswith(".md"):
-                continue
+        try:
+            metadata, body = read_frontmatter_and_body(filepath)
+        except Exception as e:
+            logging.warning(f"Could not parse {filepath}: {e}")
+            continue
 
-            total_scanned += 1
-            filepath = os.path.join(root, filename)
-            rel_path = os.path.relpath(filepath, save_md_path)
-
-            try:
-                metadata, body = read_frontmatter_and_body(filepath)
-            except Exception as e:
-                logging.warning(f"Could not parse {filepath}: {e}")
-                continue
-
-            category, reason = compute_exclusion(
-                metadata, body, age_cutoff, noise_patterns,
-                min_content_length, min_word_count,
-            )
-            classifications.append((filepath, rel_path, metadata, category, reason))
+        category, reason = compute_exclusion(
+            metadata, body, age_cutoff, noise_patterns,
+            min_content_length, min_word_count,
+        )
+        classifications.append((filepath, rel_path, metadata, category, reason))
 
     # Pass 2 — collect parent keys referenced by files that survive Pass 1.
     preserved_parents = set()
@@ -316,9 +309,7 @@ def main():
         if args.dryRun:
             logging.info(f"[DRY RUN] [{tag}] {rel_path}")
         else:
-            dest = os.path.join(excluded_path, rel_path)
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            shutil.move(filepath, dest)
+            md_cleanup.move_to_excluded(filepath, rel_path, excluded_path)
 
     if new_manifest_entries:
         merged = merge_manifest_entries(manifest, new_manifest_entries, "issue_key")
@@ -334,18 +325,7 @@ def main():
 
     # Clean up empty directories
     if not args.dryRun:
-        for root, dirs, files in os.walk(save_md_path, topdown=False):
-            if EXCLUDED_DIR in root.split(os.sep):
-                continue
-            for d in dirs:
-                if d == EXCLUDED_DIR:
-                    continue
-                dir_path = os.path.join(root, d)
-                try:
-                    if not os.listdir(dir_path):
-                        os.rmdir(dir_path)
-                except Exception:
-                    pass
+        md_cleanup.remove_empty_dirs(save_md_path)
 
     action = "Would move" if args.dryRun else "Moved"
     preserved = category_counts.get("preserved_as_parent", 0)
