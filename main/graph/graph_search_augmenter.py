@@ -24,6 +24,18 @@ _CONJUNCTION_SPLITS = (" versus ", " vs. ", " vs ", " and ", " og ", " & ")
 _TRAILING_PARENS_RE = re.compile(r'\s*\([^)]*\)\s*$')
 _TOKEN_PUNCT = ".,!?;:\"'()"
 
+
+def _contains_word(text: str, term: str) -> bool:
+    """True if `term` occurs as a whole word in `text` (case-insensitive).
+
+    Word-boundary matching avoids treating an expansion term as already present
+    when it is only a substring of a larger query word ("art" inside "artikkel"),
+    which would otherwise wrongly drop a useful expansion term.
+    """
+    if not term:
+        return False
+    return re.search(rf'(?<!\w){re.escape(term)}(?!\w)', text, re.IGNORECASE) is not None
+
 # Norwegian + English filler — common enough to drop without losing query meaning,
 # small enough to maintain by hand. Used both for picking which word to drop and
 # for trimming a trailing stopword left behind.
@@ -198,7 +210,7 @@ class GraphSearchAugmenter:
             for term in self.graph.get_expansion_terms(detected_entities):
                 if not term:
                     continue
-                if term.lower() in q_lower or term in related:
+                if _contains_word(q, term) or term in related:
                     continue
                 related.append(term)
                 if len(related) >= self.RETRY_TERM_LIMIT:
@@ -210,12 +222,12 @@ class GraphSearchAugmenter:
         narrower_strategy: str | None = None
         if entity_labels:
             top = entity_labels[0]
-            if top.lower() not in q_lower:
+            if not _contains_word(q, top):
                 narrower_query = f"{q} {top}".strip()
                 narrower_strategy = "entity_label_append"
         else:
             seed = self._fallback_narrower_seed(q)
-            if seed and seed.lower() not in q_lower:
+            if seed and not _contains_word(q, seed):
                 narrower_query = f"{q} {seed}".strip()
                 narrower_strategy = "fallback_seed"
         if narrower_query:
