@@ -12,7 +12,8 @@ import json
 import logging
 from typing import Callable, Literal
 
-from main.core.search_response_formatter import run_corrective_search, shape_search_results
+from main.core.search_pipeline import search_and_shape
+from main.core.search_response_formatter import run_corrective_search
 from main.core.search_trace import create_trace
 from main.graph.graph_search_augmenter import GraphSearchAugmenter
 
@@ -53,38 +54,39 @@ def build_search_tool_fn(
 
         search_q, graph_answer, detected_entities = augmenter.augment_query(query, trace)
 
-        raw = searcher.search(
-            search_q,
+        target_searchers = {collection_name: searcher}
+        search_kwargs = dict(
             max_number_of_chunks=max_number_of_chunks,
             max_number_of_documents=max_number_of_documents,
             include_text_content=include_full_text,
             include_matched_chunks_content=not include_full_text,
+        )
+        shape_kwargs = dict(limit=max_number_of_documents)
+
+        results, per_collection, any_low_confidence = search_and_shape(
+            target_searchers,
+            search_q,
+            augmenter=augmenter,
+            detected_entities=detected_entities,
             trace=trace,
             title_boost_query=query,
+            search_kwargs=search_kwargs,
+            shape_kwargs=shape_kwargs,
         )
-        results, any_low_confidence = shape_search_results(
-            [(collection_name, raw)],
-            limit=max_number_of_documents,
-        )
-        augmenter.enrich_results(results, detected_entities)
 
-        reranked = bool(raw.get("reranked", True))
+        reranked = bool(per_collection[0][1].get("reranked", True))
 
         def rerun_search_fn(rescue_query: str):
-            rescue_raw = searcher.search(
+            rescue_results, _, _ = search_and_shape(
+                target_searchers,
                 rescue_query,
-                max_number_of_chunks=max_number_of_chunks,
-                max_number_of_documents=max_number_of_documents,
-                include_text_content=include_full_text,
-                include_matched_chunks_content=not include_full_text,
+                augmenter=augmenter,
+                detected_entities=detected_entities,
                 trace=trace,
                 title_boost_query=rescue_query,
+                search_kwargs=search_kwargs,
+                shape_kwargs=shape_kwargs,
             )
-            rescue_results, _ = shape_search_results(
-                [(collection_name, rescue_raw)],
-                limit=max_number_of_documents,
-            )
-            augmenter.enrich_results(rescue_results, detected_entities)
             return rescue_results
 
         results, response = run_corrective_search(
