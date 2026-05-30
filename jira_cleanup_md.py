@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 
 from main.utils.frontmatter import read_frontmatter_and_body
 from main.utils.logger import setup_root_logger
+from main.utils.manifest import merge_manifest_entries
 
 setup_root_logger()
 
@@ -320,10 +321,9 @@ def main():
             shutil.move(filepath, dest)
 
     if new_manifest_entries:
-        existing_keys = {e["issue_key"] for e in manifest}
-        additions = [e for e in new_manifest_entries if e["issue_key"] not in existing_keys]
-        if additions:
-            manifest = manifest + additions
+        merged = merge_manifest_entries(manifest, new_manifest_entries, "issue_key")
+        if len(merged) > len(manifest):
+            manifest = merged
             manifest_changed = True
 
     if not args.dryRun and manifest_changed:
