@@ -20,6 +20,7 @@ import logging
 
 from main.utils.frontmatter import read_frontmatter_and_body
 from main.utils.logger import setup_root_logger
+from main.utils.manifest import merge_manifest_entries
 
 setup_root_logger()
 
@@ -123,12 +124,10 @@ def main():
         manifest_path = os.path.join(excluded_path, "excluded_manifest.json")
 
         # Merge with existing manifest if present
-        existing = []
         if os.path.exists(manifest_path):
             with open(manifest_path, "r", encoding="utf-8") as f:
                 existing = json.load(f)
-            existing_ids = {e["notion_id"] for e in existing}
-            manifest_entries = existing + [e for e in manifest_entries if e["notion_id"] not in existing_ids]
+            manifest_entries = merge_manifest_entries(existing, manifest_entries, "notion_id")
 
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump(manifest_entries, f, indent=2, ensure_ascii=False)
