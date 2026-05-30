@@ -76,11 +76,19 @@ class ConfluenceCloudDocumentReader:
         return self.base_url + relative_path
     
     def __read_comments(self, page):
-        if page['content']['children']['comment']['size'] == 0:
+        # The comment expansion can be absent for a page (API omission, restricted
+        # content). Resolve it defensively so one such page yields zero comments
+        # instead of a KeyError that aborts the whole ingest.
+        comment = (
+            page.get('content', {})
+            .get('children', {})
+            .get('comment', {})
+        )
+        if comment.get('size', 0) == 0:
             return []
 
         if not self.read_all_comments:
-            return page['content']['children']['comment']['results']
+            return comment.get('results', [])
 
         read_batch_func = lambda start_at, batch_size, cursor = None: self.__request(
             self.__add_url_prefix(f"/wiki/rest/api/content/{page['content']['id']}/child/comment"),
