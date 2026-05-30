@@ -285,6 +285,7 @@ class DocumentCollectionCreator:
         number_of_documents = len(self.persister.read_folder_files(f"{self.collection_name}/documents"))
 
         contextual_prefix_block = self.__build_contextual_prefix_block(existing_manifest)
+        embedding_block = self.__embedding_metadata()
 
         if existing_manifest:
             merged = { **existing_manifest,
@@ -298,6 +299,8 @@ class DocumentCollectionCreator:
             elif "contextualPrefix" in merged and self.chunk_prefixer is None:
                 # leave the existing block in place on no-op updates so re-enabling later stays consistent
                 pass
+            if embedding_block:
+                merged["embedding"] = embedding_block
             return merged
 
         manifest = {
@@ -311,7 +314,20 @@ class DocumentCollectionCreator:
         }
         if contextual_prefix_block:
             manifest["contextualPrefix"] = contextual_prefix_block
+        if embedding_block:
+            manifest["embedding"] = embedding_block
         return manifest
+
+    def __embedding_metadata(self):
+        """Embedding model identity + library versions from the FAISS indexer, if any.
+
+        Stamped into the manifest so a later load can detect that the embedding
+        model or its libraries drifted from what produced the persisted vectors (H15).
+        """
+        for indexer in self.document_indexers:
+            if hasattr(indexer, "get_embedding_metadata"):
+                return indexer.get_embedding_metadata()
+        return None
 
     def __build_contextual_prefix_block(self, existing_manifest):
         if self.chunk_prefixer is None:
