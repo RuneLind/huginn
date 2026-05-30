@@ -1,3 +1,6 @@
+from dataclasses import dataclass
+
+
 def extract_page_properties(properties):
     """Extract non-title properties from a Notion page and render as markdown."""
     if not properties:
@@ -180,147 +183,201 @@ def convert_blocks_to_markdown(blocks, depth=0, max_depth=10):
     return "\n".join(lines)
 
 
+@dataclass
+class _BlockCtx:
+    """Everything a block handler needs, resolved once in _convert_block."""
+    block_type: str
+    data: dict
+    children: list
+    depth: int
+    max_depth: int
+    numbered_counter: int
+
+
+def _attachment_url_caption(data):
+    """Resolve the (url, caption) pair shared by image/pdf/video/file blocks.
+
+    Notion nests the file payload under a key named after its own ``type``
+    (``external`` or ``file``), e.g. data["external"]["url"].
+    """
+    media = data.get(data.get("type", ""), {})
+    return media.get("url", ""), _rich_text_to_markdown(data.get("caption", []))
+
+
+def _block_paragraph(ctx):
+    text = _rich_text_to_markdown(ctx.data.get("rich_text", []))
+    return _with_children(text, ctx.children, ctx.depth, ctx.max_depth)
+
+
+def _block_heading(ctx):
+    level = int(ctx.block_type[-1])
+    text = _rich_text_to_markdown(ctx.data.get("rich_text", []))
+    return f"{'#' * level} {text}"
+
+
+def _block_bulleted_list_item(ctx):
+    text = _rich_text_to_markdown(ctx.data.get("rich_text", []))
+    result = f"{'  ' * ctx.depth}- {text}"
+    if ctx.children:
+        child_md = convert_blocks_to_markdown(ctx.children, ctx.depth + 1, ctx.max_depth)
+        if child_md:
+            result += "\n" + child_md
+    return result
+
+
+def _block_numbered_list_item(ctx):
+    text = _rich_text_to_markdown(ctx.data.get("rich_text", []))
+    result = f"{'  ' * ctx.depth}{ctx.numbered_counter}. {text}"
+    if ctx.children:
+        child_md = convert_blocks_to_markdown(ctx.children, ctx.depth + 1, ctx.max_depth)
+        if child_md:
+            result += "\n" + child_md
+    return result
+
+
+def _block_to_do(ctx):
+    text = _rich_text_to_markdown(ctx.data.get("rich_text", []))
+    checkbox = "[x]" if ctx.data.get("checked", False) else "[ ]"
+    return f"- {checkbox} {text}"
+
+
+def _block_code(ctx):
+    text = _rich_text_to_markdown(ctx.data.get("rich_text", []), apply_annotations=False)
+    language = ctx.data.get("language", "")
+    return f"```{language}\n{text}\n```"
+
+
+def _block_quote(ctx):
+    text = _rich_text_to_markdown(ctx.data.get("rich_text", []))
+    quoted = "\n".join(f"> {line}" for line in text.split("\n"))
+    return _with_children(quoted, ctx.children, ctx.depth, ctx.max_depth)
+
+
+def _block_callout(ctx):
+    icon = ctx.data.get("icon") or {}
+    emoji = icon.get("emoji", "") if icon.get("type") == "emoji" else ""
+    text = _rich_text_to_markdown(ctx.data.get("rich_text", []))
+    prefix = f"{emoji} " if emoji else ""
+    result = f"> {prefix}{text}"
+    if ctx.children:
+        child_md = convert_blocks_to_markdown(ctx.children, ctx.depth, ctx.max_depth)
+        if child_md:
+            result += "\n" + "\n".join(f"> {line}" for line in child_md.split("\n"))
+    return result
+
+
+def _block_divider(ctx):
+    return "---"
+
+
+def _block_image(ctx):
+    url, caption = _attachment_url_caption(ctx.data)
+    alt = caption if caption else "image"
+    return f"![{alt}]({url})"
+
+
+def _block_bookmark(ctx):
+    url = ctx.data.get("url", "")
+    caption = _rich_text_to_markdown(ctx.data.get("caption", []))
+    label = caption if caption else url
+    return f"[{label}]({url})"
+
+
+def _block_embed(ctx):
+    url = ctx.data.get("url", "")
+    return f"[Embed: {url}]({url})"
+
+
+def _block_table(ctx):
+    return _convert_table(ctx.children)
+
+
+def _block_toggle(ctx):
+    text = _rich_text_to_markdown(ctx.data.get("rich_text", []))
+    result = f"**{text}**"
+    if ctx.children:
+        child_md = convert_blocks_to_markdown(ctx.children, ctx.depth, ctx.max_depth)
+        if child_md:
+            result += "\n" + child_md
+    return result
+
+
+def _block_child_page(ctx):
+    return f"[Child page: {ctx.data.get('title', '')}]"
+
+
+def _block_child_database(ctx):
+    return f"[Child database: {ctx.data.get('title', '')}]"
+
+
+def _block_equation(ctx):
+    return f"$${ctx.data.get('expression', '')}$$"
+
+
+def _block_passthrough_children(ctx):
+    if ctx.children:
+        return convert_blocks_to_markdown(ctx.children, ctx.depth, ctx.max_depth)
+    return None
+
+
+def _block_none(ctx):
+    return None
+
+
+def _block_link_preview(ctx):
+    url = ctx.data.get("url", "")
+    return f"[Link: {url}]({url})" if url else None
+
+
+def _block_attachment(label):
+    """Build a handler for the ``[Label: caption-or-url](url)`` attachment blocks."""
+    def handler(ctx):
+        url, caption = _attachment_url_caption(ctx.data)
+        return f"[{label}: {caption or url}]({url})"
+    return handler
+
+
+_BLOCK_HANDLERS = {
+    "paragraph": _block_paragraph,
+    "heading_1": _block_heading,
+    "heading_2": _block_heading,
+    "heading_3": _block_heading,
+    "bulleted_list_item": _block_bulleted_list_item,
+    "numbered_list_item": _block_numbered_list_item,
+    "to_do": _block_to_do,
+    "code": _block_code,
+    "quote": _block_quote,
+    "callout": _block_callout,
+    "divider": _block_divider,
+    "image": _block_image,
+    "bookmark": _block_bookmark,
+    "embed": _block_embed,
+    "table": _block_table,
+    "toggle": _block_toggle,
+    "child_page": _block_child_page,
+    "child_database": _block_child_database,
+    "equation": _block_equation,
+    "synced_block": _block_passthrough_children,
+    "column_list": _block_passthrough_children,
+    "column": _block_passthrough_children,
+    "table_of_contents": _block_none,
+    "breadcrumb": _block_none,
+    "link_preview": _block_link_preview,
+    "pdf": _block_attachment("PDF"),
+    "video": _block_attachment("Video"),
+    "file": _block_attachment("File"),
+}
+
+
 def _convert_block(block, depth, max_depth, numbered_counter):
     block_type = block.get("type", "")
     data = block.get(block_type, {})
     children = block.get("children", [])
 
-    if block_type == "paragraph":
-        text = _rich_text_to_markdown(data.get("rich_text", []))
-        return _with_children(text, children, depth, max_depth)
-
-    if block_type in ("heading_1", "heading_2", "heading_3"):
-        level = int(block_type[-1])
-        prefix = "#" * level
-        text = _rich_text_to_markdown(data.get("rich_text", []))
-        return f"{prefix} {text}"
-
-    if block_type == "bulleted_list_item":
-        text = _rich_text_to_markdown(data.get("rich_text", []))
-        indent = "  " * depth
-        result = f"{indent}- {text}"
-        if children:
-            child_md = convert_blocks_to_markdown(children, depth + 1, max_depth)
-            if child_md:
-                result += "\n" + child_md
-        return result
-
-    if block_type == "numbered_list_item":
-        text = _rich_text_to_markdown(data.get("rich_text", []))
-        indent = "  " * depth
-        result = f"{indent}{numbered_counter}. {text}"
-        if children:
-            child_md = convert_blocks_to_markdown(children, depth + 1, max_depth)
-            if child_md:
-                result += "\n" + child_md
-        return result
-
-    if block_type == "to_do":
-        text = _rich_text_to_markdown(data.get("rich_text", []))
-        checked = data.get("checked", False)
-        checkbox = "[x]" if checked else "[ ]"
-        return f"- {checkbox} {text}"
-
-    if block_type == "code":
-        text = _rich_text_to_markdown(data.get("rich_text", []), apply_annotations=False)
-        language = data.get("language", "")
-        return f"```{language}\n{text}\n```"
-
-    if block_type == "quote":
-        text = _rich_text_to_markdown(data.get("rich_text", []))
-        lines = text.split("\n")
-        quoted = "\n".join(f"> {line}" for line in lines)
-        return _with_children(quoted, children, depth, max_depth)
-
-    if block_type == "callout":
-        icon = data.get("icon") or {}
-        emoji = icon.get("emoji", "") if icon.get("type") == "emoji" else ""
-        text = _rich_text_to_markdown(data.get("rich_text", []))
-        prefix = f"{emoji} " if emoji else ""
-        result = f"> {prefix}{text}"
-        if children:
-            child_md = convert_blocks_to_markdown(children, depth, max_depth)
-            if child_md:
-                child_lines = child_md.split("\n")
-                result += "\n" + "\n".join(f"> {line}" for line in child_lines)
-        return result
-
-    if block_type == "divider":
-        return "---"
-
-    if block_type == "image":
-        image_data = data.get(data.get("type", ""), {})
-        url = image_data.get("url", "")
-        caption = _rich_text_to_markdown(data.get("caption", []))
-        alt = caption if caption else "image"
-        return f"![{alt}]({url})"
-
-    if block_type == "bookmark":
-        url = data.get("url", "")
-        caption = _rich_text_to_markdown(data.get("caption", []))
-        label = caption if caption else url
-        return f"[{label}]({url})"
-
-    if block_type == "embed":
-        url = data.get("url", "")
-        return f"[Embed: {url}]({url})"
-
-    if block_type == "table":
-        return _convert_table(children)
-
-    if block_type == "toggle":
-        text = _rich_text_to_markdown(data.get("rich_text", []))
-        result = f"**{text}**"
-        if children:
-            child_md = convert_blocks_to_markdown(children, depth, max_depth)
-            if child_md:
-                result += "\n" + child_md
-        return result
-
-    if block_type == "child_page":
-        title = data.get("title", "")
-        return f"[Child page: {title}]"
-
-    if block_type == "child_database":
-        title = data.get("title", "")
-        return f"[Child database: {title}]"
-
-    if block_type == "equation":
-        expression = data.get("expression", "")
-        return f"$${expression}$$"
-
-    if block_type in ("synced_block", "column_list", "column"):
-        if children:
-            return convert_blocks_to_markdown(children, depth, max_depth)
-        return None
-
-    if block_type == "table_of_contents":
-        return None
-
-    if block_type == "breadcrumb":
-        return None
-
-    if block_type == "link_preview":
-        url = data.get("url", "")
-        return f"[Link: {url}]({url})" if url else None
-
-    if block_type == "pdf":
-        pdf_data = data.get(data.get("type", ""), {})
-        url = pdf_data.get("url", "")
-        caption = _rich_text_to_markdown(data.get("caption", []))
-        return f"[PDF: {caption or url}]({url})"
-
-    if block_type == "video":
-        video_data = data.get(data.get("type", ""), {})
-        url = video_data.get("url", "")
-        caption = _rich_text_to_markdown(data.get("caption", []))
-        return f"[Video: {caption or url}]({url})"
-
-    if block_type == "file":
-        file_data = data.get(data.get("type", ""), {})
-        url = file_data.get("url", "")
-        caption = _rich_text_to_markdown(data.get("caption", []))
-        return f"[File: {caption or url}]({url})"
+    handler = _BLOCK_HANDLERS.get(block_type)
+    if handler is not None:
+        ctx = _BlockCtx(block_type, data, children, depth, max_depth, numbered_counter)
+        return handler(ctx)
 
     # Unknown block type: try to extract rich_text content
     rich_text = data.get("rich_text", [])
