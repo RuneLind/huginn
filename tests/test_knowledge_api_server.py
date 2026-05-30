@@ -792,3 +792,93 @@ class TestIngestErrorHandling:
         app.state.youtube_transcripts_path = None
         resp = self._client().post("/api/youtube/ingest", json={"title": "T", "url": "https://x"})
         assert resp.status_code == 503
+
+
+class TestGraphRoutes:
+    """HTTP coverage for the knowledge-graph routes (M17)."""
+
+    def _graph(self, tmp_path):
+        import json as _json
+        from main.graph.knowledge_graph import KnowledgeGraph
+        data = {
+            "nodes": [
+                {"id": "epic:E-1", "type": "Epic", "label": "Root epic", "properties": {}},
+                {"id": "issue:S-1", "type": "Issue", "label": "Story 1", "properties": {}},
+            ],
+            "edges": [
+                {"source": "issue:S-1", "target": "epic:E-1", "type": "tilhører_epic", "properties": {}},
+            ],
+        }
+        p = tmp_path / "g.json"
+        p.write_text(_json.dumps(data))
+        return KnowledgeGraph(p)
+
+    def _client(self, store):
+        from main.runtime.knowledge_store import get_store
+        app.dependency_overrides[get_store] = lambda: store
+        return TestClient(app)
+
+    def teardown_method(self):
+        from main.runtime.knowledge_store import get_store
+        app.dependency_overrides.pop(get_store, None)
+
+    def _store_with_graph(self, tmp_path):
+        from main.runtime.knowledge_store import KnowledgeStore
+        store = KnowledgeStore()
+        store.graph = self._graph(tmp_path)
+        return store
+
+    def test_subtree_503_when_no_graph(self):
+        from main.runtime.knowledge_store import KnowledgeStore
+        resp = self._client(KnowledgeStore()).get("/api/graph/epic:E-1/subtree")
+        assert resp.status_code == 503
+
+    def test_subtree_returns_nodes_and_edges(self, tmp_path):
+        resp = self._client(self._store_with_graph(tmp_path)).get("/api/graph/epic:E-1/subtree")
+        assert resp.status_code == 200
+        body = resp.json()
+        ids = {n["id"] for n in body["nodes"]}
+        assert ids == {"epic:E-1", "issue:S-1"}
+        assert body["stats"]["edge_count"] == 1
+
+    def test_subtree_404_for_unknown_node(self, tmp_path):
+        resp = self._client(self._store_with_graph(tmp_path)).get("/api/graph/epic:NOPE/subtree")
+        assert resp.status_code == 404
+
+    def test_node_detail_returns_neighbors(self, tmp_path):
+        resp = self._client(self._store_with_graph(tmp_path)).get("/api/graph/epic:E-1")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["id"] == "epic:E-1"
+        assert len(body["incoming"]) == 1
+
+    def test_node_detail_404_for_unknown(self, tmp_path):
+        resp = self._client(self._store_with_graph(tmp_path)).get("/api/graph/epic:NOPE")
+        assert resp.status_code == 404
+
+
+class TestAuthorGraphRoute:
+    """HTTP coverage for the author-graph route (M17)."""
+
+    def _client(self, store):
+        from main.runtime.knowledge_store import get_store
+        app.dependency_overrides[get_store] = lambda: store
+        return TestClient(app)
+
+    def teardown_method(self):
+        from main.runtime.knowledge_store import get_store
+        app.dependency_overrides.pop(get_store, None)
+
+    def test_returns_cached_graph_without_disk(self):
+        from main.runtime.knowledge_store import KnowledgeStore
+        store = KnowledgeStore()
+        store.set_cached_author_graph("xcol", {"nodes": [], "edges": [], "cached": True})
+        resp = self._client(store).get("/api/collection/xcol/author-graph")
+        assert resp.status_code == 200
+        assert resp.json() == {"nodes": [], "edges": [], "cached": True}
+
+    def test_404_when_no_scores_file(self):
+        from main.runtime.knowledge_store import KnowledgeStore
+        # A collection with no precomputed scores file under huginn-jarvis/data.
+        resp = self._client(KnowledgeStore()).get("/api/collection/no-such-collection-xyz/author-graph")
+        assert resp.status_code == 404
