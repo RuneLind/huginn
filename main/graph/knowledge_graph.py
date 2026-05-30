@@ -33,15 +33,31 @@ class KnowledgeGraph:
         self.outgoing: dict[str, list[dict]] = defaultdict(list)
         self.incoming: dict[str, list[dict]] = defaultdict(list)
 
+        seen_edges: set[tuple[str, str, str]] = set()
         for path in paths:
             data = json.loads(Path(path).read_text())
             for node in data["nodes"]:
-                if node["id"] in self.nodes:
-                    # Merge properties on duplicate nodes
-                    self.nodes[node["id"]]["properties"].update(node.get("properties", {}))
+                existing = self.nodes.get(node["id"])
+                if existing is None:
+                    # Copy so a later file merging into this node never mutates
+                    # the source JSON dict (and tolerate a missing properties key).
+                    stored = dict(node)
+                    stored["properties"] = dict(node.get("properties", {}))
+                    self.nodes[node["id"]] = stored
                 else:
-                    self.nodes[node["id"]] = node
+                    # Merge properties on duplicate nodes; backfill label/type if
+                    # the first-seen copy lacked them.
+                    existing.setdefault("properties", {}).update(node.get("properties", {}))
+                    for key in ("label", "type"):
+                        if not existing.get(key) and node.get(key):
+                            existing[key] = node[key]
             for edge in data["edges"]:
+                # Dedup edges by (source, target, type) so merging files that both
+                # carry the same edge doesn't double it in the adjacency lists.
+                edge_key = (edge["source"], edge["target"], edge["type"])
+                if edge_key in seen_edges:
+                    continue
+                seen_edges.add(edge_key)
                 self.outgoing[edge["source"]].append(edge)
                 self.incoming[edge["target"]].append(edge)
 
