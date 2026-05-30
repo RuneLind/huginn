@@ -123,6 +123,12 @@ class FilesDocumentReader:
         self.fail_fast = fail_fast
         self.start_from_time = start_from_time
 
+        # Log the patterns as compiled so an obviously-wrong one is visible up front;
+        # zero-match exclude patterns are warned about after the walk (H10).
+        logging.info(
+            f"FilesDocumentReader patterns — include: {include_patterns}, exclude: {exclude_patterns}"
+        )
+
         self.file_readers = {
             ".json": self.__read_text_file, # By some reason unstructured lib tries to read json files as ndjson and fails
             ".md": self.__read_text_file, # Read as plain text so converter can strip frontmatter delimiters intact
@@ -190,6 +196,11 @@ class FilesDocumentReader:
 
     def __read_file_pathes(self):
         file_paths = []
+        # Per-pattern hit counts over the files each exclude pattern actually got
+        # to test (those passing include + extension checks), so a pattern that
+        # matches nothing can be flagged — the classic double-backslash foot-gun
+        # compiles fine but never matches a real path, silently indexing everything.
+        exclude_hits = [0] * len(self.compiled_exclude_patterns)
         for root, dirs, files in os.walk(self.base_path):
             # Skip .git directories entirely to avoid walking into git internals
             dirs[:] = [d for d in dirs if d != '.git']
@@ -197,25 +208,48 @@ class FilesDocumentReader:
                 full_path = os.path.join(root, file_name)
                 relative_path = os.path.relpath(full_path, self.base_path)
 
-                if (
-                    os.path.isfile(full_path)
-                    and self.__is_file_included(relative_path)
-                    and not any(relative_path.endswith(ext) for ext in EXCLUDED_FILE_EXTENSIONS)
-                    and not self.__is_file_excluded(relative_path)
-                    and (self.start_from_time is None or self.__read_file_modification_time(full_path) >= self.start_from_time)
-                ):
-                    file_paths.append(full_path)
+                if not os.path.isfile(full_path):
+                    continue
+                if not self.__is_file_included(relative_path):
+                    continue
+                if any(relative_path.endswith(ext) for ext in EXCLUDED_FILE_EXTENSIONS):
+                    continue
+                if self.__is_file_excluded(relative_path, exclude_hits):
+                    continue
+                if self.start_from_time is not None and self.__read_file_modification_time(full_path) < self.start_from_time:
+                    continue
+                file_paths.append(full_path)
 
+        self.__warn_unused_exclude_patterns(exclude_hits)
         return file_paths
-    
+
+    def __warn_unused_exclude_patterns(self, exclude_hits):
+        for pattern_str, hits in zip(self.exclude_patterns, exclude_hits):
+            if hits == 0:
+                logging.warning(
+                    f"Exclude pattern matched 0 files: {pattern_str!r}. If it was meant to "
+                    f"exclude files, check the regex — a double-backslash (e.g. '^\\\\.excluded/.*') "
+                    f"compiles but never matches a real path, so nothing is excluded."
+                )
+            else:
+                logging.info(f"Exclude pattern {pattern_str!r} matched {hits} files")
+
     def __is_file_included(self, file_path: str):
         return any(pattern.fullmatch(file_path) for pattern in self.compiled_include_patterns)
-    
-    def __is_file_excluded(self, file_path: str):
-        return any(pattern.fullmatch(file_path) for pattern in self.compiled_exclude_patterns)
+
+    def __is_file_excluded(self, file_path: str, exclude_hits=None):
+        excluded = False
+        for i, pattern in enumerate(self.compiled_exclude_patterns):
+            if pattern.fullmatch(file_path):
+                excluded = True
+                if exclude_hits is not None:
+                    exclude_hits[i] += 1
+        return excluded
 
     def __read_text_file(self, file_path: str):
-        with open(file_path, 'r') as file:
+        # Explicit UTF-8: the platform default (e.g. cp1252 on a non-UTF-8 locale)
+        # raises UnicodeDecodeError on Norwegian æøå and silently drops the file (H9).
+        with open(file_path, 'r', encoding='utf-8') as file:
             file_content = file.read()
             return [
                 {
