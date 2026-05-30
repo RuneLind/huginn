@@ -3,6 +3,15 @@ import shutil
 import pickle
 import tempfile
 
+
+class CorruptArtifactError(Exception):
+    """Raised when an on-disk binary artifact cannot be deserialized.
+
+    Names the offending file and the underlying cause so a truncated or corrupt
+    index surfaces a clear message instead of a bare UnpicklingError/EOFError.
+    """
+
+
 class DiskPersister:
     TEMP_PREFIX = ".tmp-"
 
@@ -30,7 +39,13 @@ class DiskPersister:
         path = os.path.join(self.base_path, file_path)
 
         with open(path, 'rb') as file:
-            return pickle.load(file)
+            try:
+                return pickle.load(file)
+            except (pickle.UnpicklingError, EOFError, ValueError, OSError) as e:
+                raise CorruptArtifactError(
+                    f"Failed to deserialize '{path}': the file is truncated or "
+                    f"corrupt ({type(e).__name__}: {e}). Re-index the collection."
+                ) from e
 
     def atomic_write_set(self):
         """Stage a set of files, then commit them together.

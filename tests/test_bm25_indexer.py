@@ -104,6 +104,33 @@ class TestRemoveIds:
         assert indexer.get_size() == 1
 
 
+class TestAllEmptyTokenCorpus:
+    """A corpus whose every doc tokenizes to nothing must not crash (M5)."""
+
+    def test_index_all_punctuation_docs_does_not_raise(self):
+        # "___" and "!!!" tokenize to [] — BM25Okapi would ZeroDivisionError on
+        # avgdl=0 if built unconditionally.
+        indexer = BM25Indexer()
+        indexer.index_texts([0, 1], ["___", "!!!"])
+        assert indexer.get_size() == 2
+        scores, ids = indexer.search("anything")
+        assert ids[0].tolist() == []
+
+    def test_deserialize_all_empty_corpus_does_not_raise(self):
+        state = {"corpus_tokens": [[], []], "ids": [0, 1]}
+        restored = BM25Indexer(serialized_state=state)
+        assert restored.get_size() == 2
+        scores, ids = restored.search("anything")
+        assert ids[0].tolist() == []
+
+    def test_real_doc_recovers_after_empty_docs(self):
+        indexer = BM25Indexer()
+        indexer.index_texts([0, 1], ["___", "!!!"])
+        indexer.index_texts([2], ["python programming language"])
+        scores, ids = indexer.search("python")
+        assert 2 in ids[0].tolist()
+
+
 class TestSerializeDeserialize:
     def test_roundtrip(self):
         indexer = _make_indexer(

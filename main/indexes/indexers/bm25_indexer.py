@@ -12,13 +12,24 @@ def _tokenize(text):
     return re.findall(r'[^\W_]+(?:-[^\W_]+)*', text.lower())
 
 
+def _build_bm25(corpus_tokens):
+    """Build a BM25Okapi index, or None when the corpus has no tokens at all.
+
+    BM25Okapi divides by the average document length, so a corpus that is empty
+    *or* whose every document tokenizes to nothing (e.g. punctuation/underscore-only
+    docs) makes avgdl 0 and raises ZeroDivisionError at construction. `any(...)`
+    treats both cases — empty list and list-of-empty-lists — as "no tokens".
+    """
+    return BM25Okapi(corpus_tokens) if any(corpus_tokens) else None
+
+
 class BM25Indexer:
     def __init__(self, name="indexer_BM25", serialized_state=None):
         self.name = name
         if serialized_state is not None:
             self._corpus_tokens = serialized_state["corpus_tokens"]
             self._ids = serialized_state["ids"]
-            self._bm25 = BM25Okapi(self._corpus_tokens) if self._corpus_tokens else None
+            self._bm25 = _build_bm25(self._corpus_tokens)
         else:
             self._corpus_tokens = []
             self._ids = []
@@ -32,7 +43,7 @@ class BM25Indexer:
         self._corpus_tokens.extend(tokenized)
         self._ids.extend(ids)
         # Rebuild BM25 index with full corpus
-        self._bm25 = BM25Okapi(self._corpus_tokens)
+        self._bm25 = _build_bm25(self._corpus_tokens)
 
     def remove_ids(self, ids):
         ids_to_remove = set(int(i) for i in ids)
@@ -42,7 +53,7 @@ class BM25Indexer:
             self._corpus_tokens, self._ids = map(list, zip(*keep))
         else:
             self._corpus_tokens, self._ids = [], []
-        self._bm25 = BM25Okapi(self._corpus_tokens) if self._corpus_tokens else None
+        self._bm25 = _build_bm25(self._corpus_tokens)
 
     def serialize(self):
         return {
