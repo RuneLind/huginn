@@ -682,3 +682,34 @@ class TestMaybeEnqueueReindex:
         assert _maybe_enqueue_reindex(store, bg, "c") == "skipped_already_running"
         assert bg.tasks == []
 
+
+
+class TestIngestErrorHandling:
+    """Unexpected ingest failures return a structured 500, not a bare crash (M16)."""
+
+    def teardown_method(self):
+        from main.runtime.knowledge_store import get_store
+        app.dependency_overrides.pop(get_store, None)
+
+    def _client(self):
+        from main.runtime.knowledge_store import KnowledgeStore, get_store
+        app.dependency_overrides[get_store] = lambda: KnowledgeStore()
+        return TestClient(app)
+
+    def test_youtube_ingest_failure_returns_structured_500(self, monkeypatch):
+        app.state.youtube_transcripts_path = "/tmp/yt"
+        app.state.youtube_collection = None
+
+        def _boom(*a, **k):
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr("main.routes.ingest.ingest_youtube", _boom)
+        resp = self._client().post("/api/youtube/ingest", json={"title": "T", "url": "https://x"})
+        assert resp.status_code == 500
+        assert "YouTube ingest failed" in resp.json()["detail"]
+        assert "disk full" in resp.json()["detail"]
+
+    def test_unconfigured_path_still_returns_503(self):
+        app.state.youtube_transcripts_path = None
+        resp = self._client().post("/api/youtube/ingest", json={"title": "T", "url": "https://x"})
+        assert resp.status_code == 503
