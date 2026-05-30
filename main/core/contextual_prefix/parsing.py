@@ -20,7 +20,14 @@ logger = logging.getLogger(__name__)
 
 JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
 TRAILING_COMMA_RE = re.compile(r",(\s*[\]}])\s*\Z")
-PARSE_FAILURE_DUMP_DIR = os.environ.get("CONTEXTUAL_PREFIX_DEBUG_DIR", "./data/contextual_caches/parse_failures")
+
+# Dumping raw model output to disk writes confidential document content (the
+# contextual-prefix prompt embeds the chunk text), so it is OFF by default and
+# must be opted into via CONTEXTUAL_PREFIX_DEBUG_DUMP. When enabled, the dump
+# directory is capped to the most-recent N files so it can't grow without bound.
+DEFAULT_DUMP_DIR = "./data/contextual_caches/parse_failures"
+DEFAULT_DUMP_MAX_FILES = 20
+DUMP_FILE_PREFIX = "parse-fail-"
 
 
 def parse_prefix_array(raw: str, expected_count: int) -> list[str]:
@@ -64,10 +71,55 @@ def parse_prefix_array(raw: str, expected_count: int) -> list[str]:
     return prefixes
 
 
-def _dump_parse_failure(raw: str, exc: Exception) -> str:
+def _dump_enabled() -> bool:
+    return os.environ.get("CONTEXTUAL_PREFIX_DEBUG_DUMP", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _dump_max_files() -> int:
+    raw = os.environ.get("CONTEXTUAL_PREFIX_DEBUG_MAX_FILES")
+    if raw is None:
+        return DEFAULT_DUMP_MAX_FILES
     try:
-        os.makedirs(PARSE_FAILURE_DUMP_DIR, exist_ok=True)
-        path = os.path.join(PARSE_FAILURE_DUMP_DIR, f"parse-fail-{int(time.time() * 1000)}.txt")
+        return max(0, int(raw))
+    except ValueError:
+        return DEFAULT_DUMP_MAX_FILES
+
+
+def _prune_old_dumps(dump_dir: str, keep: int) -> None:
+    """Remove oldest dumps so that writing one more leaves the dir at `keep` files.
+
+    File names embed a millisecond timestamp, so a lexical sort is chronological.
+    """
+    try:
+        existing = sorted(
+            f for f in os.listdir(dump_dir)
+            if f.startswith(DUMP_FILE_PREFIX) and f.endswith(".txt")
+        )
+    except OSError:
+        return
+    excess = len(existing) - (keep - 1)
+    for name in existing[:max(0, excess)]:
+        try:
+            os.remove(os.path.join(dump_dir, name))
+        except OSError:
+            pass
+
+
+def _dump_parse_failure(raw: str, exc: Exception) -> str:
+    if not _dump_enabled():
+        return "(disabled; set CONTEXTUAL_PREFIX_DEBUG_DUMP=1 to capture raw output)"
+
+    keep = _dump_max_files()
+    if keep <= 0:
+        return "(disabled; CONTEXTUAL_PREFIX_DEBUG_MAX_FILES<=0)"
+
+    dump_dir = os.environ.get("CONTEXTUAL_PREFIX_DEBUG_DIR", DEFAULT_DUMP_DIR)
+    try:
+        os.makedirs(dump_dir, exist_ok=True)
+        _prune_old_dumps(dump_dir, keep)
+        path = os.path.join(dump_dir, f"{DUMP_FILE_PREFIX}{int(time.time() * 1000)}.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write(f"# JSONDecodeError: {exc}\n")
             f.write(f"# raw output length: {len(raw)}\n")
