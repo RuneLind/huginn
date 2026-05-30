@@ -4,25 +4,31 @@ version = "0.1.0"
 description = "Index and search documents from Confluence, Notion, Jira, YouTube, and local files using local vector embeddings — with MCP integration and HTTP API"
 readme = "README.md"
 requires-python = ">=3.12"
+# Upper bounds cap the coupled deps below their next major so a fresh resolve
+# can't silently pull a breaking major that makes persisted FAISS indexes
+# unreadable (faiss-cpu) or shifts embedding semantics (sentence-transformers,
+# which in turn constrains the transformers/torch stack). Ceilings sit above the
+# versions already in uv.lock (e.g. notion-client 3.x, langchain 1.x), so the
+# existing lock still resolves. See H16, 2026-05-29 technical review.
 dependencies = [
     "beautifulsoup4>=4.13.3",
-    "faiss-cpu>=1.11.0",
+    "faiss-cpu>=1.11.0,<2.0.0",
     "rank-bm25>=0.2.2",
-    "langchain>=0.3.26",
-    "mcp>=1.11.0",
-    "notion-client>=2.0.0",
+    "langchain>=0.3.26,<2.0.0",
+    "mcp>=1.11.0,<2.0.0",
+    "notion-client>=2.0.0,<4.0.0",
     "playwright>=1.55.0",
     "requests>=2.32.4",
-    "sentence-transformers>=5.0.0",
+    "sentence-transformers>=5.0.0,<6.0.0",
     "unstructured[all-docs]>=0.18.5",
     "youtube-transcript-api>=1.2.3",
     "yt-dlp>=2025.10.22",
-    "fastapi>=0.115.0",
+    "fastapi>=0.115.0,<1.0.0",
     "uvicorn>=0.34.0",
     "httpx>=0.27.0",
     "langdetect>=1.0.9",
-    "langchain-text-splitters>=1.1.1",
-    "anthropic>=0.40.0",
+    "langchain-text-splitters>=1.1.1,<2.0.0",
+    "anthropic>=0.40.0,<1.0.0",
 ]
 
 [dependency-groups]
