@@ -335,6 +335,9 @@ class KnowledgeGraph:
         wants_artikkel = bool(words & {"artikkel", "article", "hjemmel", "hjemmelen"})
         wants_issues = bool(words & {"issues", "issue", "oppgaver", "oppgave", "saker", "sak", "tasks"})
         wants_epic = bool(words & {"epic", "epics"})
+        # Containment intent toward the node ("hva inneholder X", "hva inngår i X").
+        # Used to gate the Epic→issues dump so a bare "hva er X" doesn't trigger it.
+        wants_contains = bool(words & {"inneholder", "contains", "inngår", "tilhører"})
 
         results = []
         for node_id in node_ids:
@@ -374,8 +377,10 @@ class KnowledgeGraph:
                 if arts:
                     results.append(f"**{node['label']}** er hjemlet i: {', '.join(arts)}")
 
-            # Jira: Epic → issues
-            elif (wants_issues or not any([wants_seds, wants_bucs, wants_artikkel, wants_epic])) and node["type"] == "Epic":
+            # Jira: Epic → issues. Fire only on explicit issue or containment
+            # intent — a bare "hva er <epic>" should fall through to normal RAG
+            # rather than dumping every child issue.
+            elif (wants_issues or wants_contains) and node["type"] == "Epic":
                 issues = []
                 for e in self.incoming.get(node_id, []):
                     if e["type"] == "tilhører_epic":
