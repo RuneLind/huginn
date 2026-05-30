@@ -497,3 +497,49 @@ class TestExtractPagePropertiesStructured:
     def test_empty_returns_empty_dict(self):
         assert extract_page_properties_structured({}) == {}
         assert extract_page_properties_structured(None) == {}
+
+
+class TestAttachmentBlocks:
+    """Unified image/pdf/video/file attachment rendering via dispatch (M14)."""
+
+    def test_pdf_with_caption(self):
+        block = _block("pdf", type="external",
+                       external={"url": "https://x/d.pdf"},
+                       caption=[_text("Spec")])
+        assert convert_blocks_to_markdown([block]) == "[PDF: Spec](https://x/d.pdf)"
+
+    def test_pdf_without_caption_uses_url(self):
+        block = _block("pdf", type="file", file={"url": "https://x/d.pdf"})
+        assert convert_blocks_to_markdown([block]) == "[PDF: https://x/d.pdf](https://x/d.pdf)"
+
+    def test_video_attachment(self):
+        block = _block("video", type="external", external={"url": "https://x/v.mp4"})
+        assert convert_blocks_to_markdown([block]) == "[Video: https://x/v.mp4](https://x/v.mp4)"
+
+    def test_file_attachment(self):
+        block = _block("file", type="file", file={"url": "https://x/f.zip"},
+                       caption=[_text("Archive")])
+        assert convert_blocks_to_markdown([block]) == "[File: Archive](https://x/f.zip)"
+
+    def test_image_with_caption_alt(self):
+        block = _block("image", type="external", external={"url": "https://x/i.png"},
+                       caption=[_text("Diagram")])
+        assert convert_blocks_to_markdown([block]) == "![Diagram](https://x/i.png)"
+
+    def test_image_without_caption_default_alt(self):
+        block = _block("image", type="file", file={"url": "https://x/i.png"})
+        assert convert_blocks_to_markdown([block]) == "![image](https://x/i.png)"
+
+
+class TestDispatchFallback:
+    def test_unknown_block_with_rich_text(self):
+        block = _block("some_future_type", rich_text=[_text("salvaged")])
+        assert convert_blocks_to_markdown([block]) == "salvaged"
+
+    def test_unknown_block_without_rich_text(self):
+        block = {"type": "mystery", "mystery": {}}
+        assert convert_blocks_to_markdown([block]) == "[Unsupported: mystery]"
+
+    def test_skip_blocks_render_nothing(self):
+        for bt in ("table_of_contents", "breadcrumb"):
+            assert convert_blocks_to_markdown([_block(bt)]) == ""
