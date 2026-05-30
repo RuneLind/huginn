@@ -504,3 +504,29 @@ class TestGetSubtree:
     def test_not_truncated_by_default(self, epic_subtree_graph):
         result = epic_subtree_graph.get_subtree("epic:E-1", direction="incoming", max_depth=2)
         assert result["stats"]["truncated"] is False
+
+    def test_dangling_edge_is_skipped(self, tmp_path):
+        # An edge whose source node is absent from the graph must not be emitted,
+        # and must not introduce a phantom node id into the result (M2).
+        graph_data = {
+            "nodes": [
+                {"id": "epic:E-1", "type": "Epic", "label": "E-1", "properties": {}},
+                {"id": "issue:S-1", "type": "Issue", "label": "S-1", "properties": {}},
+            ],
+            "edges": [
+                {"source": "issue:S-1", "target": "epic:E-1", "type": "tilhører_epic", "properties": {}},
+                # Dangling: issue:GHOST is not a declared node.
+                {"source": "issue:GHOST", "target": "epic:E-1", "type": "tilhører_epic", "properties": {}},
+            ],
+        }
+        graph_file = tmp_path / "dangling.json"
+        graph_file.write_text(json.dumps(graph_data))
+        g = KnowledgeGraph(graph_file)
+        result = g.get_subtree("epic:E-1", direction="incoming", max_depth=2)
+        node_ids = {n["id"] for n in result["nodes"]}
+        assert node_ids == {"epic:E-1", "issue:S-1"}
+        assert "issue:GHOST" not in node_ids
+        # Every emitted edge must reference only nodes present in the result.
+        for e in result["edges"]:
+            assert e["source"] in node_ids
+            assert e["target"] in node_ids
