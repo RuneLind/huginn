@@ -8,7 +8,7 @@ from typing import Optional
 from fastapi import HTTPException
 from pydantic import BaseModel
 
-from main.utils.frontmatter import read_frontmatter_from_path
+from main.utils.frontmatter import read_frontmatter_from_path, escape_frontmatter_value
 from scripts.jira.sanitizers.pii_sanitizer import PiiSanitizer
 
 logger = logging.getLogger(__name__)
@@ -72,9 +72,7 @@ def _jira_content_to_markdown(req: JiraIngestRequest, existing_metadata: Optiona
     summary = req.summary or req.title or ""
     existing = existing_metadata or {}
 
-    def _yaml_escape(val: str) -> str:
-        """Wrap value in quotes and escape internal quotes for safe YAML."""
-        return '"' + val.replace('\\', '\\\\').replace('"', '\\"') + '"'
+    _yaml_escape = escape_frontmatter_value
 
     lines = ["---"]
     lines.append(f"title: {_yaml_escape(summary)}")

@@ -16,6 +16,17 @@ FRONTMATTER_RE = re.compile(r'^---\s*\n(.*?)\n---\s*\n?', re.DOTALL)
 _MAX_HEAD_BYTES = 8192
 
 
+def escape_frontmatter_value(value) -> str:
+    """Quote a frontmatter scalar, escaping internal backslashes and quotes.
+
+    Symmetric with the unescaping in ``_parse_block`` so a value containing a
+    double-quote round-trips intact. Shared by every markdown ingest writer so
+    they can't drift into writing unescaped (or differently-escaped) YAML.
+    """
+    text = "" if value is None else str(value)
+    return '"' + text.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
 def read_frontmatter(text: str) -> dict[str, str]:
     """Parse YAML frontmatter from markdown text into a ``dict[str, str]``.
 
@@ -72,7 +83,17 @@ def _parse_block(fm_text: str) -> dict[str, str]:
         if ":" in line:
             key, _, value = line.partition(":")
             key = key.strip()
-            value = value.strip().strip('"')
+            value = value.strip()
+            if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+                # Quoted scalar: drop the wrapping quotes and unescape only the
+                # sequences escape_frontmatter_value emits (\\ and \"). Restricting
+                # to those reverses the writer exactly while leaving an unrelated
+                # backslash in a hand-written value (e.g. "C:\Users") untouched.
+                # The regex consumes each \X pair left-to-right, so adjacent
+                # escapes (\\\" → \") decode correctly, unlike chained .replace.
+                value = re.sub(r'\\(["\\])', r'\1', value[1:-1])
+            else:
+                value = value.strip('"')
             if key and value:
                 metadata[key] = value
             elif key and not value:

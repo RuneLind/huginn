@@ -15,6 +15,7 @@ from main.fetchers.youtube.youtube_transcript_downloader import YouTubeTranscrip
 from main.ingest.categories import CATEGORIES
 from main.ingest._markdown_writer import write_categorized_markdown
 from main.utils.claude_cli import call_claude
+from main.utils.frontmatter import escape_frontmatter_value
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +168,14 @@ def ingest_youtube(req: YouTubeIngestRequest, *, transcripts_path: str) -> dict:
         raise HTTPException(status_code=400, detail=f"Invalid category '{category}'. Must be one of: {', '.join(CATEGORIES)}")
     tags = ", ".join(category.split("/"))
 
-    frontmatter = f"---\ndate: {date}\nurl: {req.url}\ncategory: {category}\ntags: \"{tags}\"\n---\n\n"
+    frontmatter = (
+        "---\n"
+        f"date: {escape_frontmatter_value(date)}\n"
+        f"url: {escape_frontmatter_value(req.url)}\n"
+        f"category: {escape_frontmatter_value(category)}\n"
+        f"tags: {escape_frontmatter_value(tags)}\n"
+        "---\n\n"
+    )
     md_content = frontmatter + summary
 
     file_rel_path = write_categorized_markdown(

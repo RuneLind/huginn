@@ -1,9 +1,42 @@
 from main.utils.frontmatter import (
+    escape_frontmatter_value,
     read_frontmatter,
     read_frontmatter_and_body,
     read_frontmatter_from_path,
     strip_frontmatter,
 )
+
+
+class TestEscapeRoundTrip:
+    """escape_frontmatter_value must round-trip through read_frontmatter (H7)."""
+
+    def _roundtrip(self, value):
+        text = f"---\ntitle: {escape_frontmatter_value(value)}\n---\nbody"
+        return read_frontmatter(text).get("title")
+
+    def test_plain_value(self):
+        assert self._roundtrip("hello world") == "hello world"
+
+    def test_embedded_double_quote(self):
+        # Previously written escaped by jira but never unescaped on read -> mangled.
+        assert self._roundtrip('He said "hi"') == 'He said "hi"'
+
+    def test_backslash(self):
+        assert self._roundtrip(r"path\to\file") == r"path\to\file"
+
+    def test_quote_and_backslash_adjacent(self):
+        assert self._roundtrip(r'a\"b') == r'a\"b'
+
+    def test_value_with_colon_inside_quotes(self):
+        assert self._roundtrip("https://example.com:8080/x") == "https://example.com:8080/x"
+
+    def test_none_escapes_to_empty_quotes(self):
+        assert escape_frontmatter_value(None) == '""'
+
+    def test_handwritten_quoted_value_keeps_unrelated_backslash(self):
+        # A literal backslash the writer never escaped (e.g. a Windows path in a
+        # hand-authored wiki file) must survive — only \\ and \" are unescaped.
+        assert read_frontmatter('---\nk: "C:\\Users"\n---\nbody') == {"k": r"C:\Users"}
 
 
 class TestReadFrontmatter:

@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from main.ingest.categories import CATEGORIES
 from main.ingest._markdown_writer import write_categorized_markdown
+from main.utils.frontmatter import escape_frontmatter_value
 
 logger = logging.getLogger(__name__)
 
@@ -40,13 +41,13 @@ def ingest_x_article(req: XArticleIngestRequest, *, sources_path: str) -> dict:
     tags = ", ".join(tag_parts)
 
     frontmatter = (
-        f"---\n"
-        f"date: {date}\n"
-        f"url: {req.url}\n"
-        f"author: {req.author}\n"
-        f"category: {category}\n"
-        f"tags: \"{tags}\"\n"
-        f"---\n\n"
+        "---\n"
+        f"date: {escape_frontmatter_value(date)}\n"
+        f"url: {escape_frontmatter_value(req.url)}\n"
+        f"author: {escape_frontmatter_value(req.author)}\n"
+        f"category: {escape_frontmatter_value(category)}\n"
+        f"tags: {escape_frontmatter_value(tags)}\n"
+        "---\n\n"
     )
     md_content = frontmatter + req.summary
 
