@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import time
 
 import pytest
 
@@ -355,3 +356,48 @@ def test_parallel_prefixing_handles_concurrent_calls_safely():
         # could be up to 4). If this only ever sees 1 thread, the parallel path isn't doing
         # anything useful.
         assert len(threads_seen) > 1, f"Expected concurrent threads, saw {len(threads_seen)}"
+
+
+# --- Parse-failure debug dump: opt-in + capped (M15) ---
+
+from main.core.contextual_prefix.parsing import _dump_parse_failure
+
+
+def _count_dumps(d):
+    return len([f for f in os.listdir(d) if f.startswith("parse-fail-")])
+
+
+def test_dump_disabled_by_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("CONTEXTUAL_PREFIX_DEBUG_DUMP", raising=False)
+    monkeypatch.setenv("CONTEXTUAL_PREFIX_DEBUG_DIR", str(tmp_path))
+    # Invalid JSON goes through the dump path but must not write a file by default.
+    assert _parse_prefix_array("definitely not json", expected_count=1) == []
+    assert _count_dumps(tmp_path) == 0
+
+
+def test_dump_written_when_opted_in(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONTEXTUAL_PREFIX_DEBUG_DUMP", "1")
+    monkeypatch.setenv("CONTEXTUAL_PREFIX_DEBUG_DIR", str(tmp_path))
+    path = _dump_parse_failure("raw confidential content", ValueError("boom"))
+    assert os.path.isfile(path)
+    assert "raw confidential content" in open(path, encoding="utf-8").read()
+
+
+def test_dump_directory_is_capped(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONTEXTUAL_PREFIX_DEBUG_DUMP", "true")
+    monkeypatch.setenv("CONTEXTUAL_PREFIX_DEBUG_DIR", str(tmp_path))
+    monkeypatch.setenv("CONTEXTUAL_PREFIX_DEBUG_MAX_FILES", "3")
+    for i in range(8):
+        # Distinct mtimes are not required; names embed a ms timestamp. Sleep a hair
+        # so timestamps differ and pruning is deterministic.
+        _dump_parse_failure(f"payload {i}", ValueError("boom"))
+        time.sleep(0.002)
+    assert _count_dumps(tmp_path) <= 3
+
+
+def test_dump_max_files_zero_disables(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONTEXTUAL_PREFIX_DEBUG_DUMP", "1")
+    monkeypatch.setenv("CONTEXTUAL_PREFIX_DEBUG_DIR", str(tmp_path))
+    monkeypatch.setenv("CONTEXTUAL_PREFIX_DEBUG_MAX_FILES", "0")
+    _dump_parse_failure("payload", ValueError("boom"))
+    assert _count_dumps(tmp_path) == 0
