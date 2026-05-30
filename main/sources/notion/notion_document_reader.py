@@ -15,7 +15,8 @@ class NotionDocumentReader:
                  start_from_time=None,
                  max_block_depth=10,
                  skip_page_ids=None,
-                 exclude_unless_updated=None):
+                 exclude_unless_updated=None,
+                 max_failures_in_row=5):
         self.client = Client(auth=token)
         self.root_page_id = root_page_id
         self.request_delay = request_delay
@@ -23,10 +24,14 @@ class NotionDocumentReader:
         self.max_block_depth = max_block_depth
         self.skip_page_ids = skip_page_ids or set()
         self.exclude_unless_updated = exclude_unless_updated or {}
+        self.max_failures_in_row = max_failures_in_row
         self._parent_cache = {}
         self._data_sources_loaded = False
 
     def read_all_documents(self):
+        yielded = 0
+        failed = 0
+        failures_in_row = 0
         for page in self._iterate_pages():
             page_id = page["id"]
             if page_id in self.skip_page_ids:
@@ -40,15 +45,37 @@ class NotionDocumentReader:
                 blocks = self._fetch_all_blocks(page_id)
                 breadcrumb = self.build_breadcrumb(page)
                 self._resolve_relation_titles(page)
-
-                yield {
+                document = {
                     "page": page,
                     "blocks": blocks,
                     "breadcrumb": breadcrumb,
                 }
             except Exception as e:
                 title = self.get_page_title(page)
+                failed += 1
+                failures_in_row += 1
                 logger.error(f"Error reading page '{title}' ({page_id}): {e}")
+                if failures_in_row >= self.max_failures_in_row:
+                    # Many consecutive failures signal a systemic problem (auth,
+                    # rate limit, network) rather than isolated bad pages — abort
+                    # loudly instead of silently producing a near-empty read.
+                    logger.error(
+                        f"Aborting Notion read: {failures_in_row} pages failed in a row "
+                        f"(last '{title}' / {page_id})."
+                    )
+                    raise
+                continue
+
+            # yield outside the try so a consumer-side error is not miscounted
+            # as a page read failure.
+            failures_in_row = 0
+            yielded += 1
+            yield document
+
+        if failed:
+            logger.warning(
+                f"Notion read complete: {yielded} pages read, {failed} failed."
+            )
 
     def get_number_of_documents(self):
         # Notion search API does not provide a total count.
