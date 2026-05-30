@@ -344,6 +344,22 @@ class TestJiraGraphQueryAnswering:
         )
         assert answer is None
 
+    def test_bare_hva_on_epic_does_not_dump_issues(self, jira_graph):
+        # "Hva er <epic>" is a definitional question, not a request to enumerate
+        # the epic's child issues — it must fall through to normal RAG (M4).
+        answer = jira_graph.answer_graph_query(
+            ["epic:PROJECT-6079"], "Hva er PROJECT-6079?"
+        )
+        assert answer is None
+
+    def test_contains_intent_lists_epic_issues(self, jira_graph):
+        # Explicit containment intent still lists the epic's issues.
+        answer = jira_graph.answer_graph_query(
+            ["epic:PROJECT-6079"], "Hva inneholder PROJECT-6079?"
+        )
+        assert answer is not None
+        assert "PROJECT-6587" in answer
+
 
 class TestMergedGraph:
     def test_merged_has_both_node_types(self, merged_graph):
