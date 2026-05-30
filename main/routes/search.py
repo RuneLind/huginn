@@ -4,7 +4,8 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from main.core.search_response_formatter import run_corrective_search, shape_search_results
+from main.core.search_pipeline import search_and_shape
+from main.core.search_response_formatter import run_corrective_search
 from main.core.search_trace import create_trace
 from main.core.trace_store import any_trace_enabled, default_trace_store, pointer_mode_enabled
 from main.graph.graph_search_augmenter import GraphSearchAugmenter
@@ -52,21 +53,13 @@ def search(
     if search_q != q:
         logger.debug(f"Graph-expanded query: {search_q[:200]}")
 
-    per_collection = []
-    for coll_name, searcher in target_searchers.items():
-        search_result = searcher.search(
-            search_q,
-            max_number_of_chunks=limit * overfetch,
-            max_number_of_documents=limit * (3 if has_filters else 1),
-            include_matched_chunks_content=True,
-            skip_reranker=skip_reranker,
-            trace=trace_obj,
-            title_boost_query=q,
-        )
-        per_collection.append((coll_name, search_result))
-
-    results, any_low_confidence = shape_search_results(
-        per_collection,
+    search_kwargs = dict(
+        max_number_of_chunks=limit * overfetch,
+        max_number_of_documents=limit * (3 if has_filters else 1),
+        include_matched_chunks_content=True,
+        skip_reranker=skip_reranker,
+    )
+    shape_kwargs = dict(
         limit=limit,
         brief=brief,
         max_chunk_chars=max_chunk_chars,
@@ -76,34 +69,30 @@ def search(
         tags=tags,
     )
 
-    augmenter.enrich_results(results, detected_entities)
+    results, per_collection, any_low_confidence = search_and_shape(
+        target_searchers,
+        search_q,
+        augmenter=augmenter,
+        detected_entities=detected_entities,
+        trace=trace_obj,
+        title_boost_query=q,
+        search_kwargs=search_kwargs,
+        shape_kwargs=shape_kwargs,
+    )
 
     reranked = all(sr.get("reranked", True) for _, sr in per_collection) if per_collection else True
 
     def rerun_search_fn(rescue_query: str):
-        rescue_per_collection = []
-        for coll_name, searcher in target_searchers.items():
-            rescue_sr = searcher.search(
-                rescue_query,
-                max_number_of_chunks=limit * overfetch,
-                max_number_of_documents=limit * (3 if has_filters else 1),
-                include_matched_chunks_content=True,
-                skip_reranker=skip_reranker,
-                trace=trace_obj,
-                title_boost_query=rescue_query,
-            )
-            rescue_per_collection.append((coll_name, rescue_sr))
-        rescue_results, _ = shape_search_results(
-            rescue_per_collection,
-            limit=limit,
-            brief=brief,
-            max_chunk_chars=max_chunk_chars,
-            max_chunks_per_doc=max_chunks_per_doc,
-            project=project,
-            git_branch=git_branch,
-            tags=tags,
+        rescue_results, _, _ = search_and_shape(
+            target_searchers,
+            rescue_query,
+            augmenter=augmenter,
+            detected_entities=detected_entities,
+            trace=trace_obj,
+            title_boost_query=rescue_query,
+            search_kwargs=search_kwargs,
+            shape_kwargs=shape_kwargs,
         )
-        augmenter.enrich_results(rescue_results, detected_entities)
         return rescue_results
 
     results, response = run_corrective_search(
