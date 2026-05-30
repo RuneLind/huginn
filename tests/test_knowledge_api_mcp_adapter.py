@@ -658,3 +658,53 @@ class TestTraceForwarding:
         out = adapter.search_knowledge("test")
         assert "huginn-trace-url: http://localhost:8321/api/trace/a3f8b21c4e9d0a55" in out
         assert "```huginn-trace" not in out
+
+
+class TestGraphSubtreeFromExcluded:
+    """get_graph_subtree marks nodes enriched from .excluded/ stubs (M17)."""
+
+    def _subtree_payload(self):
+        return {
+            "root": "epic:E-1",
+            "nodes": [
+                {"id": "epic:E-1", "label": "Root epic", "properties": {}},
+                {"id": "issue:S-1", "label": "Story 1", "properties": {}},
+                {"id": "issue:T-1", "label": "Stub subtask",
+                 "properties": {"from_excluded": True}},
+            ],
+            "edges": [
+                {"source": "issue:S-1", "target": "epic:E-1", "type": "tilhører_epic"},
+                {"source": "issue:T-1", "target": "issue:S-1", "type": "er_subtask_av"},
+            ],
+            "stats": {"max_depth": 2, "direction": "incoming",
+                      "node_count": 3, "edge_count": 2,
+                      "by_node_type": {}, "by_edge_type": {}},
+        }
+
+    @patch.object(adapter, "_api_get")
+    def test_from_excluded_node_marked(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._subtree_payload()
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        result = adapter.get_graph_subtree("epic:E-1")
+        assert "[stub: from_excluded]" in result
+        assert "1 stub-subtasks enriched from .excluded/" in result
+        # A normal node carries no marker.
+        assert "Story 1" in result
+        story_line = [ln for ln in result.splitlines() if "Story 1" in ln][0]
+        assert "[stub: from_excluded]" not in story_line
+
+    @patch.object(adapter, "_api_get")
+    def test_no_marker_when_none_excluded(self, mock_get):
+        payload = self._subtree_payload()
+        payload["nodes"][2]["properties"] = {}  # drop from_excluded
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = payload
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+
+        result = adapter.get_graph_subtree("epic:E-1")
+        assert "from_excluded" not in result
+        assert "stub-subtasks enriched" not in result
