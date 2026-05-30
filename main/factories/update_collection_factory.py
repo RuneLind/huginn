@@ -37,7 +37,7 @@ def __create_collection_updater(collection_name, contextual_backend_spec, contex
 
     manifest = json.loads(disk_persister.read_text_file(f"{collection_name}/manifest.json"))
 
-    document_reader, document_converter = __create_reader_and_converter(manifest)
+    document_reader, document_converter = _create_reader_and_converter(manifest)
 
     document_indexers = [load_indexer(indexer["name"], collection_name, disk_persister) for indexer in manifest['indexers']]
 
@@ -73,135 +73,121 @@ def __calculate_update_time(manifest):
 def __calculate_update_date(manifest):
     return __calculate_update_time(manifest).date()
 
-def __create_reader_and_converter(manifest):
-    if manifest['reader']['type'] == 'jira':
-        return __create_jira_reader_and_converter(manifest)
-    
-    if manifest['reader']['type'] == 'jiraCloud':
-        return __create_jira_cloud_reader_and_converter(manifest)
-    
-    if manifest['reader']['type'] == 'confluence':
-        return __create_confluence_reader_and_converter(manifest)
-
-    if manifest['reader']['type'] == 'confluenceCloud':
-        return __create_confluence_cloud_reader_and_converter(manifest)
-
-    if manifest['reader']['type'] == 'localFiles':
-        return __create_local_files_reader_and_converter(manifest)
-
-    if manifest['reader']['type'] == 'notion':
-        return __create_notion_reader_and_converter(manifest)
-
-    raise Exception(f"Unknown document reader type: {manifest['reader']['type']}")
+def _create_reader_and_converter(manifest):
+    """Dispatch to the builder registered for the manifest's reader type."""
+    reader_type = manifest['reader']['type']
+    builder = _READER_BUILDERS.get(reader_type)
+    if builder is None:
+        raise Exception(f"Unknown document reader type: {reader_type}")
+    return builder(manifest)
 
 
-def __create_jira_reader_and_converter(manifest):
-    token = os.environ.get('JIRA_TOKEN')
-    login = os.environ.get('JIRA_LOGIN')
-    password = os.environ.get('JIRA_PASSWORD')
+# --- Auth resolvers (read + validate credentials from the environment) ---
 
-    update_date = __calculate_update_date(manifest).isoformat()
-    query_addition = f'AND (created >= "{update_date}" OR updated >= "{update_date}")'
+def _jira_basic_auth():
+    return {
+        "token": os.environ.get('JIRA_TOKEN'),
+        "login": os.environ.get('JIRA_LOGIN'),
+        "password": os.environ.get('JIRA_PASSWORD'),
+    }
 
-    reader = JiraDocumentReader(base_url=manifest['reader']['baseUrl'], 
-                                    query=f"{manifest['reader']['query']} {query_addition}",
-                                    token=token,
-                                    login=login, 
-                                    password=password, 
-                                    batch_size=manifest['reader']['batchSize'])
-    converter = JiraDocumentConverter()
-    return reader,converter
 
-def __create_jira_cloud_reader_and_converter(manifest):
-    email = os.environ.get('ATLASSIAN_EMAIL')
-    api_token = os.environ.get('ATLASSIAN_TOKEN')
-
-    if not email or not api_token:
-        raise ValueError("Both 'ATLASSIAN_EMAIL' and 'ATLASSIAN_TOKEN' environment variables must be provided for Jira Cloud.")
-
-    update_date = __calculate_update_date(manifest).isoformat()
-    query_addition = f'AND (created >= "{update_date}" OR updated >= "{update_date}")'
-
-    reader = JiraCloudDocumentReader(base_url=manifest['reader']['baseUrl'], 
-                                    query=f"{manifest['reader']['query']} {query_addition}",
-                                    email=email,
-                                    api_token=api_token, 
-                                    batch_size=manifest['reader']['batchSize'])
-    converter = JiraCloudDocumentConverter()
-    return reader,converter
-
-def __create_confluence_reader_and_converter(manifest):
+def _confluence_basic_auth():
     token = os.environ.get('CONF_TOKEN')
     login = os.environ.get('CONF_LOGIN')
     password = os.environ.get('CONF_PASSWORD')
-
     if not token and (not login or not password):
         raise ValueError("Either 'token' ('CONF_TOKEN' env variable) or both 'login' ('CONF_LOGIN' env variable) and 'password' ('CONF_PASSWORD' env variable) must be provided.")
+    return {"token": token, "login": login, "password": password}
 
+
+def _atlassian_cloud_auth(product):
+    def resolve():
+        email = os.environ.get('ATLASSIAN_EMAIL')
+        api_token = os.environ.get('ATLASSIAN_TOKEN')
+        if not email or not api_token:
+            raise ValueError(f"Both 'ATLASSIAN_EMAIL' and 'ATLASSIAN_TOKEN' environment variables must be provided for {product}.")
+        return {"email": email, "api_token": api_token}
+    return resolve
+
+
+# --- Builders ---
+
+def _build_query_reader(manifest, reader_cls, converter_cls, modified_field, auth, with_comments):
+    """Build a CQL/JQL-style reader: an incremental query window plus credentials.
+
+    modified_field is the source's "last changed" field name ("updated" for Jira,
+    "lastModified" for Confluence); auth() returns the credential kwargs (and
+    validates them); with_comments forwards the readAllComments flag.
+    """
+    cfg = manifest['reader']
     update_date = __calculate_update_date(manifest).isoformat()
-    query_addition = f'AND (created >= "{update_date}" OR lastModified >= "{update_date}")'
+    query_addition = f'AND (created >= "{update_date}" OR {modified_field} >= "{update_date}")'
 
-    reader = ConfluenceDocumentReader(base_url=manifest['reader']['baseUrl'], 
-                                          query=f"{manifest['reader']['query']} {query_addition}",
-                                          token=token,
-                                          login=login, 
-                                          password=password, 
-                                          batch_size=manifest['reader']['batchSize'],
-                                          read_all_comments=manifest['reader']['readAllComments'],)
-    converter = ConfluenceDocumentConverter()
-    return reader,converter
-
-def __create_confluence_cloud_reader_and_converter(manifest):
-    email = os.environ.get('ATLASSIAN_EMAIL')
-    api_token = os.environ.get('ATLASSIAN_TOKEN')
-
-    if not email or not api_token:
-        raise ValueError("Both 'ATLASSIAN_EMAIL' and 'ATLASSIAN_TOKEN' environment variables must be provided for Confluence Cloud.")
-
-    update_date = __calculate_update_date(manifest).isoformat()
-    query_addition = f'AND (created >= "{update_date}" OR lastModified >= "{update_date}")'
-
-    reader = ConfluenceCloudDocumentReader(base_url=manifest['reader']['baseUrl'], 
-                                          query=f"{manifest['reader']['query']} {query_addition}",
-                                          email=email,
-                                          api_token=api_token, 
-                                          batch_size=manifest['reader']['batchSize'],
-                                          read_all_comments=manifest['reader']['readAllComments'],)
-    converter = ConfluenceCloudDocumentConverter()
-    return reader,converter
+    kwargs = dict(
+        base_url=cfg['baseUrl'],
+        query=f"{cfg['query']} {query_addition}",
+        **auth(),
+        batch_size=cfg['batchSize'],
+    )
+    if with_comments:
+        kwargs['read_all_comments'] = cfg['readAllComments']
+    return reader_cls(**kwargs), converter_cls()
 
 
-def __create_notion_reader_and_converter(manifest):
+def _build_jira(manifest):
+    return _build_query_reader(manifest, JiraDocumentReader, JiraDocumentConverter,
+                               "updated", _jira_basic_auth, with_comments=False)
+
+
+def _build_jira_cloud(manifest):
+    return _build_query_reader(manifest, JiraCloudDocumentReader, JiraCloudDocumentConverter,
+                               "updated", _atlassian_cloud_auth("Jira Cloud"), with_comments=False)
+
+
+def _build_confluence(manifest):
+    return _build_query_reader(manifest, ConfluenceDocumentReader, ConfluenceDocumentConverter,
+                               "lastModified", _confluence_basic_auth, with_comments=True)
+
+
+def _build_confluence_cloud(manifest):
+    return _build_query_reader(manifest, ConfluenceCloudDocumentReader, ConfluenceCloudDocumentConverter,
+                               "lastModified", _atlassian_cloud_auth("Confluence Cloud"), with_comments=True)
+
+
+def _build_notion(manifest):
     token = os.environ.get('NOTION_TOKEN')
     if not token:
         raise ValueError("NOTION_TOKEN environment variable must be set.")
 
     update_time = __calculate_update_time(manifest)
-
     reader = NotionDocumentReader(
         token=token,
         root_page_id=manifest['reader'].get('rootPageId'),
         request_delay=manifest['reader'].get('requestDelay', 0.35),
         start_from_time=update_time,
     )
-    converter = NotionDocumentConverter()
-    return reader, converter
+    return reader, NotionDocumentConverter()
 
 
-def __create_local_files_reader_and_converter(manifest):
-    reader_config = manifest['reader']
-    
-    base_path = reader_config['basePath']
-    include_patterns = reader_config.get('includePatterns', [".*"])
-    exclude_patterns = reader_config.get('excludePatterns', [])
-    fail_fast = reader_config.get('failFast', False)
-
+def _build_local_files(manifest):
+    cfg = manifest['reader']
     update_time = __calculate_update_time(manifest)
-    
-    reader = FilesDocumentReader(base_path=base_path,
-                                include_patterns=include_patterns,
-                                exclude_patterns=exclude_patterns,
-                                fail_fast=fail_fast,
-                                start_from_time=update_time)
-    converter = FilesDocumentConverter()
-    return reader, converter
+    reader = FilesDocumentReader(
+        base_path=cfg['basePath'],
+        include_patterns=cfg.get('includePatterns', [".*"]),
+        exclude_patterns=cfg.get('excludePatterns', []),
+        fail_fast=cfg.get('failFast', False),
+        start_from_time=update_time,
+    )
+    return reader, FilesDocumentConverter()
+
+
+_READER_BUILDERS = {
+    "jira": _build_jira,
+    "jiraCloud": _build_jira_cloud,
+    "confluence": _build_confluence,
+    "confluenceCloud": _build_confluence_cloud,
+    "notion": _build_notion,
+    "localFiles": _build_local_files,
+}
