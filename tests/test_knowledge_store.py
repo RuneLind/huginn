@@ -1,6 +1,41 @@
+import json
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 from main.runtime.knowledge_store import KnowledgeStore, run_collection_update
+
+
+def _notion_mapping(pages):
+    """Build an index_document_mapping.json payload from {hex: path} pages."""
+    return json.dumps({
+        str(i): {
+            "documentUrl": f"https://www.notion.so/Title-{hex_id}",
+            "documentPath": path,
+            "documentId": path,
+            "chunkNumber": 0,
+        }
+        for i, (hex_id, path) in enumerate(pages.items())
+    })
+
+
+def _store_with_notion(mappings):
+    """KnowledgeStore whose persister serves a settable per-collection mapping.
+
+    `mappings` is {collection_name: {notion_hex: doc_path}}; mutate it between
+    _build_notion_id_lookup calls to simulate an update rewriting the mapping.
+    """
+    store = KnowledgeStore()
+    persister = MagicMock()
+
+    def read_text(path):
+        for name, pages in mappings.items():
+            if path == f"{name}/indexes/index_document_mapping.json":
+                return _notion_mapping(pages)
+        raise FileNotFoundError(path)
+
+    persister.read_text_file.side_effect = read_text
+    store.disk_persister = persister
+    return store
 
 
 class TestSimilarityGraphCacheAccessors:
@@ -168,3 +203,74 @@ class TestLoadCollectionsResilience:
         store.load_collections(["bad", "good"], build_aux_indexes=False)
 
         assert store.has_collection("good")
+
+
+HEX_A = "a" * 32
+HEX_B = "b" * 32
+HEX_C = "c" * 32
+
+
+class TestNotionIdLookupRebuild:
+    """Per-collection slices, re-merged on (re)load — drops stale, no cross-collection clobber (M9)."""
+
+    def test_reload_drops_entries_a_collection_no_longer_contains(self):
+        mappings = {"collA": {HEX_A: "collA/documents/a.json", HEX_B: "collA/documents/b.json"}}
+        store = _store_with_notion(mappings)
+
+        store._build_notion_id_lookup("collA")
+        assert set(store.notion_id_to_doc) == {HEX_A, HEX_B}
+
+        # An update removes page B from the collection's mapping.
+        mappings["collA"] = {HEX_A: "collA/documents/a.json"}
+        store._build_notion_id_lookup("collA")
+
+        # Stale page B is gone, not accumulated.
+        assert set(store.notion_id_to_doc) == {HEX_A}
+
+    def test_rebuilding_one_collection_keeps_another_collections_entries(self):
+        mappings = {
+            "collA": {HEX_A: "collA/documents/a.json"},
+            "collB": {HEX_C: "collB/documents/c.json"},
+        }
+        store = _store_with_notion(mappings)
+
+        store._build_notion_id_lookup("collA")
+        store._build_notion_id_lookup("collB")
+        assert set(store.notion_id_to_doc) == {HEX_A, HEX_C}
+
+        # Rebuilding collA must not drop collB's entry.
+        store._build_notion_id_lookup("collA")
+        assert set(store.notion_id_to_doc) == {HEX_A, HEX_C}
+
+    def test_lookup_dict_is_swapped_not_mutated_in_place(self):
+        """Readers holding the old dict reference never see it mutated (M10)."""
+        mappings = {"collA": {HEX_A: "collA/documents/a.json"}}
+        store = _store_with_notion(mappings)
+        store._build_notion_id_lookup("collA")
+
+        before = store.notion_id_to_doc  # a reader grabs the current reference
+
+        mappings["collA"] = {HEX_A: "collA/documents/a.json", HEX_B: "collA/documents/b.json"}
+        store._build_notion_id_lookup("collA")
+
+        # The reference the reader holds is untouched; a new dict was swapped in.
+        assert set(before) == {HEX_A}
+        assert set(store.notion_id_to_doc) == {HEX_A, HEX_B}
+        assert store.notion_id_to_doc is not before
+
+
+class TestTagCountsRebuild:
+    def test_tag_counts_published_via_locked_accessor(self):
+        store = KnowledgeStore()
+        persister = MagicMock()
+
+        def read_text(path):
+            return json.dumps({"metadata": {"tags": "alpha, beta, alpha"}})
+
+        persister.read_text_file.side_effect = read_text
+        persister.read_folder_files.return_value = ["0.json"]
+        store.disk_persister = persister
+
+        store._build_tag_counts("collA")
+        counts = store.get_tag_counts(["collA"])["collA"]
+        assert counts == {"alpha": 2, "beta": 1}
