@@ -1,4 +1,7 @@
 """Ingest routes — YouTube, X articles, Jira (writes to source dirs, then reindexes)."""
+import logging
+from contextlib import contextmanager
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 
 from main.core.search_response_formatter import extract_chunk_text, truncate_snippet
@@ -14,6 +17,26 @@ from main.runtime.knowledge_store import KnowledgeStore, get_store, run_collecti
 from main.utils.filename import title_from_doc_path
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _ingest_errors(operation: str):
+    """Convert unexpected ingest failures into a structured 500.
+
+    The write/sanitize/index paths (file I/O, frontmatter escaping, similarity
+    search) can raise arbitrary errors; without this the client got a bare 500
+    and the only record was a stack trace. Here we log the full traceback
+    server-side and return a clear JSON error. Deliberate HTTPExceptions (e.g.
+    503 unconfigured, 422 validation) pass through untouched.
+    """
+    try:
+        yield
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("%s failed", operation)
+        raise HTTPException(status_code=500, detail=f"{operation} failed: {exc}") from exc
 
 
 def _find_similar_documents(searcher, query: str, exclude_match) -> list[dict]:
@@ -83,23 +106,24 @@ def youtube_ingest(
     if not yt_path:
         raise HTTPException(status_code=503, detail="YouTube transcripts path not configured")
 
-    result = ingest_youtube(req, transcripts_path=yt_path)
+    with _ingest_errors("YouTube ingest"):
+        result = ingest_youtube(req, transcripts_path=yt_path)
 
-    similar = _similar_for_collection(
-        store, yt_collection,
-        query=result["summary"][:2000],
-        exclude_match=lambda doc: doc.get("url", "") == req.url,
-    )
-    reindex = _maybe_enqueue_reindex(store, background_tasks, yt_collection)
+        similar = _similar_for_collection(
+            store, yt_collection,
+            query=result["summary"][:2000],
+            exclude_match=lambda doc: doc.get("url", "") == req.url,
+        )
+        reindex = _maybe_enqueue_reindex(store, background_tasks, yt_collection)
 
-    return {
-        "status": "ingested",
-        "file_path": result["file_path"],
-        "category": result["category"],
-        "summary": result["summary"],
-        "similar": similar,
-        "reindex": reindex,
-    }
+        return {
+            "status": "ingested",
+            "file_path": result["file_path"],
+            "category": result["category"],
+            "summary": result["summary"],
+            "similar": similar,
+            "reindex": reindex,
+        }
 
 
 @router.get("/api/youtube/transcript/{video_id}")
@@ -131,24 +155,25 @@ def x_article_ingest(
     if not xa_path:
         raise HTTPException(status_code=503, detail="X articles sources path not configured (--x-articles-sources-path)")
 
-    result = ingest_x_article(req, sources_path=xa_path)
+    with _ingest_errors("X article ingest"):
+        result = ingest_x_article(req, sources_path=xa_path)
 
-    similar = _similar_for_collection(
-        store, xa_collection,
-        query=req.summary[:2000],
-        exclude_match=lambda doc: doc.get("url", "") == req.url,
-    )
-    reindex = _maybe_enqueue_reindex(store, background_tasks, xa_collection)
+        similar = _similar_for_collection(
+            store, xa_collection,
+            query=req.summary[:2000],
+            exclude_match=lambda doc: doc.get("url", "") == req.url,
+        )
+        reindex = _maybe_enqueue_reindex(store, background_tasks, xa_collection)
 
-    return {
-        "status": "ingested",
-        "file_path": result["file_path"],
-        "author": result["author"],
-        "category": result["category"],
-        "summary": result["summary"],
-        "similar": similar,
-        "reindex": reindex,
-    }
+        return {
+            "status": "ingested",
+            "file_path": result["file_path"],
+            "author": result["author"],
+            "category": result["category"],
+            "summary": result["summary"],
+            "similar": similar,
+            "reindex": reindex,
+        }
 
 
 @router.post("/api/jira/ingest")
@@ -169,22 +194,23 @@ def jira_ingest(
     if not jira_path:
         raise HTTPException(status_code=503, detail="Jira sources path not configured (--jira-sources-path)")
 
-    result = ingest_jira(req, sources_path=jira_path)
+    with _ingest_errors("Jira ingest"):
+        result = ingest_jira(req, sources_path=jira_path)
 
-    similar = _similar_for_collection(
-        store, jira_collection,
-        query=f"{req.issueKey} {result['summary']}",
-        exclude_match=lambda doc: req.issueKey in doc.get("url", ""),
-    )
+        similar = _similar_for_collection(
+            store, jira_collection,
+            query=f"{req.issueKey} {result['summary']}",
+            exclude_match=lambda doc: req.issueKey in doc.get("url", ""),
+        )
 
-    # Automatic reindex skipped — the daily update script handles both
-    # collection reindexing and knowledge graph rebuild in one pass.
-    # Use POST /api/collections/{name}/update to trigger manually if needed.
+        # Automatic reindex skipped — the daily update script handles both
+        # collection reindexing and knowledge graph rebuild in one pass.
+        # Use POST /api/collections/{name}/update to trigger manually if needed.
 
-    return {
-        "status": "ingested",
-        "issue_key": result["issue_key"],
-        "file_path": result["file_path"],
-        "summary": result["summary"],
-        "similar": similar,
-    }
+        return {
+            "status": "ingested",
+            "issue_key": result["issue_key"],
+            "file_path": result["file_path"],
+            "summary": result["summary"],
+            "similar": similar,
+        }
