@@ -30,8 +30,15 @@ class KnowledgeStore:
         self.disk_persister = None
         self.searchers = {}
         self.graph = None  # KnowledgeGraph or None
-        # Maps normalized notion ID (no dashes) -> {doc_path, url} for fast lookup
+        # Maps normalized notion ID (no dashes) -> {doc_path, url} for fast lookup.
+        # Rebuilt by re-merging the per-collection slices below, so a reload drops
+        # entries for pages a collection no longer contains instead of accumulating
+        # them, and the dict is swapped in whole (never mutated in place) so readers
+        # never observe a half-built lookup.
         self.notion_id_to_doc = {}
+        # collection name -> {notion_hex: {doc_path, url}}; source of truth re-merged
+        # into notion_id_to_doc on every (re)load.
+        self._notion_by_collection = {}
         # Maps collection name -> {tag: count} for tag distribution
         self.tag_counts = {}
         # Cached similarity graphs: collection_name -> {nodes, all_edges}
@@ -97,7 +104,11 @@ class KnowledgeStore:
 
     def _load_knowledge_graph(self, extra_paths=None):
         from main.graph.graph_loader import load_default_knowledge_graph
-        self.graph = load_default_knowledge_graph(extra_paths=extra_paths)
+        # Load outside the lock (file I/O), swap the reference in under it so
+        # readers see either the whole old graph or the whole new one (M10).
+        graph = load_default_knowledge_graph(extra_paths=extra_paths)
+        with self._lock:
+            self.graph = graph
 
     def reload_collection(self, collection_name):
         searcher = self._build_searcher(collection_name)
@@ -213,7 +224,18 @@ class KnowledgeStore:
             return dict(self.tag_counts)
 
     def _build_tag_counts(self, name):
-        """Scan document metadata to build tag frequency counts for a collection."""
+        """(Re)build tag frequency counts for a collection.
+
+        The scan (file I/O) runs outside the lock; only the completed dict is
+        swapped in under it, so concurrent get_tag_counts readers never observe
+        a partially built map (M10).
+        """
+        counts = self._compute_tag_counts(name)
+        with self._lock:
+            self.tag_counts[name] = counts
+        logger.info(f"Built tag counts for {name}: {len(counts)} unique tags")
+
+    def _compute_tag_counts(self, name):
         from collections import Counter
         tag_counts = Counter()
         docs_dir = f"{name}/documents"
@@ -233,10 +255,28 @@ class KnowledgeStore:
                         tag_counts[tag] += 1
             except Exception:
                 continue
-        self.tag_counts[name] = dict(tag_counts.most_common())
-        logger.info(f"Built tag counts for {name}: {len(tag_counts)} unique tags")
+        return dict(tag_counts.most_common())
 
     def _build_notion_id_lookup(self, name):
+        """(Re)build this collection's Notion-ID slice and re-merge the lookup.
+
+        Storing per-collection slices lets a reload replace just this
+        collection's entries (dropping pages it no longer contains) instead of
+        accumulating stale ones (M9). The scan runs outside the lock; the slice
+        store and the merged dict are swapped under it (M10).
+        """
+        slice_ = self._compute_notion_lookup(name)
+        with self._lock:
+            self._notion_by_collection[name] = slice_
+            merged = {}
+            for coll_slice in self._notion_by_collection.values():
+                merged.update(coll_slice)
+            self.notion_id_to_doc = merged
+            total = len(merged)
+        logger.info(f"Built Notion ID lookup for {name}: {len(slice_)} pages ({total} total)")
+
+    def _compute_notion_lookup(self, name):
+        lookup = {}
         try:
             mapping_text = self.disk_persister.read_text_file(
                 f"{name}/indexes/index_document_mapping.json"
@@ -253,10 +293,10 @@ class KnowledgeStore:
                 url_tail = doc_url.rstrip("/").split("/")[-1] if doc_url else ""
                 notion_hex = url_tail[-32:] if len(url_tail) >= 32 else ""
                 if notion_hex and all(c in "0123456789abcdef" for c in notion_hex):
-                    self.notion_id_to_doc[notion_hex] = {"doc_path": doc_path, "url": doc_url}
-            logger.info(f"Built Notion ID lookup with {len(self.notion_id_to_doc)} pages")
+                    lookup[notion_hex] = {"doc_path": doc_path, "url": doc_url}
         except Exception as e:
             logger.warning(f"Could not build Notion ID lookup for {name}: {e}")
+        return lookup
 
 
 _default_store = KnowledgeStore()
