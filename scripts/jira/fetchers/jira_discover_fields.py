@@ -9,9 +9,13 @@ import os
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 
-JIRA_BASE_URL = os.environ.get("JIRA_BASE_URL", "https://jira.example.com")
-PROJECT_KEY = "MYPROJECT"
+JIRA_BASE_URL = os.environ.get("JIRA_BASE_URL", "https://nav.atlassian.net")
+PROJECT_KEY = os.environ.get("JIRA_PROJECT", "MELOSYS")
 AUTH_FILE = "jira_auth.json"
+IS_CLOUD = JIRA_BASE_URL.endswith(".atlassian.net")
+# Cloud removed the classic /search endpoint; api v3 + /search/jql is required.
+API_VERSION = "3" if IS_CLOUD else "2"
+SEARCH_PATH = "search/jql" if IS_CLOUD else "search"
 
 
 async def discover_fields():
@@ -35,7 +39,7 @@ async def discover_fields():
 
         # Fetch ONE issue with ALL fields
         api_url = (
-            f"{JIRA_BASE_URL}/rest/api/2/search?"
+            f"{JIRA_BASE_URL}/rest/api/{API_VERSION}/{SEARCH_PATH}?"
             f"jql=project={PROJECT_KEY}&"
             f"maxResults=1&"
             f"fields=*all"
@@ -135,6 +139,9 @@ async def discover_fields():
                 print(f"  - {field_key}")
 
         print("\nLook for fields containing epic names or links above.")
+        if IS_CLOUD:
+            print("On Atlassian Cloud the Epic is usually the issue's `parent` "
+                  "(see PARENT FIELD above), not a custom field.")
         print("Common Epic Link field names: customfield_10014, customfield_10008, customfield_10100")
 
         # Check if customfield_13510 is the Epic Link
@@ -145,7 +152,7 @@ async def discover_fields():
             print("=" * 80)
 
             # Fetch the referenced issue
-            epic_api_url = f"{JIRA_BASE_URL}/rest/api/2/issue/{epic_key}?fields=issuetype,summary"
+            epic_api_url = f"{JIRA_BASE_URL}/rest/api/{API_VERSION}/issue/{epic_key}?fields=issuetype,summary"
 
             epic_page = await context.new_page()
             await epic_page.goto(epic_api_url, wait_until="networkidle", timeout=60000)

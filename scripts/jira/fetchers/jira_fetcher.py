@@ -5,9 +5,17 @@ Jira Fetcher with Playwright Authentication.
 Fetches Jira issues via REST API using Playwright browser context for auth.
 Supports incremental updates, curated markdown output, and exclude manifests.
 
+Works with both Atlassian Cloud (*.atlassian.net) and self-hosted Server/Data
+Center, auto-detected from --base-url. On Cloud it uses the enhanced
+/rest/api/3/search/jql endpoint (token pagination), reads ADF rich-text, and
+takes the Epic from each issue's parent; on Server it uses the classic
+offset-paginated /search with the legacy Epic Link custom field.
+
 Usage:
-    # Full download to curated directory
-    uv run scripts/jira/fetchers/jira_fetcher.py --saveMd ./data/sources/jira-issues
+    # Full download from Atlassian Cloud (e.g. NAV's MELOSYS project)
+    uv run scripts/jira/fetchers/jira_fetcher.py \\
+        --base-url https://nav.atlassian.net --project MELOSYS \\
+        --saveMd ./data/sources/jira-issues
 
     # Incremental: only issues updated since cutoff
     uv run scripts/jira/fetchers/jira_fetcher.py --saveMd ./data/sources/jira-issues \\
@@ -49,8 +57,98 @@ logger = logging.getLogger(__name__)
 
 
 class JiraFetcher:
+    # ADF block nodes that should end a line, so list items / table cells /
+    # paragraphs don't run together when an Atlassian Document Format field is
+    # flattened. Mirrors main.sources.jira.JiraCloudDocumentConverter.
+    _ADF_BLOCK_TYPES = frozenset({
+        "paragraph", "heading", "listItem", "blockquote", "panel",
+        "tableRow", "tableCell", "tableHeader", "codeBlock", "rule",
+    })
+
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
+        # Atlassian Cloud (e.g. https://nav.atlassian.net) vs self-hosted
+        # Server/Data Center. The two differ in search endpoint, rich-text
+        # format (ADF vs HTML/wiki), and how the Epic link is expressed.
+        self.is_cloud = self.base_url.endswith(".atlassian.net")
+
+    def _search_fields(self) -> str:
+        """Fields to request per issue.
+
+        `parent` carries the Epic on Cloud; the legacy Epic Link custom field
+        (customfield_13510) only exists on the old Server instance and would
+        trigger a 400 ("field does not exist") if requested on Cloud.
+        """
+        fields = ['summary', 'description', 'status', 'issuetype', 'priority',
+                  'created', 'updated', 'assignee', 'reporter', 'labels',
+                  'comment', 'parent']
+        if not self.is_cloud:
+            fields.append('customfield_13510')
+        return ','.join(fields)
+
+    @classmethod
+    def adf_to_text(cls, node_tree) -> str:
+        """Flatten an Atlassian Document Format (ADF) field to plain text.
+
+        Cloud returns description/comment bodies as an ADF node tree (a dict)
+        rather than HTML. Walks the tree recursively so nested lists, tables,
+        panels and blockquotes are captured. Kept inline (rather than importing
+        JiraCloudDocumentConverter) to keep this scraper free of the indexing
+        layer's heavier imports.
+        """
+        if not isinstance(node_tree, dict):
+            return ""
+
+        parts = []
+
+        def walk(node):
+            if not isinstance(node, dict):
+                return
+            text = node.get("text")
+            if text:
+                parts.append(text)
+            if node.get("type") == "hardBreak":
+                parts.append("\n")
+            children = node.get("content")
+            if isinstance(children, list):
+                for child in children:
+                    walk(child)
+                if node.get("type") in cls._ADF_BLOCK_TYPES:
+                    parts.append("\n")
+
+        walk(node_tree)
+        return "\n".join(line.strip() for line in "".join(parts).splitlines() if line.strip()).strip()
+
+    def _render_field(self, value) -> str:
+        """Render a Jira rich-text field (description / comment body) to text.
+
+        Cloud returns ADF (a dict); Server returns HTML/wiki markup (a string).
+        Dispatch on type so both ingest paths share one call site.
+        """
+        if not value:
+            return ""
+        if isinstance(value, dict):
+            return self.adf_to_text(value)
+        return self.html_to_markdown(value)
+
+    def _extract_epic(self, fields: dict, epic_info: Dict[str, str]) -> tuple:
+        """Return (epic_key, epic_summary) for an issue.
+
+        Cloud: the Epic is the issue's `parent` (when that parent is an Epic),
+        with the summary available inline in the search response. Server/DC: the
+        legacy Epic Link custom field (customfield_13510), whose summary is
+        resolved from the separately-fetched epic_info map.
+        """
+        parent = fields.get('parent') or {}
+        parent_fields = parent.get('fields', {})
+        parent_type = parent_fields.get('issuetype', {}).get('name', '')
+        if parent.get('key') and parent_type.lower() == 'epic':
+            return parent['key'], parent_fields.get('summary', '')
+
+        legacy_key = fields.get('customfield_13510') or ''
+        if legacy_key:
+            return legacy_key, epic_info.get(legacy_key, '')
+        return '', ''
 
     @staticmethod
     def sanitize_filename(text: str, max_length: int = 100) -> str:
@@ -143,7 +241,7 @@ class JiraFetcher:
         description = fields.get('description')
         if description:
             md_lines.append("## Description\n")
-            md_lines.append(self.html_to_markdown(description) + "\n")
+            md_lines.append(self._render_field(description) + "\n")
 
         comments = fields.get('comment', {}).get('comments', [])
         if comments:
@@ -151,7 +249,7 @@ class JiraFetcher:
             for comment in comments:
                 author = comment.get('author', {}).get('displayName', 'Unknown')
                 created = comment.get('created', '')
-                body = self.html_to_markdown(comment.get('body', ''))
+                body = self._render_field(comment.get('body', ''))
                 md_lines.append(f"### {author} - {created}\n")
                 md_lines.append(f"{body}\n")
 
@@ -213,51 +311,67 @@ class JiraFetcher:
         return {e["issue_key"] for e in entries if e.get("issue_key")}
 
     async def fetch_issues(self, context, jql: str) -> List[Dict]:
-        """Fetch all Jira issues matching JQL query using Playwright API context."""
+        """Fetch all Jira issues matching JQL query using Playwright API context.
+
+        Cloud uses the enhanced search endpoint (/rest/api/3/search/jql), which
+        paginates with an opaque nextPageToken and returns no total — the old
+        /search endpoint (startAt/total) was removed from Jira Cloud in 2025.
+        Server/Data Center still uses the classic offset-paginated /search.
+        """
         print(f"Fetching issues with JQL: {jql}")
 
-        all_issues = []
+        fields = self._search_fields()
+        all_issues: List[Dict] = []
+        next_page_token = None
         start_at = 0
-        max_results = 50
+        max_results = 100
 
         page = await context.new_page()
 
         try:
             while True:
-                print(f"  Fetching issues {start_at} to {start_at + max_results}...")
-
-                response = await page.request.get(
-                    f"{self.base_url}/rest/api/2/search",
-                    params={
+                if self.is_cloud:
+                    params = {
+                        'jql': jql,
+                        'maxResults': str(max_results),
+                        'fields': fields,
+                    }
+                    if next_page_token:
+                        params['nextPageToken'] = next_page_token
+                    url = f"{self.base_url}/rest/api/3/search/jql"
+                else:
+                    params = {
                         'jql': jql,
                         'startAt': str(start_at),
                         'maxResults': str(max_results),
                         'expand': 'renderedFields',
-                        'fields': 'summary,description,status,issuetype,priority,created,updated,'
-                                  'assignee,reporter,labels,comment,customfield_13510,parent',
+                        'fields': fields,
                     }
-                )
+                    url = f"{self.base_url}/rest/api/2/search"
+
+                response = await page.request.get(url, params=params)
 
                 if response.status != 200:
                     error_text = await response.text()
-                    print(f"Error: API returned status {response.status}: {error_text[:200]}")
+                    print(f"Error: API returned status {response.status}: {error_text[:300]}")
                     break
 
                 data = json.loads(await response.text())
                 issues = data.get('issues', [])
-                total = data.get('total', 0)
-
-                if not issues:
-                    print("  No more issues found")
-                    break
-
                 all_issues.extend(issues)
-                print(f"  Fetched {len(all_issues)}/{total} issues")
 
-                if len(all_issues) >= total:
-                    break
+                if self.is_cloud:
+                    print(f"  Fetched {len(all_issues)} issues...")
+                    next_page_token = data.get('nextPageToken')
+                    if data.get('isLast') or not next_page_token:
+                        break
+                else:
+                    total = data.get('total', 0)
+                    print(f"  Fetched {len(all_issues)}/{total} issues")
+                    if not issues or len(all_issues) >= total:
+                        break
+                    start_at += max_results
 
-                start_at += max_results
                 await asyncio.sleep(0.5)
         finally:
             await page.close()
@@ -286,36 +400,63 @@ class JiraFetcher:
         finally:
             await page.close()
 
+    async def is_api_authenticated(self, context) -> bool:
+        """Return True if the current session can call the Jira REST API.
+
+        Checked against /myself rather than by sniffing the page URL: on
+        Atlassian Cloud an unauthenticated /browse/<key> does not reliably
+        redirect to a URL containing "login"/"auth", and an unauthenticated
+        search returns 200 with zero issues — so URL-sniffing produced a false
+        "Already authenticated" and silently empty fetches.
+        """
+        api_version = "3" if self.is_cloud else "2"
+        try:
+            # context.request issues a background HTTP call without opening a
+            # page/tab, so polling this while the user logs in doesn't steal
+            # focus or churn the visible login window.
+            resp = await context.request.get(f"{self.base_url}/rest/api/{api_version}/myself")
+            return resp.status == 200
+        except Exception:
+            return False
+
     async def authenticate(self, context, project_key: str):
-        """Test auth and prompt for login if needed."""
+        """Ensure the session is authenticated to the REST API; prompt if not."""
+        if await self.is_api_authenticated(context):
+            print("Already authenticated!")
+            return
+
         page = await context.new_page()
         await page.goto(f"{self.base_url}/browse/{project_key}", timeout=60000)
-        await asyncio.sleep(3)
 
-        current_url = page.url
-        if "login" in current_url.lower() or "auth" in current_url.lower():
-            print("\n" + "=" * 60)
-            print("PLEASE LOG IN TO JIRA")
-            print("=" * 60)
-            print("1. Complete the login process in the browser")
-            print("2. Use your ID and authenticator")
-            print(f"3. Wait until you see the {project_key} project page")
-            print("=" * 60)
+        print("\n" + "=" * 60)
+        print("PLEASE LOG IN TO JIRA")
+        print("=" * 60)
+        print("1. Complete the login process in the browser")
+        print("2. Use your ID and authenticator")
+        print(f"3. Wait until you see the {project_key} project page")
+        print("=" * 60)
 
-            await page.wait_for_url(
-                lambda url: "login" not in url.lower() and "auth" not in url.lower(),
-                timeout=300000
-            )
-            print("\nAuthentication successful!")
-
-            auth_file = Path(__file__).parent.parent / "auth" / "jira_auth.json"
-            auth_file.parent.mkdir(parents=True, exist_ok=True)
-            await context.storage_state(path=str(auth_file))
-            print(f"Saved authentication to {auth_file}")
-        else:
-            print("Already authenticated!")
+        # Poll the API until the session becomes valid (up to 5 minutes), so we
+        # only proceed once /myself actually returns 200 — no false positives.
+        authenticated = False
+        for _ in range(150):
+            await asyncio.sleep(2)
+            if await self.is_api_authenticated(context):
+                authenticated = True
+                break
 
         await page.close()
+
+        if not authenticated:
+            raise RuntimeError(
+                "Timed out waiting for Jira authentication (no valid API session after 5 min)."
+            )
+
+        print("\nAuthentication successful!")
+        auth_file = Path(__file__).parent.parent / "auth" / "jira_auth.json"
+        auth_file.parent.mkdir(parents=True, exist_ok=True)
+        await context.storage_state(path=str(auth_file))
+        print(f"Saved authentication to {auth_file}")
 
     def save_issues_as_markdown(self, issues: List[Dict], save_md_path: str,
                                  epic_info: Dict[str, str],
@@ -344,8 +485,7 @@ class JiraFetcher:
             fields = issue['fields']
             summary = fields.get('summary', 'no-title')
             updated = fields.get('updated', '')
-            epic_link = fields.get('customfield_13510', '')
-            epic_summary = epic_info.get(epic_link, '') if epic_link else ''
+            epic_link, epic_summary = self._extract_epic(fields, epic_info)
 
             safe_title = self.sanitize_filename(summary)
             filename = f"{issue_key}_{safe_title}.md"
@@ -400,11 +540,10 @@ class JiraFetcher:
             fields = issue['fields']
             summary = fields.get('summary', 'no-title')
             updated = fields.get('updated', '')
-            epic_link = fields.get('customfield_13510', '')
-            epic_summary = epic_info.get(epic_link, '') if epic_link else ''
+            epic_link, epic_summary = self._extract_epic(fields, epic_info)
 
-            if epic_link and epic_link in epic_info:
-                epic_name = self.sanitize_filename(f"{epic_link}_{epic_info[epic_link]}")
+            if epic_link:
+                epic_name = self.sanitize_filename(f"{epic_link}_{epic_summary}" if epic_summary else epic_link)
             else:
                 epic_name = "No_Epic"
             epic_stats[epic_name] = epic_stats.get(epic_name, 0) + 1
@@ -500,7 +639,8 @@ Examples:
     parser.add_argument("--project", "-p", default="MYPROJECT",
                         help="Jira project key (default: MYPROJECT)")
     parser.add_argument("--base-url", "-u", required=True,
-                        help="Jira base URL (e.g. https://jira.example.com)")
+                        help="Jira base URL. Cloud: https://your-domain.atlassian.net "
+                             "(e.g. https://nav.atlassian.net). Server/DC: https://jira.example.com")
     parser.add_argument("--jql", default=None,
                         help="Override JQL query entirely (--startFromTime still appended)")
     parser.add_argument("--saveMd", default=None,
@@ -566,21 +706,31 @@ Examples:
             await browser.close()
             return
 
-        # Collect and fetch Epic info
+        # Collect Epic info. On Cloud the Epic is each issue's parent and its
+        # summary is already inline in the search response, so no extra requests
+        # are needed. On Server the Epic Link is a custom field id, so we resolve
+        # each unique Epic's summary with a follow-up request.
         print("\nCollecting Epic information...")
-        epic_keys = set()
-        for issue in issues:
-            epic_link = issue['fields'].get('customfield_13510')
-            if epic_link:
-                epic_keys.add(epic_link)
+        epic_info: Dict[str, str] = {}
+        if fetcher.is_cloud:
+            for issue in issues:
+                parent = issue['fields'].get('parent') or {}
+                parent_fields = parent.get('fields', {})
+                if parent.get('key') and parent_fields.get('issuetype', {}).get('name', '').lower() == 'epic':
+                    epic_info[parent['key']] = parent_fields.get('summary', '')
+        else:
+            epic_keys = set()
+            for issue in issues:
+                epic_link = issue['fields'].get('customfield_13510')
+                if epic_link:
+                    epic_keys.add(epic_link)
+            for epic_key in epic_keys:
+                summary = await fetcher.fetch_epic_info(context, epic_key)
+                if summary:
+                    epic_info[epic_key] = summary
+                    print(f"  {epic_key}: {summary}")
 
-        print(f"Found {len(epic_keys)} unique Epics")
-        epic_info = {}
-        for epic_key in epic_keys:
-            summary = await fetcher.fetch_epic_info(context, epic_key)
-            if summary:
-                epic_info[epic_key] = summary
-                print(f"  {epic_key}: {summary}")
+        print(f"Found {len(epic_info)} unique Epics")
 
         await browser.close()
 
@@ -603,13 +753,19 @@ Examples:
         fetcher.save_issues_structured(issues, output_dir, epic_info)
         print(f"\nDone! {len(issues)} issues processed")
 
+    # Default the suggested collection name to the destination folder, NOT a
+    # hardcoded "jira-issues" — blindly running the old hint would re-index a
+    # sample dir on top of the production collection and clobber it.
+    suggested_collection = Path(save_md).name if save_md else "my-jira"
+
     print("\nNEXT STEPS:")
     if save_md:
         print(f"  # Clean up noise:")
         print(f"  uv run jira_cleanup_md.py --saveMd {save_md} --dryRun")
-        print(f"  # Index into vector database:")
+        print(f"  # Index into vector database (collection defaults to the folder name —")
+        print(f"  # change it deliberately if you mean to update an existing collection):")
         print(f"  uv run files_collection_create_cmd_adapter.py \\")
-        print(f"    --basePath {save_md} --collection jira-issues \\")
+        print(f"    --basePath {save_md} --collection {suggested_collection} \\")
         print(f"    --excludePatterns \"^\\.excluded/.*\"")
     else:
         md_path = Path(output_dir) / "markdown"
