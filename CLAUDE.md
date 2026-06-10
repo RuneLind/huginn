@@ -53,7 +53,7 @@ Collections live in `data/collections/`. Source documents live in `data/sources/
 | `jira-issues` | `./data/sources/jira-issues` | `^\.excluded/.*` |
 | `capra-notion-v9` | `./data/sources/capra-notion` | — |
 | `nav-wiki` | `./huginn-nav/wiki` | `index\.md` `log\.md` `CLAUDE\.md` `^\.obsidian/.*` `^\.claude/.*` |
-| `wiki` | `./huginn-jarvis/data/wiki` | `^index\.md$` `^log\.md$` `^CLAUDE\.md$` `^plans/.*` |
+| `wiki` | `./huginn-jarvis/data/wiki` | `^index\.md$` `^log\.md$` `^CLAUDE\.md$` `^plans/.*` `^Clippings/.*` |
 
 ### Verify after re-indexing
 
