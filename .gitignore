@@ -13,6 +13,9 @@ tmp
 
 # Data directories
 /data/
+# Local data archives/exports (can be very large)
+/data.zip
+*.zip
 
 # Log files
 logs/
