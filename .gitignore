@@ -13,9 +13,9 @@ tmp
 
 # Data directories
 /data/
-# Local data archives/exports (can be very large)
-/data.zip
-*.zip
+# Local data archives/exports at the repo root (can be very large). Anchored to
+# the root so a legitimately-tracked zip in a subdir (e.g. a test fixture) still works.
+/*.zip
 
 # Log files
 logs/

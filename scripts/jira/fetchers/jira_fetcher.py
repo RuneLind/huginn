@@ -52,19 +52,14 @@ from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 
 from scripts.jira.sanitizers.pii_sanitizer import PiiSanitizer
+# Dependency-free ADF flattener shared with the indexing converter; importing
+# this leaf module does not pull in the indexing layer's heavier deps.
+from main.sources.jira.adf_text import adf_to_text
 
 logger = logging.getLogger(__name__)
 
 
 class JiraFetcher:
-    # ADF block nodes that should end a line, so list items / table cells /
-    # paragraphs don't run together when an Atlassian Document Format field is
-    # flattened. Mirrors main.sources.jira.JiraCloudDocumentConverter.
-    _ADF_BLOCK_TYPES = frozenset({
-        "paragraph", "heading", "listItem", "blockquote", "panel",
-        "tableRow", "tableCell", "tableHeader", "codeBlock", "rule",
-    })
-
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
         # Atlassian Cloud (e.g. https://nav.atlassian.net) vs self-hosted
@@ -86,39 +81,6 @@ class JiraFetcher:
             fields.append('customfield_13510')
         return ','.join(fields)
 
-    @classmethod
-    def adf_to_text(cls, node_tree) -> str:
-        """Flatten an Atlassian Document Format (ADF) field to plain text.
-
-        Cloud returns description/comment bodies as an ADF node tree (a dict)
-        rather than HTML. Walks the tree recursively so nested lists, tables,
-        panels and blockquotes are captured. Kept inline (rather than importing
-        JiraCloudDocumentConverter) to keep this scraper free of the indexing
-        layer's heavier imports.
-        """
-        if not isinstance(node_tree, dict):
-            return ""
-
-        parts = []
-
-        def walk(node):
-            if not isinstance(node, dict):
-                return
-            text = node.get("text")
-            if text:
-                parts.append(text)
-            if node.get("type") == "hardBreak":
-                parts.append("\n")
-            children = node.get("content")
-            if isinstance(children, list):
-                for child in children:
-                    walk(child)
-                if node.get("type") in cls._ADF_BLOCK_TYPES:
-                    parts.append("\n")
-
-        walk(node_tree)
-        return "\n".join(line.strip() for line in "".join(parts).splitlines() if line.strip()).strip()
-
     def _render_field(self, value) -> str:
         """Render a Jira rich-text field (description / comment body) to text.
 
@@ -128,7 +90,7 @@ class JiraFetcher:
         if not value:
             return ""
         if isinstance(value, dict):
-            return self.adf_to_text(value)
+            return adf_to_text(value)
         return self.html_to_markdown(value)
 
     def _extract_epic(self, fields: dict, epic_info: Dict[str, str]) -> tuple:
@@ -756,11 +718,12 @@ Examples:
         print("\nCollecting Epic information...")
         epic_info: Dict[str, str] = {}
         if fetcher.is_cloud:
+            # Reuse the same parent->epic detection as the per-issue path so the
+            # two never drift apart.
             for issue in issues:
-                parent = issue['fields'].get('parent') or {}
-                parent_fields = parent.get('fields', {})
-                if parent.get('key') and parent_fields.get('issuetype', {}).get('name', '').lower() == 'epic':
-                    epic_info[parent['key']] = parent_fields.get('summary', '')
+                epic_key, epic_summary = fetcher._extract_epic(issue['fields'], {})
+                if epic_key:
+                    epic_info[epic_key] = epic_summary
         else:
             epic_keys = set()
             for issue in issues:
