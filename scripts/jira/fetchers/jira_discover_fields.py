@@ -9,7 +9,9 @@ import os
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 
-JIRA_BASE_URL = os.environ.get("JIRA_BASE_URL", "https://nav.atlassian.net")
+# rstrip the trailing slash (as JiraFetcher does) so a "…atlassian.net/" value
+# is still detected as Cloud and built URLs don't get a double slash.
+JIRA_BASE_URL = os.environ.get("JIRA_BASE_URL", "https://nav.atlassian.net").rstrip("/")
 PROJECT_KEY = os.environ.get("JIRA_PROJECT", "MELOSYS")
 AUTH_FILE = "jira_auth.json"
 IS_CLOUD = JIRA_BASE_URL.endswith(".atlassian.net")
