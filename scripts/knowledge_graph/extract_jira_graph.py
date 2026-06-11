@@ -206,7 +206,10 @@ def main():
     subtask_count = 0
     for issue_key, data in issues.items():
         parent_key = data["parent"]
-        if parent_key and parent_key in issue_keys_set:
+        # Skip when the parent is the issue's Epic: Atlassian Cloud writes the
+        # Epic as `parent` too, but that is an epic membership (already an
+        # tilhører_epic edge), not a subtask relationship.
+        if parent_key and parent_key in issue_keys_set and parent_key != data["epic_link"]:
             add_edge(f"issue:{issue_key}", f"issue:{parent_key}", "er_subtask_av")
             subtask_count += 1
 

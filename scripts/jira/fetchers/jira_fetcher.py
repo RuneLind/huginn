@@ -217,7 +217,17 @@ class JiraFetcher:
 
         parent = fields.get('parent') or {}
         parent_key = parent.get('key', '')
-        parent_summary = parent.get('fields', {}).get('summary', '') if parent_key else ''
+        parent_fields = parent.get('fields', {})
+        # When the parent IS the Epic (Cloud company-managed projects link a
+        # Story to its Epic via `parent`), that relationship is already captured
+        # by epic_link. Emitting it again as `parent` makes the graph extractor
+        # add a spurious er_subtask_av edge, so keep `parent` for genuine
+        # non-epic parents only (e.g. a sub-task's parent story).
+        if parent_key and parent_fields.get('issuetype', {}).get('name', '').lower() == 'epic':
+            parent_key = ''
+            parent_summary = ''
+        else:
+            parent_summary = parent_fields.get('summary', '') if parent_key else ''
         lines.append(f"parent: {self._yaml_value(parent_key)}")
         lines.append(f"parent_summary: {self._yaml_value(parent_summary)}")
 
@@ -349,12 +359,24 @@ class JiraFetcher:
                     }
                     url = f"{self.base_url}/rest/api/2/search"
 
-                response = await page.request.get(url, params=params)
+                # Retry transient errors a few times, then RAISE rather than
+                # break: silently returning a partial page set would let an
+                # incremental run index a truncated result and advance its cutoff
+                # past the gap, permanently losing the un-fetched issues.
+                for attempt in range(3):
+                    response = await page.request.get(url, params=params)
+                    if response.status == 200:
+                        break
+                    if response.status in (429, 502, 503, 504) and attempt < 2:
+                        await asyncio.sleep(2 ** attempt)
+                        continue
+                    break
 
                 if response.status != 200:
                     error_text = await response.text()
-                    print(f"Error: API returned status {response.status}: {error_text[:300]}")
-                    break
+                    raise RuntimeError(
+                        f"Jira API returned status {response.status}: {error_text[:300]}"
+                    )
 
                 data = json.loads(await response.text())
                 issues = data.get('issues', [])
@@ -363,14 +385,19 @@ class JiraFetcher:
                 if self.is_cloud:
                     print(f"  Fetched {len(all_issues)} issues...")
                     next_page_token = data.get('nextPageToken')
-                    if data.get('isLast') or not next_page_token:
+                    # `not issues` also terminates an empty page that still
+                    # echoes a token (a known Cloud quirk) — without it the loop
+                    # would spin forever re-requesting the same page.
+                    if data.get('isLast') or not next_page_token or not issues:
                         break
                 else:
                     total = data.get('total', 0)
                     print(f"  Fetched {len(all_issues)}/{total} issues")
                     if not issues or len(all_issues) >= total:
                         break
-                    start_at += max_results
+                    # Advance by the actual count returned, not the requested
+                    # page size, in case the instance caps maxResults below 100.
+                    start_at += len(issues)
 
                 await asyncio.sleep(0.5)
         finally:
@@ -469,6 +496,16 @@ class JiraFetcher:
         md_base = Path(save_md_path)
         md_base.mkdir(parents=True, exist_ok=True)
 
+        # Map existing files by issue_key (filename is "<key>_<title>.md"). A
+        # renamed issue would otherwise leave its previous-title file on disk;
+        # the files indexer keys documents by path, so that orphan becomes a
+        # duplicate document for the same issue. Built once to avoid re-globbing
+        # the directory per issue.
+        existing_by_key: Dict[str, List[Path]] = {}
+        for existing in md_base.glob("*.md"):
+            key = existing.name.split("_", 1)[0]
+            existing_by_key.setdefault(key, []).append(existing)
+
         sanitizer = PiiSanitizer()
         saved = 0
         skipped = 0
@@ -489,6 +526,12 @@ class JiraFetcher:
 
             safe_title = self.sanitize_filename(summary)
             filename = f"{issue_key}_{safe_title}.md"
+
+            # Drop any stale file for this issue under a previous title so the
+            # renamed issue doesn't end up indexed twice.
+            for stale in existing_by_key.get(issue_key, []):
+                if stale.name != filename:
+                    stale.unlink(missing_ok=True)
 
             md_content = self.issue_to_markdown(issue, epic_link or '', epic_summary)
 
