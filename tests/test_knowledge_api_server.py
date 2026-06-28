@@ -947,3 +947,22 @@ class TestAnthropicSummaryIngest:
         with pytest.raises(HTTPException) as exc:
             ingest_anthropic_summary(self._req(category="bogus/nope"), sources_path=str(tmp_path))
         assert exc.value.status_code == 400
+
+    def test_same_url_reingest_overwrites(self, tmp_path):
+        # Re-pushing an updated summary for the same url must overwrite, not fork
+        # a (2) file — the quoted-frontmatter url is compared via the parser.
+        from main.ingest.anthropic_summaries import ingest_anthropic_summary
+        first = ingest_anthropic_summary(self._req(summary="v1"), sources_path=str(tmp_path))
+        second = ingest_anthropic_summary(self._req(summary="v2 updated"), sources_path=str(tmp_path))
+        assert first["file_path"] == second["file_path"]
+        category_dir = tmp_path / "ai" / "claude-code"
+        assert [p.name for p in category_dir.glob("*.md")] == ["Claude Code v2 ships subagents.md"]
+        assert (tmp_path / second["file_path"]).read_text(encoding="utf-8").rstrip().endswith("v2 updated")
+
+    def test_same_title_different_url_forks(self, tmp_path):
+        # Same title but a genuinely different url keeps both as distinct docs.
+        from main.ingest.anthropic_summaries import ingest_anthropic_summary
+        ingest_anthropic_summary(self._req(url="https://docs.anthropic.com/a"), sources_path=str(tmp_path))
+        ingest_anthropic_summary(self._req(url="https://docs.anthropic.com/b"), sources_path=str(tmp_path))
+        category_dir = tmp_path / "ai" / "claude-code"
+        assert len(list(category_dir.glob("*.md"))) == 2

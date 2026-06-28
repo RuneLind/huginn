@@ -1,10 +1,8 @@
 """Shared write-helper for category-organized markdown ingest (YouTube, X articles)."""
-import logging
 import os
 
 from main.utils.filename import sanitize_filename
-
-logger = logging.getLogger(__name__)
+from main.utils.frontmatter import read_frontmatter_from_path
 
 
 def write_categorized_markdown(
@@ -29,13 +27,12 @@ def write_categorized_markdown(
     filepath = os.path.join(category_dir, filename)
 
     if os.path.exists(filepath):
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                existing_head = f.read(500)
-        except OSError as e:
-            logger.warning(f"Could not read existing file {filepath} for URL check: {e}")
-            existing_head = ""
-        if f"url: {url}" not in existing_head:
+        # Same URL → overwrite; same title but a different URL → fork a numbered
+        # name. Compare the parsed frontmatter url: the writer quotes values
+        # (url: "..."), so a raw `url: <value>` substring check never matches and
+        # would fork a (2), (3) file on every same-URL re-ingest.
+        existing_url = read_frontmatter_from_path(filepath).get("url")
+        if existing_url != url:
             for i in range(2, 100):
                 filename = f"{base_filename} ({i}).md"
                 filepath = os.path.join(category_dir, filename)

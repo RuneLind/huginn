@@ -189,9 +189,9 @@ def anthropic_summary_ingest(
 ):
     """Ingest a finished Anthropic summary from Muninn: save markdown, find similar, reindex."""
     sources_path = request.app.state.anthropic_summaries_sources_path
-    collection = request.app.state.anthropic_summaries_collection
     if not sources_path:
         raise HTTPException(status_code=503, detail="Anthropic summaries sources path not configured (--anthropic-summaries-sources-path)")
+    collection = request.app.state.anthropic_summaries_collection
 
     with _ingest_errors("Anthropic summary ingest"):
         result = ingest_anthropic_summary(req, sources_path=sources_path)
