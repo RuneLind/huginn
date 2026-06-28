@@ -108,6 +108,16 @@ def main():
         default=os.environ.get("X_ARTICLES_COLLECTION", "x-articles"),
         help="Collection name for X article summaries",
     )
+    ap.add_argument(
+        "--anthropic-summaries-sources-path",
+        default=os.environ.get("ANTHROPIC_SUMMARIES_SOURCES_PATH"),
+        help="Path to save Anthropic summary markdown files",
+    )
+    ap.add_argument(
+        "--anthropic-summaries-collection",
+        default=os.environ.get("ANTHROPIC_SUMMARIES_COLLECTION", "anthropic-summaries"),
+        help="Collection name for Anthropic summaries",
+    )
     args = ap.parse_args()
 
     app.state.data_path = args.data_path
@@ -118,6 +128,8 @@ def main():
     app.state.jira_collection = args.jira_collection
     app.state.x_articles_sources_path = args.x_articles_sources_path
     app.state.x_articles_collection = args.x_articles_collection
+    app.state.anthropic_summaries_sources_path = args.anthropic_summaries_sources_path
+    app.state.anthropic_summaries_collection = args.anthropic_summaries_collection
 
     uvicorn.run(app, host=args.host, port=args.port)
 

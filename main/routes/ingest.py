@@ -5,6 +5,10 @@ from contextlib import contextmanager
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 
 from main.core.search_response_formatter import extract_chunk_text, truncate_snippet
+from main.ingest.anthropic_summaries import (
+    AnthropicSummaryIngestRequest,
+    ingest_anthropic_summary,
+)
 from main.ingest.jira import JiraIngestRequest, ingest_jira
 from main.ingest.x_articles import XArticleIngestRequest, ingest_x_article
 from main.ingest.youtube import (
@@ -169,6 +173,39 @@ def x_article_ingest(
             "status": "ingested",
             "file_path": result["file_path"],
             "author": result["author"],
+            "category": result["category"],
+            "summary": result["summary"],
+            "similar": similar,
+            "reindex": reindex,
+        }
+
+
+@router.post("/api/anthropic-summaries/ingest")
+def anthropic_summary_ingest(
+    req: AnthropicSummaryIngestRequest,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    store: KnowledgeStore = Depends(get_store),
+):
+    """Ingest a finished Anthropic summary from Muninn: save markdown, find similar, reindex."""
+    sources_path = request.app.state.anthropic_summaries_sources_path
+    if not sources_path:
+        raise HTTPException(status_code=503, detail="Anthropic summaries sources path not configured (--anthropic-summaries-sources-path)")
+    collection = request.app.state.anthropic_summaries_collection
+
+    with _ingest_errors("Anthropic summary ingest"):
+        result = ingest_anthropic_summary(req, sources_path=sources_path)
+
+        similar = _similar_for_collection(
+            store, collection,
+            query=req.summary[:2000],
+            exclude_match=lambda doc: doc.get("url", "") == req.url,
+        )
+        reindex = _maybe_enqueue_reindex(store, background_tasks, collection)
+
+        return {
+            "status": "ingested",
+            "file_path": result["file_path"],
             "category": result["category"],
             "summary": result["summary"],
             "similar": similar,

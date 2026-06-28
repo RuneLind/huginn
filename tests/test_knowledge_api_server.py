@@ -793,6 +793,30 @@ class TestIngestErrorHandling:
         resp = self._client().post("/api/youtube/ingest", json={"title": "T", "url": "https://x"})
         assert resp.status_code == 503
 
+    def test_anthropic_summary_ingest_failure_returns_structured_500(self, monkeypatch):
+        app.state.anthropic_summaries_sources_path = "/tmp/anthropic-summaries"
+        app.state.anthropic_summaries_collection = None
+
+        def _boom(*a, **k):
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr("main.routes.ingest.ingest_anthropic_summary", _boom)
+        resp = self._client().post(
+            "/api/anthropic-summaries/ingest",
+            json={"title": "T", "url": "https://x", "summary": "S"},
+        )
+        assert resp.status_code == 500
+        assert "Anthropic summary ingest failed" in resp.json()["detail"]
+        assert "disk full" in resp.json()["detail"]
+
+    def test_anthropic_summary_unconfigured_path_returns_503(self):
+        app.state.anthropic_summaries_sources_path = None
+        resp = self._client().post(
+            "/api/anthropic-summaries/ingest",
+            json={"title": "T", "url": "https://x", "summary": "S"},
+        )
+        assert resp.status_code == 503
+
 
 class TestGraphRoutes:
     """HTTP coverage for the knowledge-graph routes (M17)."""
@@ -882,3 +906,63 @@ class TestAuthorGraphRoute:
         # A collection with no precomputed scores file under huginn-jarvis/data.
         resp = self._client(KnowledgeStore()).get("/api/collection/no-such-collection-xyz/author-graph")
         assert resp.status_code == 404
+
+
+class TestAnthropicSummaryIngest:
+    """ingest_anthropic_summary writes categorized markdown with no author field."""
+
+    def _req(self, **over):
+        from main.ingest.anthropic_summaries import AnthropicSummaryIngestRequest
+        base = {
+            "title": "Claude Code v2 ships subagents",
+            "url": "https://docs.anthropic.com/claude-code/subagents",
+            "summary": "Subagents let you fan out work.",
+            "category": "ai/claude-code",
+            "date": "2026-06-28",
+        }
+        base.update(over)
+        return AnthropicSummaryIngestRequest(**base)
+
+    def test_writes_markdown_without_author(self, tmp_path):
+        from main.ingest.anthropic_summaries import ingest_anthropic_summary
+        result = ingest_anthropic_summary(self._req(), sources_path=str(tmp_path))
+        assert result["category"] == "ai/claude-code"
+        assert result["summary"] == "Subagents let you fan out work."
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert "author:" not in written
+        assert 'url: "https://docs.anthropic.com/claude-code/subagents"' in written
+        assert 'category: "ai/claude-code"' in written
+        assert 'date: "2026-06-28"' in written
+        assert written.rstrip().endswith("Subagents let you fan out work.")
+
+    def test_defaults_category_to_ai_general(self, tmp_path):
+        from main.ingest.anthropic_summaries import ingest_anthropic_summary
+        result = ingest_anthropic_summary(self._req(category=None), sources_path=str(tmp_path))
+        assert result["category"] == "ai/general"
+
+    def test_rejects_unknown_category(self, tmp_path):
+        import pytest
+        from fastapi import HTTPException
+        from main.ingest.anthropic_summaries import ingest_anthropic_summary
+        with pytest.raises(HTTPException) as exc:
+            ingest_anthropic_summary(self._req(category="bogus/nope"), sources_path=str(tmp_path))
+        assert exc.value.status_code == 400
+
+    def test_same_url_reingest_overwrites(self, tmp_path):
+        # Re-pushing an updated summary for the same url must overwrite, not fork
+        # a (2) file — the quoted-frontmatter url is compared via the parser.
+        from main.ingest.anthropic_summaries import ingest_anthropic_summary
+        first = ingest_anthropic_summary(self._req(summary="v1"), sources_path=str(tmp_path))
+        second = ingest_anthropic_summary(self._req(summary="v2 updated"), sources_path=str(tmp_path))
+        assert first["file_path"] == second["file_path"]
+        category_dir = tmp_path / "ai" / "claude-code"
+        assert [p.name for p in category_dir.glob("*.md")] == ["Claude Code v2 ships subagents.md"]
+        assert (tmp_path / second["file_path"]).read_text(encoding="utf-8").rstrip().endswith("v2 updated")
+
+    def test_same_title_different_url_forks(self, tmp_path):
+        # Same title but a genuinely different url keeps both as distinct docs.
+        from main.ingest.anthropic_summaries import ingest_anthropic_summary
+        ingest_anthropic_summary(self._req(url="https://docs.anthropic.com/a"), sources_path=str(tmp_path))
+        ingest_anthropic_summary(self._req(url="https://docs.anthropic.com/b"), sources_path=str(tmp_path))
+        category_dir = tmp_path / "ai" / "claude-code"
+        assert len(list(category_dir.glob("*.md"))) == 2
