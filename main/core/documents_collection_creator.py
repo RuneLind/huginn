@@ -157,10 +157,50 @@ class DocumentCollectionCreator:
 
         self.__remove_documents_from_index(document_ids, index_mapping, reverse_index_mapping)
 
+        self.__prune_orphaned_documents(index_mapping, reverse_index_mapping)
+
         return self.__add_documents_to_index(document_ids,
                                       index_mapping,
                                       reverse_index_mapping,
                                       last_index_item_id)
+
+    def __prune_orphaned_documents(self, index_mapping, reverse_index_mapping):
+        """Drop indexed documents whose source no longer exists.
+
+        An incremental update only re-reads documents inside its time window, so
+        a document whose source file was deleted, renamed, or moved out (e.g. a
+        Jira issue re-fetched under a new title, or a file moved to .excluded/)
+        is never revisited — its chunks linger in the index and keep surfacing
+        in search. Here we reconcile against the reader's full current id set and
+        remove anything indexed that no longer backs a real source.
+
+        Only runs for readers that can enumerate their complete id set
+        (localFiles). Query-based readers (Jira/Confluence/Notion) return just
+        the incremental window, so we cannot tell a deleted issue from an
+        out-of-window one and must not prune from them.
+        """
+        list_ids = getattr(self.document_reader, "get_all_document_ids", None)
+        if list_ids is None:
+            return
+
+        valid_ids = list_ids()
+        # Guard against nuking the whole index on a transient empty read (FS
+        # hiccup, a mistyped include/exclude pattern that matches nothing): if
+        # the source genuinely has no files, __update_collection already returns
+        # early on zero read documents before reaching here, so an empty set at
+        # this point means "couldn't enumerate", not "everything was deleted".
+        if not valid_ids:
+            logging.warning("Skipping orphan pruning: reader returned an empty document set")
+            return
+
+        orphan_ids = [doc_id for doc_id in reverse_index_mapping if doc_id not in valid_ids]
+        if not orphan_ids:
+            return
+
+        logging.info(f"Pruning {len(orphan_ids)} orphaned document(s) whose source no longer exists")
+        self.__remove_documents_from_index(orphan_ids, index_mapping, reverse_index_mapping)
+        for doc_id in orphan_ids:
+            self.persister.remove_file(f"{self.collection_name}/documents/{doc_id}.json")
 
     def __add_documents_to_index(self, 
                           document_ids, 

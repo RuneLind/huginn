@@ -166,6 +166,20 @@ class FilesDocumentReader:
     def get_number_of_documents(self):
         return len(self.__read_file_pathes())
 
+    def get_all_document_ids(self):
+        """Return the set of document ids for ALL current source files.
+
+        Ignores start_from_time (the incremental window) so the caller gets the
+        authoritative "what should be indexed right now" set — used by the
+        updater to prune documents whose source file was deleted, renamed, or
+        moved out (e.g. into .excluded/). The id equals the file's path relative
+        to base_path, matching FilesDocumentConverter's `id` (fileRelativePath).
+        """
+        return {
+            os.path.relpath(p, self.base_path)
+            for p in self.__read_file_pathes(ignore_time_filter=True)
+        }
+
     def get_reader_details(self) -> dict:
         return {
             "type": "localFiles",
@@ -194,7 +208,7 @@ class FilesDocumentReader:
         mod_time = os.path.getmtime(file_path)
         return datetime.datetime.fromtimestamp(mod_time)
 
-    def __read_file_pathes(self):
+    def __read_file_pathes(self, ignore_time_filter: bool = False):
         file_paths = []
         # Per-pattern hit counts over the files each exclude pattern actually got
         # to test (those passing include + extension checks), so a pattern that
@@ -216,7 +230,7 @@ class FilesDocumentReader:
                     continue
                 if self.__is_file_excluded(relative_path, exclude_hits):
                     continue
-                if self.start_from_time is not None and self.__read_file_modification_time(full_path) < self.start_from_time:
+                if not ignore_time_filter and self.start_from_time is not None and self.__read_file_modification_time(full_path) < self.start_from_time:
                     continue
                 file_paths.append(full_path)
 
