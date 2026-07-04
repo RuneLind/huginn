@@ -48,12 +48,23 @@ def test_get_all_document_ids_respects_exclude_patterns(tmp_path):
 # --- DocumentCollectionCreator.__prune_orphaned_documents ---------------------
 
 class FakeIndexer:
-    def __init__(self, name="indexer_BM25"):
+    def __init__(self, name="indexer_BM25", size=0):
         self._name = name
+        self._size = size
         self.removed = []
+        self.indexed = []
 
     def get_name(self):
         return self._name
+
+    def get_size(self):
+        return self._size
+
+    def serialize(self):
+        return {"name": self._name}
+
+    def index_texts(self, ids, texts):
+        self.indexed.extend(zip(ids, texts))
 
     def remove_ids(self, ids):
         self.removed.extend(int(i) for i in np.array(ids).tolist())
@@ -68,7 +79,7 @@ class FakeReader:
 
 
 def _prune(creator, index_mapping, reverse_index_mapping):
-    creator._DocumentCollectionCreator__prune_orphaned_documents(
+    return creator._DocumentCollectionCreator__prune_orphaned_documents(
         index_mapping, reverse_index_mapping)
 
 
@@ -82,9 +93,10 @@ def _make_creator(persister, reader, indexer, collection="col"):
     )
 
 
-def test_prunes_orphan_and_deletes_its_document_json(tmp_path):
+def test_prune_removes_orphan_from_index_and_returns_its_id(tmp_path):
+    # Prune mutates the in-memory index but does NOT delete the document JSON —
+    # that is deferred to the caller so it happens only after the atomic commit.
     persister = DiskPersister(str(tmp_path))
-    persister.save_text_file(json.dumps({"id": "valid.md"}), "col/documents/valid.md.json")
     persister.save_text_file(json.dumps({"id": "orphan.md"}), "col/documents/orphan.md.json")
 
     indexer = FakeIndexer()
@@ -93,11 +105,24 @@ def test_prunes_orphan_and_deletes_its_document_json(tmp_path):
     index_mapping = {"0": {"documentId": "valid.md"}, "1": {"documentId": "orphan.md"}}
     reverse = {"valid.md": [0], "orphan.md": [1]}
 
-    _prune(creator, index_mapping, reverse)
+    orphan_ids = _prune(creator, index_mapping, reverse)
 
+    assert orphan_ids == ["orphan.md"]
     assert reverse == {"valid.md": [0]}
     assert index_mapping == {"0": {"documentId": "valid.md"}}
     assert indexer.removed == [1]
+    # JSON is untouched by prune itself — deletion is the caller's job, post-commit.
+    assert persister.is_path_exists("col/documents/orphan.md.json")
+
+
+def test_delete_document_files_removes_the_json(tmp_path):
+    persister = DiskPersister(str(tmp_path))
+    persister.save_text_file(json.dumps({"id": "valid.md"}), "col/documents/valid.md.json")
+    persister.save_text_file(json.dumps({"id": "orphan.md"}), "col/documents/orphan.md.json")
+    creator = _make_creator(persister, FakeReader(set()), FakeIndexer())
+
+    creator._DocumentCollectionCreator__delete_document_files(["orphan.md"])
+
     assert persister.is_path_exists("col/documents/valid.md.json")
     assert not persister.is_path_exists("col/documents/orphan.md.json")
 
@@ -109,7 +134,7 @@ def test_no_orphans_is_a_noop(tmp_path):
 
     reverse = {"valid.md": [0]}
     index_mapping = {"0": {"documentId": "valid.md"}}
-    _prune(creator, index_mapping, reverse)
+    assert _prune(creator, index_mapping, reverse) == []
 
     assert reverse == {"valid.md": [0]}
     assert indexer.removed == []
@@ -125,7 +150,7 @@ def test_empty_valid_set_does_not_wipe_index(tmp_path):
 
     reverse = {"valid.md": [0]}
     index_mapping = {"0": {"documentId": "valid.md"}}
-    _prune(creator, index_mapping, reverse)
+    assert _prune(creator, index_mapping, reverse) == []
 
     assert reverse == {"valid.md": [0]}
     assert indexer.removed == []
@@ -145,7 +170,35 @@ def test_reader_without_enumeration_never_prunes(tmp_path):
     creator = _make_creator(persister, QueryReader(), indexer)
     reverse = {"some-doc": [0], "another": [1]}
     index_mapping = {"0": {"documentId": "some-doc"}, "1": {"documentId": "another"}}
-    _prune(creator, index_mapping, reverse)
+    assert _prune(creator, index_mapping, reverse) == []
 
     assert reverse == {"some-doc": [0], "another": [1]}
     assert indexer.removed == []
+
+
+def test_deletion_only_update_prunes_and_deletes_after_commit(tmp_path):
+    # A run that reads ZERO in-window documents must still reconcile deletions:
+    # __index_documents_for_existing_collection prunes the orphan, commits the
+    # index, then deletes the orphan's JSON. Covers the whole indexing path with
+    # no re-read documents (the pure-deletion case).
+    persister = DiskPersister(str(tmp_path))
+    persister.save_text_file(json.dumps({"id": "valid.md"}), "col/documents/valid.md.json")
+    persister.save_text_file(json.dumps({"id": "orphan.md"}), "col/documents/orphan.md.json")
+    persister.save_text_file(json.dumps({"lastIndexItemId": 1}), "col/indexes/index_info.json")
+    persister.save_text_file(
+        json.dumps({"0": {"documentId": "valid.md"}, "1": {"documentId": "orphan.md"}}),
+        "col/indexes/index_document_mapping.json")
+    persister.save_text_file(
+        json.dumps({"valid.md": [0], "orphan.md": [1]}),
+        "col/indexes/reverse_index_document_mapping.json")
+
+    indexer = FakeIndexer(size=1)
+    creator = _make_creator(persister, FakeReader({"valid.md"}), indexer)
+
+    creator._DocumentCollectionCreator__index_documents_for_existing_collection([])
+
+    reverse = json.loads(persister.read_text_file("col/indexes/reverse_index_document_mapping.json"))
+    assert reverse == {"valid.md": [0]}
+    assert indexer.removed == [1]
+    assert not persister.is_path_exists("col/documents/orphan.md.json")
+    assert persister.is_path_exists("col/documents/valid.md.json")

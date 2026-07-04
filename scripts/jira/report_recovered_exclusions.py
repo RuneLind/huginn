@@ -13,7 +13,7 @@ lives as a real .md file in the saveMd root (cleanup did NOT re-exclude it this
 run — it grew into a substantial issue, or an old issue was revived).
 
 Typical use (after a wide re-fetch + cleanup + reindex):
-    python scripts/jira/report_recovered_exclusions.py \
+    .venv/bin/python scripts/jira/report_recovered_exclusions.py \
         --snapshot logs/exclude_manifest_snapshot_pre_recovery.json \
         --saveMd data/sources/jira-issues \
         --csv logs/recovered_exclusions.csv
@@ -56,12 +56,14 @@ except Exception:  # pragma: no cover - standalone fallback
 
 def _bucket(reason: str) -> str:
     r = (reason or "").lower()
+    # Check the noise_ prefix before the age substrings: a noise reason whose
+    # free text happens to contain "last updated" must still classify as noise.
+    if r.startswith("noise_"):
+        return "noise"
     if any(k in r for k in ("low_word_count", "empty_stub", "minimal_content")):
         return "content"
     if "too_old" in r or "last updated" in r:
         return "age"
-    if r.startswith("noise_"):
-        return "noise"
     return "other"
 
 
@@ -78,7 +80,6 @@ def main():
         baseline = json.load(f)
 
     save_md = Path(args.saveMd)
-    excluded_dir = save_md / ".excluded"
 
     # Map issue_key -> current .md path in the saveMd ROOT (kept, indexed files).
     kept_by_key = {}
@@ -88,7 +89,8 @@ def main():
         if key:
             kept_by_key[key] = (md, meta)
 
-    recovered, still_excluded = [], []
+    recovered = []
+    still_excluded_count = 0
     bucket_recovered = {"content": 0, "age": 0, "noise": 0, "other": 0}
     bucket_total = {"content": 0, "age": 0, "noise": 0, "other": 0}
 
@@ -111,7 +113,7 @@ def main():
             })
             bucket_recovered[b] += 1
         else:
-            still_excluded.append(key)
+            still_excluded_count += 1
 
     recovered.sort(key=lambda r: (r["bucket"], r["issue_key"]))
 
@@ -122,7 +124,7 @@ def main():
     for b in ("content", "age", "noise", "other"):
         if bucket_total[b]:
             print(f"    {b:8s}: {bucket_recovered[b]:5d} recovered / {bucket_total[b]:5d} excluded")
-    print(f"Still excluded / not re-fetched: {len(still_excluded)}")
+    print(f"Still excluded / not re-fetched: {still_excluded_count}")
     print("-" * 78)
     print(f"{'ISSUE':14s} {'BUCKET':8s} {'OLD STATUS':22s} {'NEW STATUS':22s} EPIC")
     print("-" * 78)
