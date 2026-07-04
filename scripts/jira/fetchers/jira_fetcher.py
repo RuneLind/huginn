@@ -272,15 +272,38 @@ class JiraFetcher:
 
         return keys
 
-    @staticmethod
-    def load_exclude_manifest(manifest_path: str) -> Set[str]:
-        """Load excluded issue_keys from a manifest file."""
+    # Exclusion reasons that are STABLE — an issue excluded for one of these
+    # won't stop being noise just because it was edited, so it's safe to skip it
+    # permanently on re-fetch. Content-based reasons (low_word_count,
+    # empty_stub, minimal_content) and age (too_old) are DYNAMIC: a stub can
+    # grow into a real issue and an old issue can be revived by an update. If we
+    # skipped those permanently, such issues would be trapped in .excluded/
+    # forever — never re-fetched, so never re-evaluated by cleanup. So we only
+    # treat noise_* reasons as permanent; dynamic exclusions fall through and
+    # get re-fetched (the incremental JQL only re-pulls the ones that actually
+    # changed, and cleanup re-excludes any that are still noise that same run).
+    _PERMANENT_EXCLUDE_PREFIX = "noise_"
+
+    @classmethod
+    def load_exclude_manifest(cls, manifest_path: str) -> Set[str]:
+        """Load issue_keys to permanently skip on re-fetch.
+
+        Only returns keys excluded for a STABLE reason (see
+        _PERMANENT_EXCLUDE_PREFIX). Content/age exclusions are intentionally
+        omitted so a stub that later grew, or an old issue that was revived,
+        gets re-fetched and re-classified instead of being trapped forever.
+        """
         path = Path(manifest_path)
         if not path.exists():
             return set()
         with open(path, "r", encoding="utf-8") as f:
             entries = json.load(f)
-        return {e["issue_key"] for e in entries if e.get("issue_key")}
+        return {
+            e["issue_key"]
+            for e in entries
+            if e.get("issue_key")
+            and str(e.get("reason", "")).startswith(cls._PERMANENT_EXCLUDE_PREFIX)
+        }
 
     async def fetch_issues(self, context, jql: str) -> List[Dict]:
         """Fetch all Jira issues matching JQL query using Playwright API context.
@@ -751,7 +774,8 @@ Examples:
         if args.excludeManifest:
             excluded = JiraFetcher.load_exclude_manifest(args.excludeManifest)
             skip_keys.update(excluded)
-            print(f"Loaded {len(excluded)} excluded issue_keys from manifest")
+            print(f"Loaded {len(excluded)} permanently-excluded issue_keys from manifest "
+                  f"(noise only; content/age exclusions are re-fetched and re-evaluated)")
 
         fetcher.save_issues_as_markdown(issues, save_md, epic_info, skip_keys)
         print(f"\nDone! {len(issues)} issues fetched from Jira")

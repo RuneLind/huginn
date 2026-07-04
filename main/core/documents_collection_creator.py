@@ -80,14 +80,23 @@ class DocumentCollectionCreator:
         document_ids, number_of_expected_documents = log_execution_duration(lambda: self.__read_documents(),
                                                                             identifier=f"Reading documents for collection: {self.collection_name}")
         
+        # Do NOT early-return on an empty in-window read. A run that only deleted,
+        # renamed, or moved files out (0 modified documents in the window) reads
+        # zero documents but must still reconcile the index and prune the now
+        # orphaned chunks — otherwise a pure deletion never gets cleaned up.
         if len(document_ids) == 0:
-            logging.warning(f"No documents found for collection update, so it will be not updated.")
-            return
-    
+            logging.info("No documents modified within the update window; reconciling deletions only.")
+
         last_modified_document_time, number_of_chunks = log_execution_duration(lambda: self.__index_documents_for_existing_collection(document_ids),
                                                                                identifier=f"Indexing documents for collection: {self.collection_name}")
-        
-        manifest = self.__create_manifest_file(update_time, 
+
+        # No document was read inside the window (deletion-only or no-op run), so
+        # there is no fresh high-water mark — keep the prior one rather than
+        # crashing on a None timestamp in manifest creation.
+        if last_modified_document_time is None:
+            last_modified_document_time = datetime.fromisoformat(manifest['lastModifiedDocumentTime'])
+
+        manifest = self.__create_manifest_file(update_time,
                                                last_modified_document_time,
                                                number_of_chunks,
                                                existing_manifest=manifest)
@@ -157,10 +166,62 @@ class DocumentCollectionCreator:
 
         self.__remove_documents_from_index(document_ids, index_mapping, reverse_index_mapping)
 
-        return self.__add_documents_to_index(document_ids,
+        orphan_ids = self.__prune_orphaned_documents(index_mapping, reverse_index_mapping)
+
+        result = self.__add_documents_to_index(document_ids,
                                       index_mapping,
                                       reverse_index_mapping,
                                       last_index_item_id)
+
+        # Delete orphaned document JSONs only AFTER __add_documents_to_index has
+        # durably committed the index artifacts. Deleting earlier would drop the
+        # backing files outside that atomic write set, so a crash mid-update could
+        # leave the persisted index referencing documents whose JSON is gone.
+        self.__delete_document_files(orphan_ids)
+
+        return result
+
+    def __delete_document_files(self, document_ids):
+        for doc_id in document_ids:
+            self.persister.remove_file(f"{self.collection_name}/documents/{doc_id}.json")
+
+    def __prune_orphaned_documents(self, index_mapping, reverse_index_mapping):
+        """Remove indexed documents whose source no longer exists; return their ids.
+
+        An incremental update only re-reads documents inside its time window, so
+        a document whose source file was deleted, renamed, or moved out (e.g. a
+        Jira issue re-fetched under a new title, or a file moved to .excluded/)
+        is never revisited — its chunks linger in the index and keep surfacing
+        in search. Here we reconcile against the reader's full current id set and
+        drop anything indexed that no longer backs a real source. The pruned ids
+        are returned so the caller can delete their document JSONs only after the
+        index is durably committed.
+
+        Only runs for readers that can enumerate their complete id set
+        (localFiles). Query-based readers (Jira/Confluence/Notion) return just
+        the incremental window, so we cannot tell a deleted issue from an
+        out-of-window one and must not prune from them.
+        """
+        list_ids = getattr(self.document_reader, "get_all_document_ids", None)
+        if list_ids is None:
+            return []
+
+        valid_ids = list_ids()
+        # Refuse to treat an empty enumeration as "every document was deleted": a
+        # transient FS error or a mistyped include/exclude pattern that matches
+        # nothing would otherwise wipe the entire index. A genuinely emptied
+        # source is rare and better handled by recreating the collection.
+        if not valid_ids:
+            logging.warning("Skipping orphan pruning: reader returned an empty document set")
+            return []
+
+        orphan_ids = [doc_id for doc_id in reverse_index_mapping if doc_id not in valid_ids]
+        if not orphan_ids:
+            return []
+
+        logging.info(f"Pruning {len(orphan_ids)} orphaned document(s) whose source no longer exists")
+        self.__remove_documents_from_index(orphan_ids, index_mapping, reverse_index_mapping)
+        return orphan_ids
 
     def __add_documents_to_index(self, 
                           document_ids, 
