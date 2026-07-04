@@ -10,6 +10,7 @@ from main.ingest.anthropic_summaries import (
     ingest_anthropic_summary,
 )
 from main.ingest.jira import JiraIngestRequest, ingest_jira
+from main.ingest.tiktok import TikTokIngestRequest, ingest_tiktok
 from main.ingest.x_articles import XArticleIngestRequest, ingest_x_article
 from main.ingest.youtube import (
     YouTubeIngestRequest,
@@ -168,6 +169,40 @@ def x_article_ingest(
             exclude_match=lambda doc: doc.get("url", "") == req.url,
         )
         reindex = _maybe_enqueue_reindex(store, background_tasks, xa_collection)
+
+        return {
+            "status": "ingested",
+            "file_path": result["file_path"],
+            "author": result["author"],
+            "category": result["category"],
+            "summary": result["summary"],
+            "similar": similar,
+            "reindex": reindex,
+        }
+
+
+@router.post("/api/tiktok/ingest")
+def tiktok_ingest(
+    req: TikTokIngestRequest,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    store: KnowledgeStore = Depends(get_store),
+):
+    """Ingest a TikTok summary from Muninn: save markdown, find similar, reindex."""
+    tt_path = request.app.state.tiktok_sources_path
+    tt_collection = request.app.state.tiktok_collection
+    if not tt_path:
+        raise HTTPException(status_code=503, detail="TikTok sources path not configured (--tiktok-sources-path)")
+
+    with _ingest_errors("TikTok ingest"):
+        result = ingest_tiktok(req, sources_path=tt_path)
+
+        similar = _similar_for_collection(
+            store, tt_collection,
+            query=req.summary[:2000],
+            exclude_match=lambda doc: doc.get("url", "") == req.url,
+        )
+        reindex = _maybe_enqueue_reindex(store, background_tasks, tt_collection)
 
         return {
             "status": "ingested",
