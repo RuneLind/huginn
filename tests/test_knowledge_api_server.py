@@ -817,6 +817,31 @@ class TestIngestErrorHandling:
         )
         assert resp.status_code == 503
 
+    def test_tiktok_ingest_failure_returns_structured_500(self, monkeypatch):
+        app.state.tiktok_sources_path = "/tmp/tiktok"
+        app.state.tiktok_collection = None
+
+        def _boom(*a, **k):
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr("main.routes.ingest.ingest_tiktok", _boom)
+        resp = self._client().post(
+            "/api/tiktok/ingest",
+            json={"title": "T", "url": "https://x", "summary": "S"},
+        )
+        assert resp.status_code == 500
+        assert "TikTok ingest failed" in resp.json()["detail"]
+        assert "disk full" in resp.json()["detail"]
+
+    def test_tiktok_unconfigured_path_returns_503(self):
+        app.state.tiktok_sources_path = None
+        app.state.tiktok_collection = None
+        resp = self._client().post(
+            "/api/tiktok/ingest",
+            json={"title": "T", "url": "https://x", "summary": "S"},
+        )
+        assert resp.status_code == 503
+
 
 class TestGraphRoutes:
     """HTTP coverage for the knowledge-graph routes (M17)."""
@@ -966,3 +991,63 @@ class TestAnthropicSummaryIngest:
         ingest_anthropic_summary(self._req(url="https://docs.anthropic.com/b"), sources_path=str(tmp_path))
         category_dir = tmp_path / "ai" / "claude-code"
         assert len(list(category_dir.glob("*.md"))) == 2
+
+
+class TestTikTokIngest:
+    """ingest_tiktok writes categorized markdown; author is optional (defaults to 'unknown')."""
+
+    def _req(self, **over):
+        from main.ingest.tiktok import TikTokIngestRequest
+        base = {
+            "title": "How to wire a FAISS index in 60 seconds",
+            "url": "https://www.tiktok.com/@dev/video/7412345678901234567",
+            "summary": "A quick screen-recording walking through FAISS index setup.",
+            "author": "@dev",
+            "category": "ai/claude-code",
+            "date": "2026-07-01",
+        }
+        base.update(over)
+        return TikTokIngestRequest(**base)
+
+    def test_writes_markdown_with_author(self, tmp_path):
+        from main.ingest.tiktok import ingest_tiktok
+        result = ingest_tiktok(self._req(), sources_path=str(tmp_path))
+        assert result["category"] == "ai/claude-code"
+        assert result["author"] == "@dev"
+        assert result["summary"] == "A quick screen-recording walking through FAISS index setup."
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert 'author: "@dev"' in written
+        assert 'url: "https://www.tiktok.com/@dev/video/7412345678901234567"' in written
+        assert 'category: "ai/claude-code"' in written
+        assert 'date: "2026-07-01"' in written
+        assert written.rstrip().endswith("A quick screen-recording walking through FAISS index setup.")
+
+    def test_author_defaults_to_unknown_when_missing(self, tmp_path):
+        from main.ingest.tiktok import ingest_tiktok
+        result = ingest_tiktok(self._req(author=None), sources_path=str(tmp_path))
+        assert result["author"] == "unknown"
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert 'author: "unknown"' in written
+
+    def test_defaults_category_to_ai_general(self, tmp_path):
+        from main.ingest.tiktok import ingest_tiktok
+        result = ingest_tiktok(self._req(category=None), sources_path=str(tmp_path))
+        assert result["category"] == "ai/general"
+
+    def test_rejects_unknown_category(self, tmp_path):
+        import pytest
+        from fastapi import HTTPException
+        from main.ingest.tiktok import ingest_tiktok
+        with pytest.raises(HTTPException) as exc:
+            ingest_tiktok(self._req(category="bogus/nope"), sources_path=str(tmp_path))
+        assert exc.value.status_code == 400
+
+    def test_same_url_reingest_overwrites(self, tmp_path):
+        # Re-pushing an updated summary for the same url must overwrite, not fork a (2) file.
+        from main.ingest.tiktok import ingest_tiktok
+        first = ingest_tiktok(self._req(summary="v1"), sources_path=str(tmp_path))
+        second = ingest_tiktok(self._req(summary="v2 updated"), sources_path=str(tmp_path))
+        assert first["file_path"] == second["file_path"]
+        category_dir = tmp_path / "ai" / "claude-code"
+        assert len(list(category_dir.glob("*.md"))) == 1
+        assert (tmp_path / second["file_path"]).read_text(encoding="utf-8").rstrip().endswith("v2 updated")

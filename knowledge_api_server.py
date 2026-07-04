@@ -109,6 +109,16 @@ def main():
         help="Collection name for X article summaries",
     )
     ap.add_argument(
+        "--tiktok-sources-path",
+        default=os.environ.get("TIKTOK_SOURCES_PATH"),
+        help="Path to save TikTok summary markdown files",
+    )
+    ap.add_argument(
+        "--tiktok-collection",
+        default=os.environ.get("TIKTOK_COLLECTION", "tiktok-summaries"),
+        help="Collection name for TikTok summaries",
+    )
+    ap.add_argument(
         "--anthropic-summaries-sources-path",
         default=os.environ.get("ANTHROPIC_SUMMARIES_SOURCES_PATH"),
         help="Path to save Anthropic summary markdown files",
@@ -128,6 +138,8 @@ def main():
     app.state.jira_collection = args.jira_collection
     app.state.x_articles_sources_path = args.x_articles_sources_path
     app.state.x_articles_collection = args.x_articles_collection
+    app.state.tiktok_sources_path = args.tiktok_sources_path
+    app.state.tiktok_collection = args.tiktok_collection
     app.state.anthropic_summaries_sources_path = args.anthropic_summaries_sources_path
     app.state.anthropic_summaries_collection = args.anthropic_summaries_collection
 
