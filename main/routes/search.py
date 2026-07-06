@@ -80,7 +80,6 @@ def search(
         shape_kwargs=shape_kwargs,
         min_relevance=min_relevance,
         corrective_mode=corrective,
-        limit=limit,
     )
     if trace_enabled:
         trace_dict = trace_obj.to_dict()

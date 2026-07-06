@@ -395,9 +395,9 @@ class DocumentCollectionSearcher:
                     skipped_doc_ids.add(doc_id)
                     continue
 
-                # Cached from ``_load_text`` when it ran; a URL-only match never
-                # reads the document, so fetch it here (still cached) for the
-                # fields below.
+                # Guaranteed cache hit: reaching here means deduplicate_document
+                # returned False, which always loaded the document via
+                # ``_load_text`` (URL-duplicates return True and never get here).
                 document = self._get_document_cached(mapping["documentPath"])
 
                 doc_result = {

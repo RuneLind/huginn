@@ -74,7 +74,6 @@ def build_search_tool_fn(
             shape_kwargs=shape_kwargs,
             min_relevance=min_relevance,
             corrective_mode=corrective,
-            limit=max_number_of_documents,
         )
         if trace_default:
             response["trace"] = trace.to_dict()

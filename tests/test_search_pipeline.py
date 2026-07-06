@@ -136,7 +136,6 @@ def _run(target_searchers, *, raw_query="q", search_query=None, augmenter=None,
         shape_kwargs=dict(limit=limit),
         min_relevance=min_relevance,
         corrective_mode=corrective_mode,
-        limit=limit,
     )
 
 

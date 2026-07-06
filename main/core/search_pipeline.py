@@ -70,7 +70,6 @@ def run_search_request(
     shape_kwargs,
     min_relevance,
     corrective_mode,
-    limit,
 ):
     """Run the full search→shape→enrich→corrective envelope and return the
     response dict.
@@ -99,8 +98,9 @@ def run_search_request(
         search_kwargs: forwarded to ``searcher.search``.
         shape_kwargs: forwarded to ``shape_search_results``.
         min_relevance: drop-weak threshold (or ``None``).
-        corrective_mode: ``"auto" | "off" | "force"``.
-        limit: result limit passed to ``run_corrective_search``.
+        corrective_mode: ``"auto" | "off" | "force"``. The result limit for
+            corrective rescue is read from ``shape_kwargs["limit"]`` so the
+            two can't drift apart.
 
     Returns:
         The response dict (``graph_answer`` / ``lowConfidence`` merged in;
@@ -117,6 +117,10 @@ def run_search_request(
         shape_kwargs=shape_kwargs,
     )
 
+    # AND across collections: any non-reranked collection makes the whole
+    # response non-reranked (the honest form — see docs/search-invariants.md).
+    # The pre-extraction MCP path checked only the first collection; identical
+    # while MCP tools wrap a single searcher, and safer if that ever changes.
     reranked = (
         all(sr.get("reranked", True) for _, sr in per_collection)
         if per_collection
@@ -146,7 +150,7 @@ def run_search_request(
         reranked=reranked,
         mode=corrective_mode,
         rerun_search_fn=rerun_search_fn,
-        limit=limit,
+        limit=shape_kwargs["limit"],
     )
     if graph_answer:
         response["graph_answer"] = graph_answer
