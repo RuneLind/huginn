@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Example launcher for the Knowledge API server.
+#
+# Copy to start.sh (gitignored) and fill in your own collections and paths.
+# start.sh is the canonical record of which collections are live in your
+# deployment and which knowledge-graph JSONs load at startup.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+# Optional: knowledge graphs for query expansion / graph context enrichment.
+# Produced by scripts/knowledge_graph/extract_entities_llm.py. If unset, the
+# server also auto-discovers *_llm_graph.json in known locations; graph
+# features silently no-op when nothing is found.
+KNOWLEDGE_GRAPH_PATH=path/to/your_llm_graph.json \
+JIRA_GRAPH_PATH=path/to/your_jira_graph.json \
+uv run knowledge_api_server.py \
+  --collections \
+    my-wiki \
+    my-confluence \
+    my-jira-issues \
+  `# Push-ingest sources: each POST /api/ingest/<source> endpoint needs a` \
+  `# sources path (where markdown is written) and a target collection.` \
+  --youtube-transcripts-path ./data/sources/youtube-articles \
+  --jira-sources-path ./data/sources/jira-issues \
+  --jira-collection my-jira-issues \
+  --x-articles-sources-path ./data/sources/x-articles \
+  --x-articles-collection x-articles \
+  --anthropic-summaries-sources-path ./data/sources/anthropic-summaries \
+  --anthropic-summaries-collection anthropic-summaries \
+  --tiktok-sources-path ./data/sources/tiktok-summaries \
+  --tiktok-collection tiktok-summaries \
+  --port 8321

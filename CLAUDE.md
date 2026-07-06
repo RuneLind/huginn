@@ -83,7 +83,7 @@ uv run scripts/knowledge_graph/extract_entities_llm.py --collection <collection-
 
 ## Running the API server
 
-Local dev uses a personal `start.sh` (gitignored) that launches `knowledge_api_server.py` with the user's full set of collections and `KNOWLEDGE_GRAPH_PATH` / `JIRA_GRAPH_PATH` env vars. It's the canonical record of which collections are live and which graph JSONs auto-load. To run a slimmer subset manually:
+Local dev uses a personal `start.sh` (gitignored) that launches `knowledge_api_server.py` with the user's full set of collections and `KNOWLEDGE_GRAPH_PATH` / `JIRA_GRAPH_PATH` env vars. It's the canonical record of which collections are live and which graph JSONs auto-load — see `start.sh.example` for the template. To run a slimmer subset manually:
 
 ```sh
 uv run knowledge_api_server.py --collections <name> [<name> ...] --port 8321

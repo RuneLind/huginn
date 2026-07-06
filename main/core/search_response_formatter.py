@@ -12,16 +12,18 @@ from main.utils.filename import title_from_doc_path
 logger = logging.getLogger(__name__)
 
 
+# Raw cross-encoder score thresholds (lower = better). DocumentCollectionSearcher
+# imports these for its noise/low-confidence filtering; the relevance-space
+# confidence bands (derived below normalize_score) come from the same values,
+# so the searcher's filtering policy and the response bands stay in sync by
+# construction.
+LOW_CONFIDENCE_THRESHOLD = -0.10   # Best result above this → flag response
+NOISE_THRESHOLD = -0.10            # Individual results above this → filter out
+HIGH_CONFIDENCE_RAW_SCORE = -0.23  # Comfortably past the noise floor
+
 # Cap for non-reranked results: without cross-encoder validation we can't
 # claim high confidence, so rank-based relevance is bounded.
 NON_RERANKED_MAX_RELEVANCE = 0.75
-
-# Relevance-space confidence bands. 0.40 ≈ normalize_score(-0.10) — the
-# LOW_CONFIDENCE_THRESHOLD the searcher uses to flag weak responses, so a "low"
-# band is the reranker's own noise zone. 0.65 ≈ normalize_score(-0.23),
-# comfortably past that floor.
-HIGH_CONFIDENCE_RELEVANCE = 0.65
-MEDIUM_CONFIDENCE_RELEVANCE = 0.40
 
 # A response whose best result is below this is "weak": callers should treat it
 # as a corrective-retry signal even when some results came back.
@@ -160,6 +162,13 @@ def normalize_score(raw_score, is_reranked=True):
     shifted = (raw_score + 0.15) * 8
     clamped = max(min(shifted, 500), -500)
     return 1.0 / (1.0 + math.exp(clamped))
+
+
+# Relevance-space confidence bands, derived from the raw thresholds above so a
+# change to the thresholds or the sigmoid can't silently drift the bands.
+# Rounded to 2 decimals to match the relevance rounding in shaped responses.
+HIGH_CONFIDENCE_RELEVANCE = round(normalize_score(HIGH_CONFIDENCE_RAW_SCORE), 2)   # 0.65
+MEDIUM_CONFIDENCE_RELEVANCE = round(normalize_score(LOW_CONFIDENCE_THRESHOLD), 2)  # 0.40
 
 
 def _shape_doc(doc, coll_name, is_reranked, brief, max_chunk_chars, max_chunks_per_doc):

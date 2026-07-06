@@ -6,6 +6,7 @@ import time
 
 import numpy as np
 
+from main.core import search_response_formatter as _formatter
 from main.core.search_trace import NULL_TRACE
 from main.utils.filename import title_from_doc_path
 from main.utils.performance import delta_ms
@@ -21,9 +22,11 @@ logger = logging.getLogger(__name__)
 
 
 class DocumentCollectionSearcher:
-    # Cross-encoder reranker score thresholds (negative scores, more negative = more relevant)
-    LOW_CONFIDENCE_THRESHOLD = -0.10   # Best result above this → flag response
-    NOISE_THRESHOLD = -0.10            # Individual results above this → filter out
+    # Cross-encoder reranker score thresholds (negative scores, more negative =
+    # more relevant). Defined in search_response_formatter, which derives the
+    # relevance-space confidence bands from the same values.
+    LOW_CONFIDENCE_THRESHOLD = _formatter.LOW_CONFIDENCE_THRESHOLD
+    NOISE_THRESHOLD = _formatter.NOISE_THRESHOLD
 
     def __init__(self, collection_name, indexer, persister, reranker=None):
         self.collection_name = collection_name
