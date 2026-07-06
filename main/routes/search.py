@@ -4,8 +4,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from main.core.search_pipeline import search_and_shape
-from main.core.search_response_formatter import run_corrective_search
+from main.core.search_pipeline import run_search_request
 from main.core.search_trace import create_trace
 from main.core.trace_store import any_trace_enabled, default_trace_store, pointer_mode_enabled
 from main.graph.graph_search_augmenter import GraphSearchAugmenter
@@ -69,48 +68,20 @@ def search(
         tags=tags,
     )
 
-    results, per_collection, any_low_confidence = search_and_shape(
+    response = run_search_request(
         target_searchers,
-        search_q,
+        raw_query=q,
+        search_query=search_q,
         augmenter=augmenter,
         detected_entities=detected_entities,
+        graph_answer=graph_answer,
         trace=trace_obj,
-        title_boost_query=q,
         search_kwargs=search_kwargs,
         shape_kwargs=shape_kwargs,
-    )
-
-    reranked = all(sr.get("reranked", True) for _, sr in per_collection) if per_collection else True
-
-    def rerun_search_fn(rescue_query: str):
-        rescue_results, _, _ = search_and_shape(
-            target_searchers,
-            rescue_query,
-            augmenter=augmenter,
-            detected_entities=detected_entities,
-            trace=trace_obj,
-            title_boost_query=rescue_query,
-            search_kwargs=search_kwargs,
-            shape_kwargs=shape_kwargs,
-        )
-        return rescue_results
-
-    results, response = run_corrective_search(
-        results,
-        query=q,
-        augmenter=augmenter,
-        detected_entities=detected_entities,
         min_relevance=min_relevance,
-        trace=trace_obj,
-        reranked=reranked,
-        mode=corrective,
-        rerun_search_fn=rerun_search_fn,
+        corrective_mode=corrective,
         limit=limit,
     )
-    if graph_answer:
-        response["graph_answer"] = graph_answer
-    if any_low_confidence:
-        response["lowConfidence"] = True
     if trace_enabled:
         trace_dict = trace_obj.to_dict()
         if pointer_mode_enabled():
