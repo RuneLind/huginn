@@ -70,7 +70,11 @@ uv run scripts/knowledge_graph/extract_entities_llm.py --collection <collection-
 
 - Requires Ollama running locally with `qwen3.6:35b-a3b-coding-nvfp4` (or pass `--model`)
 - Incremental: uses a `.cache.json` file, safe to stop and resume
-- Output auto-routes to private sub-repos: NAV collections → `huginn-nav/scripts/knowledge_graph/`, others → `huginn-jarvis/scripts/knowledge_graph/`
+- Output routing (no private collection names live in this public repo):
+  1. `--output <path>` always wins.
+  2. Else a `graph_routing.json` in one of the private sub-repo dirs (`huginn-*/scripts/knowledge_graph/`) or `./scripts/knowledge_graph/`. Each routing file either lists owned collections (`{"collections": [...]}`) or is the catch-all (`{"default": true}`). A listed collection writes into that file's dir; unlisted collections go to the `default` dir.
+  3. Else the run fails and asks for `--output`.
+- The output graph is stamped with a `source_stamp` (`collection`, `document_count`, `updated_time` from the manifest). At load time the server compares the stamp against the collection's current `manifest.json` and logs a warning on divergence — a staleness signal, nothing rebuilds. Old unstamped graphs load unchanged.
 - The API server auto-loads all `*_llm_graph.json` files from those paths at startup
 - See `docs/graph-enhanced-rag.html` for full architecture documentation
 

@@ -112,8 +112,8 @@ def _iter_indexed_documents(name, disk_persister):
     docs_dir = f"{name}/documents"
     try:
         doc_files = disk_persister.read_folder_files(docs_dir)
-    except Exception:
-        logger.warning(f"Could not list documents for {name}")
+    except Exception as e:
+        logger.warning(f"Could not list documents for {name}: {e}")
         return
 
     for doc_file in doc_files:
@@ -121,7 +121,8 @@ def _iter_indexed_documents(name, disk_persister):
             continue
         try:
             doc = json.loads(disk_persister.read_text_file(f"{docs_dir}/{doc_file}"))
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Could not read indexed document {doc_file} for {name}: {e}")
             continue
         filename = doc.get("id", "")
         body = doc.get("text", "")

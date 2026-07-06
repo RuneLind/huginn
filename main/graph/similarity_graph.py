@@ -140,8 +140,8 @@ def build_similarity_graph(name, searcher, disk_persister):
             f"{name}/indexes/index_document_mapping.json"
         )
         mapping = json.loads(mapping_text)
-    except Exception:
-        logger.warning(f"Could not load index mapping for {name}")
+    except Exception as e:
+        logger.warning(f"Could not load index mapping for {name}: {e}")
         return None
 
     doc_chunks = {}
@@ -203,8 +203,8 @@ def build_similarity_graph(name, searcher, disk_persister):
             text = doc_json.get("text", "")
             if text:
                 summary = text[:500].rstrip() + ("..." if len(text) > 500 else "")
-        except Exception:
-            logger.debug(f"Could not read metadata for {doc_id}")
+        except Exception as e:
+            logger.warning(f"Could not read metadata for {doc_id} in {name}: {e}")
         if not tags_list:
             tags_list = [t.strip() for t in category.split("/") if t.strip()]
         nodes.append({

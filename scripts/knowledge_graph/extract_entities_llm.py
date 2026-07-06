@@ -15,11 +15,19 @@ Usage:
 import argparse
 import json
 import re
+import sys
 import time
 import urllib.request
 import urllib.error
 from collections import defaultdict
 from pathlib import Path
+
+# Ensure the repo root is importable so the shared routing config in
+# main.graph.graph_loader can be reused (single source of truth for the
+# private-sub-repo discovery convention).
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from main.graph.graph_loader import resolve_graph_output_path
 
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
@@ -200,6 +208,28 @@ def build_graph(all_extractions: list[dict], doc_titles: dict[str, str]) -> dict
     }
 
 
+def build_source_stamp(collection: str, data_path: str, doc_file_count: int) -> dict:
+    """Cheap provenance stamp for staleness detection at load time.
+
+    Records the collection name plus its document count (and index time when a
+    manifest is present). The loader compares this against the collection's
+    current manifest and warns on divergence. Prefers the manifest's
+    ``numberOfDocuments`` (authoritative), falling back to the raw file count
+    the extractor already scanned.
+    """
+    stamp = {"collection": collection, "document_count": doc_file_count}
+    manifest_path = Path(data_path) / collection / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return stamp
+    if manifest.get("numberOfDocuments") is not None:
+        stamp["document_count"] = manifest["numberOfDocuments"]
+    if manifest.get("updatedTime"):
+        stamp["updated_time"] = manifest["updatedTime"]
+    return stamp
+
+
 def main():
     parser = argparse.ArgumentParser(description="Extract knowledge graph using LLM")
     parser.add_argument("--collection", required=True, help="Collection name")
@@ -215,24 +245,16 @@ def main():
         print(f"Error: Documents directory not found: {docs_dir}")
         return
 
-    if args.output:
-        output_path = Path(args.output)
-    else:
-        # Route to the right private repo based on collection name
-        nav_collections = {"melosys-confluence-v3", "melosys-jira", "jira-issues", "nav-begreper-eessi"}
-        if args.collection in nav_collections:
-            preferred = Path(f"./huginn-nav/scripts/knowledge_graph/{args.collection}_llm_graph.json")
-        else:
-            preferred = Path(f"./huginn-jarvis/scripts/knowledge_graph/{args.collection}_llm_graph.json")
-
-        if preferred.parent.exists():
-            output_path = preferred
-        else:
-            output_path = Path(f"./scripts/knowledge_graph/{args.collection}_llm_graph.json")
+    try:
+        output_path = resolve_graph_output_path(args.collection, args.output)
+    except ValueError as e:
+        print(f"Error: {e}")
+        return
     cache_path = output_path.with_suffix(".cache.json")
 
     # Find all document JSON files
     doc_files = sorted(docs_dir.rglob("*.json"))
+    total_doc_files = len(doc_files)  # full count for the source stamp (pre --limit)
     if args.limit > 0:
         doc_files = doc_files[:args.limit]
 
@@ -318,6 +340,9 @@ def main():
 
     # Build merged graph
     graph = build_graph(all_extractions, doc_titles)
+    # Stamp provenance so the loader can warn when the collection has moved on
+    # since this graph was extracted (staleness signal, not a rebuild trigger).
+    graph["source_stamp"] = build_source_stamp(args.collection, args.data_path, total_doc_files)
 
     # Write output
     output_path.parent.mkdir(parents=True, exist_ok=True)
