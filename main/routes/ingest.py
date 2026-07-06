@@ -1,23 +1,19 @@
-"""Ingest routes — YouTube, X articles, Jira (writes to source dirs, then reindexes)."""
+"""Ingest routes — YouTube, X articles, TikTok, Anthropic, Jira.
+
+The POST /ingest handlers are all the same shape (validate path config → write →
+find similar → optionally reindex → shape response). Rather than repeat that per
+source, one generic handler is generated from each ``IngestSource`` in the
+registry. Source-specific behavior (which result keys to surface, the similarity
+query, self-link exclusion, whether to reindex) lives in the registry config.
+"""
 import logging
 from contextlib import contextmanager
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 
 from main.core.search_response_formatter import extract_chunk_text, truncate_snippet
-from main.ingest.anthropic_summaries import (
-    AnthropicSummaryIngestRequest,
-    ingest_anthropic_summary,
-)
-from main.ingest.jira import JiraIngestRequest, ingest_jira
-from main.ingest.tiktok import TikTokIngestRequest, ingest_tiktok
-from main.ingest.x_articles import XArticleIngestRequest, ingest_x_article
-from main.ingest.youtube import (
-    YouTubeIngestRequest,
-    fetch_transcript,
-    ingest_youtube,
-    list_categories,
-)
+from main.ingest.registry import INGEST_SOURCES, IngestSource
+from main.ingest.youtube import fetch_transcript, list_categories
 from main.runtime.knowledge_store import KnowledgeStore, get_store, run_collection_update
 from main.utils.filename import title_from_doc_path
 
@@ -98,37 +94,53 @@ def _maybe_enqueue_reindex(store, background_tasks, collection_name) -> str:
     return "started"
 
 
-@router.post("/api/youtube/ingest")
-def youtube_ingest(
-    req: YouTubeIngestRequest,
-    background_tasks: BackgroundTasks,
-    request: Request,
-    store: KnowledgeStore = Depends(get_store),
-):
-    """Ingest a YouTube transcript: summarize via Claude, auto-categorize, save, index, return similar."""
-    yt_path = request.app.state.youtube_transcripts_path
-    yt_collection = request.app.state.youtube_collection
-    if not yt_path:
-        raise HTTPException(status_code=503, detail="YouTube transcripts path not configured")
+def _make_ingest_handler(src: IngestSource):
+    """Build a FastAPI POST handler for one push source from its registry config.
 
-    with _ingest_errors("YouTube ingest"):
-        result = ingest_youtube(req, transcripts_path=yt_path)
+    The request body model is injected via ``__annotations__`` so FastAPI parses
+    and validates it exactly as a statically-declared handler would.
+    """
 
-        similar = _similar_for_collection(
-            store, yt_collection,
-            query=result["summary"][:2000],
-            exclude_match=lambda doc: doc.get("url", "") == req.url,
-        )
-        reindex = _maybe_enqueue_reindex(store, background_tasks, yt_collection)
+    def handler(
+        req,
+        background_tasks: BackgroundTasks,
+        request: Request,
+        store: KnowledgeStore = Depends(get_store),
+    ):
+        path = getattr(request.app.state, src.path_attr)
+        collection = getattr(request.app.state, src.collection_attr)
+        if not path:
+            raise HTTPException(status_code=503, detail=src.not_configured_detail)
 
-        return {
-            "status": "ingested",
-            "file_path": result["file_path"],
-            "category": result["category"],
-            "summary": result["summary"],
-            "similar": similar,
-            "reindex": reindex,
-        }
+        with _ingest_errors(src.operation):
+            result = src.ingest_fn(req, **{src.path_kwarg: path})
+
+            similar = _similar_for_collection(
+                store, collection,
+                query=src.similar_query(req, result),
+                exclude_match=lambda doc: src.exclude_match(req, doc),
+            )
+
+            response = {"status": "ingested"}
+            for key in src.response_fields:
+                response[key] = result[key]
+            response["similar"] = similar
+            if src.do_reindex:
+                response["reindex"] = _maybe_enqueue_reindex(store, background_tasks, collection)
+            return response
+
+    handler.__name__ = f"{src.name}_ingest"
+    handler.__annotations__["req"] = src.request_model
+    return handler
+
+
+for _src in INGEST_SOURCES:
+    router.add_api_route(
+        _src.route_path,
+        _make_ingest_handler(_src),
+        methods=["POST"],
+        name=f"{_src.name}_ingest",
+    )
 
 
 @router.get("/api/youtube/transcript/{video_id}")
@@ -145,144 +157,3 @@ def youtube_categories(request: Request):
     if not yt_path:
         raise HTTPException(status_code=503, detail="YouTube transcripts path not configured")
     return {"categories": list_categories(yt_path)}
-
-
-@router.post("/api/x-articles/ingest")
-def x_article_ingest(
-    req: XArticleIngestRequest,
-    background_tasks: BackgroundTasks,
-    request: Request,
-    store: KnowledgeStore = Depends(get_store),
-):
-    """Ingest an X/Twitter article: save summary as markdown, find similar, reindex."""
-    xa_path = request.app.state.x_articles_sources_path
-    xa_collection = request.app.state.x_articles_collection
-    if not xa_path:
-        raise HTTPException(status_code=503, detail="X articles sources path not configured (--x-articles-sources-path)")
-
-    with _ingest_errors("X article ingest"):
-        result = ingest_x_article(req, sources_path=xa_path)
-
-        similar = _similar_for_collection(
-            store, xa_collection,
-            query=req.summary[:2000],
-            exclude_match=lambda doc: doc.get("url", "") == req.url,
-        )
-        reindex = _maybe_enqueue_reindex(store, background_tasks, xa_collection)
-
-        return {
-            "status": "ingested",
-            "file_path": result["file_path"],
-            "author": result["author"],
-            "category": result["category"],
-            "summary": result["summary"],
-            "similar": similar,
-            "reindex": reindex,
-        }
-
-
-@router.post("/api/tiktok/ingest")
-def tiktok_ingest(
-    req: TikTokIngestRequest,
-    background_tasks: BackgroundTasks,
-    request: Request,
-    store: KnowledgeStore = Depends(get_store),
-):
-    """Ingest a TikTok summary from Muninn: save markdown, find similar, reindex."""
-    tt_path = request.app.state.tiktok_sources_path
-    tt_collection = request.app.state.tiktok_collection
-    if not tt_path:
-        raise HTTPException(status_code=503, detail="TikTok sources path not configured (--tiktok-sources-path)")
-
-    with _ingest_errors("TikTok ingest"):
-        result = ingest_tiktok(req, sources_path=tt_path)
-
-        similar = _similar_for_collection(
-            store, tt_collection,
-            query=req.summary[:2000],
-            exclude_match=lambda doc: doc.get("url", "") == req.url,
-        )
-        reindex = _maybe_enqueue_reindex(store, background_tasks, tt_collection)
-
-        return {
-            "status": "ingested",
-            "file_path": result["file_path"],
-            "author": result["author"],
-            "category": result["category"],
-            "summary": result["summary"],
-            "similar": similar,
-            "reindex": reindex,
-        }
-
-
-@router.post("/api/anthropic-summaries/ingest")
-def anthropic_summary_ingest(
-    req: AnthropicSummaryIngestRequest,
-    background_tasks: BackgroundTasks,
-    request: Request,
-    store: KnowledgeStore = Depends(get_store),
-):
-    """Ingest a finished Anthropic summary from Muninn: save markdown, find similar, reindex."""
-    sources_path = request.app.state.anthropic_summaries_sources_path
-    if not sources_path:
-        raise HTTPException(status_code=503, detail="Anthropic summaries sources path not configured (--anthropic-summaries-sources-path)")
-    collection = request.app.state.anthropic_summaries_collection
-
-    with _ingest_errors("Anthropic summary ingest"):
-        result = ingest_anthropic_summary(req, sources_path=sources_path)
-
-        similar = _similar_for_collection(
-            store, collection,
-            query=req.summary[:2000],
-            exclude_match=lambda doc: doc.get("url", "") == req.url,
-        )
-        reindex = _maybe_enqueue_reindex(store, background_tasks, collection)
-
-        return {
-            "status": "ingested",
-            "file_path": result["file_path"],
-            "category": result["category"],
-            "summary": result["summary"],
-            "similar": similar,
-            "reindex": reindex,
-        }
-
-
-@router.post("/api/jira/ingest")
-def jira_ingest(
-    req: JiraIngestRequest,
-    background_tasks: BackgroundTasks,
-    request: Request,
-    store: KnowledgeStore = Depends(get_store),
-):
-    """Ingest a Jira issue from DOM-scraped content: save as markdown, find similar, reindex.
-
-    If an existing file for this issue_key is found, merges metadata to preserve
-    epic_summary, project, and other fields the Chrome extension doesn't capture.
-    """
-    jira_path = request.app.state.jira_sources_path
-    jira_collection = request.app.state.jira_collection
-
-    if not jira_path:
-        raise HTTPException(status_code=503, detail="Jira sources path not configured (--jira-sources-path)")
-
-    with _ingest_errors("Jira ingest"):
-        result = ingest_jira(req, sources_path=jira_path)
-
-        similar = _similar_for_collection(
-            store, jira_collection,
-            query=f"{req.issueKey} {result['summary']}",
-            exclude_match=lambda doc: req.issueKey in doc.get("url", ""),
-        )
-
-        # Automatic reindex skipped — the daily update script handles both
-        # collection reindexing and knowledge graph rebuild in one pass.
-        # Use POST /api/collections/{name}/update to trigger manually if needed.
-
-        return {
-            "status": "ingested",
-            "issue_key": result["issue_key"],
-            "file_path": result["file_path"],
-            "summary": result["summary"],
-            "similar": similar,
-        }

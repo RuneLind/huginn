@@ -7,15 +7,11 @@ files it under its `ai/*` category so it shows on the Summaries shelf badged
 "Claude".
 """
 import logging
-import datetime as dt
 from typing import Optional
 
-from fastapi import HTTPException
 from pydantic import BaseModel
 
-from main.ingest.categories import CATEGORIES
-from main.ingest._markdown_writer import write_categorized_markdown
-from main.utils.frontmatter import escape_frontmatter_value
+from main.ingest._summary_ingest import write_summary
 
 logger = logging.getLogger(__name__)
 
@@ -32,41 +28,14 @@ class AnthropicSummaryIngestRequest(BaseModel):
 
 def ingest_anthropic_summary(req: AnthropicSummaryIngestRequest, *, sources_path: str) -> dict:
     """Save an Anthropic summary to disk under its category. Returns {file_path, category, summary}."""
-    date = req.date or dt.date.today().isoformat()
-
-    category = req.category or "ai/general"
-    if category not in CATEGORIES:
-        raise HTTPException(status_code=400, detail=f"Invalid category '{category}'. Must be one of: {', '.join(CATEGORIES)}")
-
-    # Tags: category parts + explicit tags, de-duped, order preserved
-    tag_parts = list(category.split("/"))
-    if req.tags:
-        for t in req.tags:
-            if t not in tag_parts:
-                tag_parts.append(t)
-    tags = ", ".join(tag_parts)
-
-    frontmatter = (
-        "---\n"
-        f"date: {escape_frontmatter_value(date)}\n"
-        f"url: {escape_frontmatter_value(req.url)}\n"
-        f"category: {escape_frontmatter_value(category)}\n"
-        f"tags: {escape_frontmatter_value(tags)}\n"
-        "---\n\n"
-    )
-    md_content = frontmatter + req.summary
-
-    file_rel_path = write_categorized_markdown(
+    result = write_summary(
         root=sources_path,
-        category=category,
         title=req.title,
         url=req.url,
-        content=md_content,
+        summary=req.summary,
+        category=req.category,
+        date=req.date,
+        tags=req.tags,
     )
-    logger.info(f"Anthropic summary ingest: saved {file_rel_path} (category: {category})")
-
-    return {
-        "file_path": file_rel_path,
-        "category": category,
-        "summary": req.summary,
-    }
+    logger.info(f"Anthropic summary ingest: saved {result['file_path']} (category: {result['category']})")
+    return result

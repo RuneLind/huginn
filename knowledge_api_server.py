@@ -18,6 +18,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from main.ingest.registry import INGEST_SOURCES
 from main.routes.collections import router as collections_router
 from main.routes.graph import router as graph_router
 from main.routes.ingest import router as ingest_router
@@ -78,70 +79,28 @@ def main():
     )
     ap.add_argument("--port", type=int, default=8321, help="Port to listen on")
     ap.add_argument("--host", default="127.0.0.1", help="Host to bind to")
-    ap.add_argument(
-        "--youtube-transcripts-path",
-        default=os.environ.get("YOUTUBE_TRANSCRIPTS_PATH"),
-        help="Path to youtube-transcripts markdown repo",
-    )
-    ap.add_argument(
-        "--youtube-collection",
-        default=os.environ.get("YOUTUBE_COLLECTION", "youtube-summaries"),
-        help="Collection name for youtube transcripts",
-    )
-    ap.add_argument(
-        "--jira-sources-path",
-        default=os.environ.get("JIRA_SOURCES_PATH"),
-        help="Path to save Jira issue markdown files",
-    )
-    ap.add_argument(
-        "--jira-collection",
-        default=os.environ.get("JIRA_COLLECTION", "jira-issues"),
-        help="Collection name for Jira issues",
-    )
-    ap.add_argument(
-        "--x-articles-sources-path",
-        default=os.environ.get("X_ARTICLES_SOURCES_PATH"),
-        help="Path to save X article summary markdown files",
-    )
-    ap.add_argument(
-        "--x-articles-collection",
-        default=os.environ.get("X_ARTICLES_COLLECTION", "x-articles"),
-        help="Collection name for X article summaries",
-    )
-    ap.add_argument(
-        "--tiktok-sources-path",
-        default=os.environ.get("TIKTOK_SOURCES_PATH"),
-        help="Path to save TikTok summary markdown files",
-    )
-    ap.add_argument(
-        "--tiktok-collection",
-        default=os.environ.get("TIKTOK_COLLECTION", "tiktok-summaries"),
-        help="Collection name for TikTok summaries",
-    )
-    ap.add_argument(
-        "--anthropic-summaries-sources-path",
-        default=os.environ.get("ANTHROPIC_SUMMARIES_SOURCES_PATH"),
-        help="Path to save Anthropic summary markdown files",
-    )
-    ap.add_argument(
-        "--anthropic-summaries-collection",
-        default=os.environ.get("ANTHROPIC_SUMMARIES_COLLECTION", "anthropic-summaries"),
-        help="Collection name for Anthropic summaries",
-    )
+
+    # Per push-ingest source: --*-sources-path/--*-collection args from the registry.
+    for src in INGEST_SOURCES:
+        ap.add_argument(
+            src.path_arg,
+            default=os.environ.get(src.path_env),
+            help=src.path_help,
+        )
+        ap.add_argument(
+            src.collection_arg,
+            default=os.environ.get(src.collection_env, src.collection_default),
+            help=src.collection_help,
+        )
     args = ap.parse_args()
 
     app.state.data_path = args.data_path
     app.state.collection_names = args.collections
-    app.state.youtube_transcripts_path = args.youtube_transcripts_path
-    app.state.youtube_collection = args.youtube_collection
-    app.state.jira_sources_path = args.jira_sources_path
-    app.state.jira_collection = args.jira_collection
-    app.state.x_articles_sources_path = args.x_articles_sources_path
-    app.state.x_articles_collection = args.x_articles_collection
-    app.state.tiktok_sources_path = args.tiktok_sources_path
-    app.state.tiktok_collection = args.tiktok_collection
-    app.state.anthropic_summaries_sources_path = args.anthropic_summaries_sources_path
-    app.state.anthropic_summaries_collection = args.anthropic_summaries_collection
+
+    # Mirror each source's resolved path/collection onto app.state for the routes.
+    for src in INGEST_SOURCES:
+        setattr(app.state, src.path_attr, getattr(args, src.path_attr))
+        setattr(app.state, src.collection_attr, getattr(args, src.collection_attr))
 
     uvicorn.run(app, host=args.host, port=args.port)
 
