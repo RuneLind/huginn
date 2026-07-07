@@ -1,6 +1,6 @@
 """Registry of push-ingest sources — one config per HTTP ingest endpoint.
 
-A single source of truth that drives three otherwise-duplicated things:
+A single source of truth that drives two otherwise-duplicated things:
 
   1. the generic FastAPI route factory in ``main/routes/ingest.py``,
   2. the ``--*-sources-path`` / ``--*-collection`` argparse args and the matching

@@ -163,6 +163,13 @@ def ingest_youtube(req: YouTubeIngestRequest, *, transcripts_path: str) -> dict:
         claude_response = _call_claude_headless(prompt)
         auto_category, summary = _parse_claude_response(claude_response)
         category = req.category or auto_category
+        if not category:
+            # A malformed Claude response must fail loudly, not silently file
+            # the video under write_summary's ai/general default.
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid category '{category}'. Must be one of: {', '.join(CATEGORIES)}",
+            )
 
     result = write_summary(
         root=transcripts_path,

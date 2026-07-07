@@ -1211,6 +1211,21 @@ class TestYouTubeIngestUnit:
             ingest_youtube(self._req(category="bogus/nope"), transcripts_path=str(tmp_path))
         assert exc.value.status_code == 400
 
+    def test_empty_auto_category_fails_loudly(self, tmp_path, monkeypatch):
+        """A malformed Claude response (empty category) must 400, not silently
+        fall through to write_summary's ai/general default."""
+        import main.ingest.youtube as yt
+        from fastapi import HTTPException
+        monkeypatch.setattr(yt, "_call_claude_headless", lambda prompt: "whatever")
+        monkeypatch.setattr(yt, "_parse_claude_response", lambda resp: ("", "a summary"))
+        with pytest.raises(HTTPException) as exc:
+            yt.ingest_youtube(
+                self._req(summary=None, category=None, transcript="some transcript"),
+                transcripts_path=str(tmp_path),
+            )
+        assert exc.value.status_code == 400
+        assert "Invalid category ''" in exc.value.detail
+
 
 class TestJiraIngestUnit:
     """Direct coverage for ingest_jira — validation, metadata merge, PII, mtime, file lookup."""
