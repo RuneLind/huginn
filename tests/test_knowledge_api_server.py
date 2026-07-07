@@ -763,6 +763,12 @@ class TestMaybeEnqueueReindex:
 
 
 
+def _set_ingest(name, path, collection=None):
+    """Point a registered ingest source at ``path``/``collection`` on the module app config."""
+    from main.runtime.server_config import IngestSourceConfig
+    app.state.config.ingest_sources[name] = IngestSourceConfig(path=path, collection=collection)
+
+
 class TestIngestErrorHandling:
     """Unexpected ingest failures return a structured 500, not a bare crash (M16)."""
 
@@ -776,8 +782,7 @@ class TestIngestErrorHandling:
         return TestClient(app)
 
     def test_youtube_ingest_failure_returns_structured_500(self, monkeypatch):
-        app.state.youtube_transcripts_path = "/tmp/yt"
-        app.state.youtube_collection = None
+        _set_ingest("youtube", "/tmp/yt", None)
 
         def _boom(*a, **k):
             raise RuntimeError("disk full")
@@ -790,13 +795,12 @@ class TestIngestErrorHandling:
         assert "disk full" in resp.json()["detail"]
 
     def test_unconfigured_path_still_returns_503(self):
-        app.state.youtube_transcripts_path = None
+        _set_ingest("youtube", None)
         resp = self._client().post("/api/youtube/ingest", json={"title": "T", "url": "https://x"})
         assert resp.status_code == 503
 
     def test_anthropic_summary_ingest_failure_returns_structured_500(self, monkeypatch):
-        app.state.anthropic_summaries_sources_path = "/tmp/anthropic-summaries"
-        app.state.anthropic_summaries_collection = None
+        _set_ingest("anthropic_summary", "/tmp/anthropic-summaries", None)
 
         def _boom(*a, **k):
             raise RuntimeError("disk full")
@@ -812,7 +816,7 @@ class TestIngestErrorHandling:
         assert "disk full" in resp.json()["detail"]
 
     def test_anthropic_summary_unconfigured_path_returns_503(self):
-        app.state.anthropic_summaries_sources_path = None
+        _set_ingest("anthropic_summary", None)
         resp = self._client().post(
             "/api/anthropic-summaries/ingest",
             json={"title": "T", "url": "https://x", "summary": "S"},
@@ -820,8 +824,7 @@ class TestIngestErrorHandling:
         assert resp.status_code == 503
 
     def test_tiktok_ingest_failure_returns_structured_500(self, monkeypatch):
-        app.state.tiktok_sources_path = "/tmp/tiktok"
-        app.state.tiktok_collection = None
+        _set_ingest("tiktok", "/tmp/tiktok", None)
 
         def _boom(*a, **k):
             raise RuntimeError("disk full")
@@ -837,8 +840,7 @@ class TestIngestErrorHandling:
         assert "disk full" in resp.json()["detail"]
 
     def test_tiktok_unconfigured_path_returns_503(self):
-        app.state.tiktok_sources_path = None
-        app.state.tiktok_collection = None
+        _set_ingest("tiktok", None, None)
         resp = self._client().post(
             "/api/tiktok/ingest",
             json={"title": "T", "url": "https://x", "summary": "S"},

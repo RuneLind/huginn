@@ -107,8 +107,9 @@ def _make_ingest_handler(src: IngestSource):
         request: Request,
         store: KnowledgeStore = Depends(get_store),
     ):
-        path = getattr(request.app.state, src.path_attr)
-        collection = getattr(request.app.state, src.collection_attr)
+        source_config = request.app.state.config.ingest(src.name)
+        path = source_config.path
+        collection = source_config.collection
         if not path:
             raise HTTPException(status_code=503, detail=src.not_configured_detail)
 
@@ -153,7 +154,7 @@ def youtube_transcript(video_id: str):
 @router.get("/api/youtube/categories")
 def youtube_categories(request: Request):
     """List available YouTube transcript categories."""
-    yt_path = request.app.state.youtube_transcripts_path
+    yt_path = request.app.state.config.ingest("youtube").path
     if not yt_path:
         raise HTTPException(status_code=503, detail="YouTube transcripts path not configured")
     return {"categories": list_categories(yt_path)}
