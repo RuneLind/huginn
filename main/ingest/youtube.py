@@ -13,9 +13,8 @@ from pydantic import BaseModel
 
 from main.fetchers.youtube.youtube_transcript_downloader import YouTubeTranscriptDownloader
 from main.ingest.categories import CATEGORIES
-from main.ingest._markdown_writer import write_categorized_markdown
+from main.ingest._summary_ingest import write_summary
 from main.utils.claude_cli import call_claude
-from main.utils.frontmatter import escape_frontmatter_value
 
 logger = logging.getLogger(__name__)
 
@@ -164,36 +163,27 @@ def ingest_youtube(req: YouTubeIngestRequest, *, transcripts_path: str) -> dict:
         claude_response = _call_claude_headless(prompt)
         auto_category, summary = _parse_claude_response(claude_response)
         category = req.category or auto_category
-    if category not in CATEGORIES:
-        raise HTTPException(status_code=400, detail=f"Invalid category '{category}'. Must be one of: {', '.join(CATEGORIES)}")
-    tags = ", ".join(category.split("/"))
+        if not category:
+            # A malformed Claude response must fail loudly, not silently file
+            # the video under write_summary's ai/general default.
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid category '{category}'. Must be one of: {', '.join(CATEGORIES)}",
+            )
 
-    frontmatter = (
-        "---\n"
-        f"date: {escape_frontmatter_value(date)}\n"
-        f"url: {escape_frontmatter_value(req.url)}\n"
-        f"category: {escape_frontmatter_value(category)}\n"
-        f"tags: {escape_frontmatter_value(tags)}\n"
-        "---\n\n"
-    )
-    md_content = frontmatter + summary
-
-    file_rel_path = write_categorized_markdown(
+    result = write_summary(
         root=transcripts_path,
-        category=category,
         title=title,
         url=req.url,
-        content=md_content,
+        summary=summary,
+        category=category,
+        date=date,
     )
-    logger.info(f"YouTube ingest: saved {file_rel_path} (category: {category})")
+    logger.info(f"YouTube ingest: saved {result['file_path']} (category: {result['category']})")
 
-    return {
-        "file_path": file_rel_path,
-        "category": category,
-        "summary": summary,
-        "title": title,
-        "url": req.url,
-    }
+    result["title"] = title
+    result["url"] = req.url
+    return result
 
 
 def list_categories(transcripts_path: str) -> list[dict]:

@@ -782,7 +782,8 @@ class TestIngestErrorHandling:
         def _boom(*a, **k):
             raise RuntimeError("disk full")
 
-        monkeypatch.setattr("main.routes.ingest.ingest_youtube", _boom)
+        from main.ingest.registry import source_by_name
+        monkeypatch.setattr(source_by_name("youtube"), "ingest_fn", _boom)
         resp = self._client().post("/api/youtube/ingest", json={"title": "T", "url": "https://x"})
         assert resp.status_code == 500
         assert "YouTube ingest failed" in resp.json()["detail"]
@@ -800,7 +801,8 @@ class TestIngestErrorHandling:
         def _boom(*a, **k):
             raise RuntimeError("disk full")
 
-        monkeypatch.setattr("main.routes.ingest.ingest_anthropic_summary", _boom)
+        from main.ingest.registry import source_by_name
+        monkeypatch.setattr(source_by_name("anthropic_summary"), "ingest_fn", _boom)
         resp = self._client().post(
             "/api/anthropic-summaries/ingest",
             json={"title": "T", "url": "https://x", "summary": "S"},
@@ -824,7 +826,8 @@ class TestIngestErrorHandling:
         def _boom(*a, **k):
             raise RuntimeError("disk full")
 
-        monkeypatch.setattr("main.routes.ingest.ingest_tiktok", _boom)
+        from main.ingest.registry import source_by_name
+        monkeypatch.setattr(source_by_name("tiktok"), "ingest_fn", _boom)
         resp = self._client().post(
             "/api/tiktok/ingest",
             json={"title": "T", "url": "https://x", "summary": "S"},
@@ -1051,3 +1054,256 @@ class TestTikTokIngest:
         category_dir = tmp_path / "ai" / "claude-code"
         assert len(list(category_dir.glob("*.md"))) == 1
         assert (tmp_path / second["file_path"]).read_text(encoding="utf-8").rstrip().endswith("v2 updated")
+
+
+# --- Ingest registry: parametrized suite over the summary push sources ---------
+
+def _summary_sources():
+    """Registry sources that write via the shared write_summary helper (all but Jira)."""
+    from main.ingest.registry import INGEST_SOURCES
+    return [s for s in INGEST_SOURCES if s.name != "jira"]
+
+
+_SUMMARY_TEXT = "Parametrized summary body for the shared write path."
+
+
+def _summary_req(src, **over):
+    """Build a minimal valid request for a summary source.
+
+    A `summary` is always supplied so the YouTube source skips its transcript
+    fetch + Claude call; `author` is added only for models that declare it.
+    """
+    fields = src.request_model.model_fields
+    base = {
+        "title": "Registry parametrized title",
+        "url": "https://example.com/registry-item",
+        "summary": _SUMMARY_TEXT,
+        "category": "ai/claude-code",
+        "date": "2026-07-04",
+    }
+    if "author" in fields:
+        base["author"] = "@handle"
+    base.update(over)
+    base = {k: v for k, v in base.items() if k in fields}
+    return src.request_model(**base)
+
+
+@pytest.mark.parametrize("src", _summary_sources(), ids=lambda s: s.name)
+class TestSummaryPushSourcesParametrized:
+    """One body covering every write_summary-backed push source in the registry."""
+
+    def test_writes_categorized_markdown(self, src, tmp_path):
+        result = src.ingest_fn(_summary_req(src), **{src.path_kwarg: str(tmp_path)})
+        assert result["category"] == "ai/claude-code"
+        assert result["summary"] == _SUMMARY_TEXT
+        assert set(src.response_fields).issubset(result.keys())
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert 'category: "ai/claude-code"' in written
+        assert 'url: "https://example.com/registry-item"' in written
+        assert 'date: "2026-07-04"' in written
+        assert 'tags: "ai, claude-code"' in written
+        assert written.rstrip().endswith(_SUMMARY_TEXT)
+
+    def test_defaults_category_to_ai_general(self, src, tmp_path):
+        result = src.ingest_fn(_summary_req(src, category=None), **{src.path_kwarg: str(tmp_path)})
+        assert result["category"] == "ai/general"
+
+    def test_rejects_unknown_category(self, src, tmp_path):
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc:
+            src.ingest_fn(_summary_req(src, category="bogus/nope"), **{src.path_kwarg: str(tmp_path)})
+        assert exc.value.status_code == 400
+
+    def test_same_url_reingest_overwrites(self, src, tmp_path):
+        first = src.ingest_fn(_summary_req(src, summary="v1"), **{src.path_kwarg: str(tmp_path)})
+        second = src.ingest_fn(_summary_req(src, summary="v2 updated"), **{src.path_kwarg: str(tmp_path)})
+        assert first["file_path"] == second["file_path"]
+        assert (tmp_path / second["file_path"]).read_text(encoding="utf-8").rstrip().endswith("v2 updated")
+
+    def test_extra_frontmatter_present_only_when_source_has_author(self, src, tmp_path):
+        result = src.ingest_fn(_summary_req(src), **{src.path_kwarg: str(tmp_path)})
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        if "author" in src.request_model.model_fields:
+            assert "author:" in written
+            assert result["author"]
+        else:
+            assert "author:" not in written
+
+
+class TestXArticleIngestUnit:
+    """Direct coverage for ingest_x_article — author is mandatory and always written."""
+
+    def _req(self, **over):
+        from main.ingest.x_articles import XArticleIngestRequest
+        base = {
+            "title": "How subagents fan out work",
+            "url": "https://x.com/anthropic/status/123",
+            "author": "@anthropic",
+            "summary": "A thread on parallel subagents.",
+            "category": "ai/claude",
+            "date": "2026-07-02",
+        }
+        base.update(over)
+        return XArticleIngestRequest(**base)
+
+    def test_writes_author_frontmatter_between_url_and_category(self, tmp_path):
+        from main.ingest.x_articles import ingest_x_article
+        result = ingest_x_article(self._req(), sources_path=str(tmp_path))
+        assert result["author"] == "@anthropic"
+        assert result["category"] == "ai/claude"
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert 'author: "@anthropic"' in written
+        # author frontmatter sits after url, before category
+        assert written.index('url:') < written.index('author:') < written.index('category:')
+
+    def test_explicit_tags_deduped_after_category_parts(self, tmp_path):
+        from main.ingest.x_articles import ingest_x_article
+        result = ingest_x_article(self._req(tags=["claude", "agents"]), sources_path=str(tmp_path))
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        # category "ai/claude" -> parts ai, claude; explicit "claude" is deduped, "agents" appended
+        assert 'tags: "ai, claude, agents"' in written
+
+    def test_rejects_unknown_category(self, tmp_path):
+        from fastapi import HTTPException
+        from main.ingest.x_articles import ingest_x_article
+        with pytest.raises(HTTPException) as exc:
+            ingest_x_article(self._req(category="nope/x"), sources_path=str(tmp_path))
+        assert exc.value.status_code == 400
+
+
+class TestYouTubeIngestUnit:
+    """Direct coverage for ingest_youtube on the pre-made-summary path (no Claude call)."""
+
+    def _req(self, **over):
+        from main.ingest.youtube import YouTubeIngestRequest
+        base = {
+            "title": "Building a FAISS index",
+            "url": "https://www.youtube.com/watch?v=abcdefghijk",
+            "summary": "Walkthrough of building a hybrid FAISS + BM25 index.",
+            "category": "coding",
+            "date": "2026-07-03",
+        }
+        base.update(over)
+        return YouTubeIngestRequest(**base)
+
+    def test_premade_summary_writes_without_author(self, tmp_path):
+        from main.ingest.youtube import ingest_youtube
+        result = ingest_youtube(self._req(), transcripts_path=str(tmp_path))
+        assert result["category"] == "coding"
+        assert result["title"] == "Building a FAISS index"
+        assert result["url"] == "https://www.youtube.com/watch?v=abcdefghijk"
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert "author:" not in written
+        assert 'category: "coding"' in written
+        assert 'tags: "coding"' in written
+        assert 'date: "2026-07-03"' in written
+        assert written.rstrip().endswith("Walkthrough of building a hybrid FAISS + BM25 index.")
+
+    def test_premade_summary_defaults_category(self, tmp_path):
+        from main.ingest.youtube import ingest_youtube
+        result = ingest_youtube(self._req(category=None), transcripts_path=str(tmp_path))
+        assert result["category"] == "ai/general"
+
+    def test_rejects_unknown_category(self, tmp_path):
+        from fastapi import HTTPException
+        from main.ingest.youtube import ingest_youtube
+        with pytest.raises(HTTPException) as exc:
+            ingest_youtube(self._req(category="bogus/nope"), transcripts_path=str(tmp_path))
+        assert exc.value.status_code == 400
+
+    def test_empty_auto_category_fails_loudly(self, tmp_path, monkeypatch):
+        """A malformed Claude response (empty category) must 400, not silently
+        fall through to write_summary's ai/general default."""
+        import main.ingest.youtube as yt
+        from fastapi import HTTPException
+        monkeypatch.setattr(yt, "_call_claude_headless", lambda prompt: "whatever")
+        monkeypatch.setattr(yt, "_parse_claude_response", lambda resp: ("", "a summary"))
+        with pytest.raises(HTTPException) as exc:
+            yt.ingest_youtube(
+                self._req(summary=None, category=None, transcript="some transcript"),
+                transcripts_path=str(tmp_path),
+            )
+        assert exc.value.status_code == 400
+        assert "Invalid category ''" in exc.value.detail
+
+
+class TestJiraIngestUnit:
+    """Direct coverage for ingest_jira — validation, metadata merge, PII, mtime, file lookup."""
+
+    def _req(self, **over):
+        from main.ingest.jira import JiraIngestRequest
+        base = {
+            "issueKey": "MELOSYS-1234",
+            "url": "https://nav.atlassian.net/browse/MELOSYS-1234",
+            "title": "Fix trygdeavgift rounding",
+            "summary": "Fix trygdeavgift rounding",
+            "status": "In Progress",
+            "type": "Story",
+            "description": "Details here.",
+            "updated": "2026-06-30T12:00:00",
+        }
+        base.update(over)
+        return JiraIngestRequest(**base)
+
+    def test_rejects_invalid_issue_key(self, tmp_path):
+        from fastapi import HTTPException
+        from main.ingest.jira import ingest_jira
+        with pytest.raises(HTTPException) as exc:
+            ingest_jira(self._req(issueKey="not-a-key"), sources_path=str(tmp_path))
+        assert exc.value.status_code == 400
+
+    def test_writes_frontmatter_and_body(self, tmp_path):
+        from main.ingest.jira import ingest_jira
+        result = ingest_jira(self._req(), sources_path=str(tmp_path))
+        assert result["issue_key"] == "MELOSYS-1234"
+        assert result["file_path"].startswith("MELOSYS-1234_")
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert "issue_key: MELOSYS-1234" in written
+        assert 'status: "In Progress"' in written
+        # project derived from key prefix when not supplied by extension
+        assert 'project: "MELOSYS"' in written
+        assert "# MELOSYS-1234: Fix trygdeavgift rounding" in written
+
+    def test_pii_is_redacted(self, tmp_path):
+        from main.ingest.jira import ingest_jira
+        result = ingest_jira(
+            self._req(description="Reach the reporter at ola.nordmann@nav.no for details."),
+            sources_path=str(tmp_path),
+        )
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert "ola.nordmann@nav.no" not in written
+        assert "<redacted-email>" in written
+
+    def test_mtime_set_to_updated_time(self, tmp_path):
+        import datetime as dt
+        from main.ingest.jira import ingest_jira
+        result = ingest_jira(self._req(updated="2026-06-30T12:00:00"), sources_path=str(tmp_path))
+        mtime = (tmp_path / result["file_path"]).stat().st_mtime
+        expected = dt.datetime.fromisoformat("2026-06-30T12:00:00").timestamp()
+        assert abs(mtime - expected) < 1
+
+    def test_reingest_reuses_file_and_merges_preserved_metadata(self, tmp_path):
+        from main.ingest.jira import ingest_jira
+        from main.utils.frontmatter import read_frontmatter_from_path
+        first = ingest_jira(self._req(), sources_path=str(tmp_path))
+        # Inject a field the Chrome extension never sends, then re-ingest.
+        fp = tmp_path / first["file_path"]
+        text = fp.read_text(encoding="utf-8").replace(
+            'epic_summary: ""', 'epic_summary: "Rounding epic"'
+        )
+        fp.write_text(text, encoding="utf-8")
+        second = ingest_jira(self._req(status="Done"), sources_path=str(tmp_path))
+        assert second["file_path"] == first["file_path"]  # same file reused
+        fm = read_frontmatter_from_path(str(tmp_path / second["file_path"]))
+        assert fm["status"] == "Done"
+        assert fm["epic_summary"] == "Rounding epic"  # preserved across merge
+
+    def test_find_existing_jira_file(self, tmp_path):
+        from main.ingest.jira import _find_existing_jira_file, ingest_jira
+        first = ingest_jira(self._req(), sources_path=str(tmp_path))
+        filepath, metadata = _find_existing_jira_file(str(tmp_path), "MELOSYS-1234")
+        assert filepath is not None
+        assert filepath.endswith(first["file_path"])
+        assert metadata["issue_key"] == "MELOSYS-1234"
+        # A key with no file returns (None, {})
+        assert _find_existing_jira_file(str(tmp_path), "MELOSYS-9999") == (None, {})
