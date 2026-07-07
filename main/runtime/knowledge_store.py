@@ -106,7 +106,10 @@ class KnowledgeStore:
         from main.graph.graph_loader import load_default_knowledge_graph
         # Load outside the lock (file I/O), swap the reference in under it so
         # readers see either the whole old graph or the whole new one (M10).
-        graph = load_default_knowledge_graph(extra_paths=extra_paths)
+        # Pass the collections base path so stamped graphs can be checked for
+        # staleness against their source collection manifests.
+        data_path = self.disk_persister.base_path if self.disk_persister else None
+        graph = load_default_knowledge_graph(extra_paths=extra_paths, data_path=data_path)
         with self._lock:
             self.graph = graph
 

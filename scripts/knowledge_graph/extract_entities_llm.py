@@ -15,11 +15,19 @@ Usage:
 import argparse
 import json
 import re
+import sys
 import time
 import urllib.request
 import urllib.error
 from collections import defaultdict
 from pathlib import Path
+
+# Ensure the repo root is importable so the shared routing config in
+# main.graph.graph_loader can be reused (single source of truth for the
+# private-sub-repo discovery convention).
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from main.graph.graph_loader import get_collection_manifest, resolve_graph_output_path
 
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
@@ -200,6 +208,33 @@ def build_graph(all_extractions: list[dict], doc_titles: dict[str, str]) -> dict
     }
 
 
+def build_source_stamp(collection: str, data_path: str, processed_doc_count: int | None = None) -> dict:
+    """Cheap provenance stamp for staleness detection at load time.
+
+    The loader compares the stamp against the collection's current manifest
+    and warns on divergence. Fields:
+
+    - ``document_count``: on a full run, the manifest's authoritative
+      ``numberOfDocuments`` — omitted when no manifest is readable (a raw file
+      count would not be comparable against a later manifest). When ``--limit``
+      truncated the run, ``processed_doc_count`` is stamped as-is so the
+      partial graph honestly triggers the staleness warning.
+    - ``last_modified_document_time``: the manifest's
+      ``lastModifiedDocumentTime``, which only moves on real content change
+      (``updatedTime`` is rewritten on every reindex run, including no-ops,
+      and would warn permanently).
+    """
+    stamp = {"collection": collection}
+    manifest = get_collection_manifest(data_path, collection)
+    if processed_doc_count is not None:
+        stamp["document_count"] = processed_doc_count
+    elif manifest and manifest.get("numberOfDocuments") is not None:
+        stamp["document_count"] = manifest["numberOfDocuments"]
+    if manifest and manifest.get("lastModifiedDocumentTime"):
+        stamp["last_modified_document_time"] = manifest["lastModifiedDocumentTime"]
+    return stamp
+
+
 def main():
     parser = argparse.ArgumentParser(description="Extract knowledge graph using LLM")
     parser.add_argument("--collection", required=True, help="Collection name")
@@ -215,24 +250,16 @@ def main():
         print(f"Error: Documents directory not found: {docs_dir}")
         return
 
-    if args.output:
-        output_path = Path(args.output)
-    else:
-        # Route to the right private repo based on collection name
-        nav_collections = {"melosys-confluence-v3", "melosys-jira", "jira-issues", "nav-begreper-eessi"}
-        if args.collection in nav_collections:
-            preferred = Path(f"./huginn-nav/scripts/knowledge_graph/{args.collection}_llm_graph.json")
-        else:
-            preferred = Path(f"./huginn-jarvis/scripts/knowledge_graph/{args.collection}_llm_graph.json")
-
-        if preferred.parent.exists():
-            output_path = preferred
-        else:
-            output_path = Path(f"./scripts/knowledge_graph/{args.collection}_llm_graph.json")
+    try:
+        output_path = resolve_graph_output_path(args.collection, args.output)
+    except ValueError as e:
+        print(f"Error: {e}")
+        return
     cache_path = output_path.with_suffix(".cache.json")
 
     # Find all document JSON files
     doc_files = sorted(docs_dir.rglob("*.json"))
+    limited = 0 < args.limit < len(doc_files)
     if args.limit > 0:
         doc_files = doc_files[:args.limit]
 
@@ -318,6 +345,11 @@ def main():
 
     # Build merged graph
     graph = build_graph(all_extractions, doc_titles)
+    # Stamp provenance so the loader can warn when the collection has moved on
+    # since this graph was extracted (staleness signal, not a rebuild trigger).
+    graph["source_stamp"] = build_source_stamp(
+        args.collection, args.data_path, len(doc_files) if limited else None
+    )
 
     # Write output
     output_path.parent.mkdir(parents=True, exist_ok=True)
