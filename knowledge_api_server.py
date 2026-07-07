@@ -34,15 +34,13 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     store = get_store()
     config: ServerConfig = app.state.config
-    store.load_collections(
-        config.collections,
-        data_path=config.data_path,
-        extra_graph_paths=config.graph_paths,
-    )
+    store.load_collections(config.collections, data_path=config.data_path)
     yield
 
 
 app = FastAPI(title="Knowledge API", lifespan=lifespan)
+# Deliberately a loose attribute, not a ServerConfig field: a derived static
+# path (repo root), not runtime configuration.
 app.state.huginn_root = Path(__file__).parent
 # A default (env-only) config so the module-level ``app`` is usable before main()
 # runs — e.g. under TestClient. Replaced with the fully-resolved one in main().

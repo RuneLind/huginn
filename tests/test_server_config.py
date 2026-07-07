@@ -1,6 +1,5 @@
-"""Tests for ServerConfig resolution: flags, env fallbacks, precedence, graph, trace."""
+"""Tests for ServerConfig resolution: flags, env fallbacks, and precedence."""
 import argparse
-from pathlib import Path
 
 from main.ingest.registry import INGEST_SOURCES
 from main.runtime.server_config import DEFAULT_PORT, ServerConfig
@@ -8,8 +7,6 @@ from main.runtime.server_config import DEFAULT_PORT, ServerConfig
 
 _CONFIG_ENV_VARS = (
     "HUGINN_DATA_PATH",
-    "KNOWLEDGE_GRAPH_PATH", "JIRA_GRAPH_PATH", "LLM_GRAPH_PATH",
-    "HUGINN_TRACE_DEFAULT", "HUGINN_TRACE_POINTER",
     *[src.path_env for src in INGEST_SOURCES],
     *[src.collection_env for src in INGEST_SOURCES],
 )
@@ -94,46 +91,30 @@ def test_all_registry_sources_present(monkeypatch):
     assert set(cfg.ingest_sources) == {src.name for src in INGEST_SOURCES}
 
 
-def test_graph_paths_fold_in_env_knowledge_graph(monkeypatch, tmp_path):
-    graph_file = tmp_path / "melosys_llm_graph.json"
-    graph_file.write_text("{}")
-    cfg = _build(
-        ["--collections", "wiki"],
-        monkeypatch,
-        env={"KNOWLEDGE_GRAPH_PATH": str(graph_file)},
-    )
-    assert graph_file in cfg.graph_paths
+class TestDefault:
+    """ServerConfig.default() — env-only boot for the module-level app."""
 
+    def _clear(self, monkeypatch):
+        for name in _CONFIG_ENV_VARS:
+            monkeypatch.delenv(name, raising=False)
 
-def test_graph_paths_skip_nonexistent_env(monkeypatch):
-    cfg = _build(
-        ["--collections", "wiki"],
-        monkeypatch,
-        env={"KNOWLEDGE_GRAPH_PATH": "/no/such/graph.json"},
-    )
-    assert Path("/no/such/graph.json") not in cfg.graph_paths
+    def test_matches_cli_defaults(self, monkeypatch):
+        """default() must resolve identically to a bare CLI boot (minus collections)."""
+        self._clear(monkeypatch)
+        cli = _build(["--collections", "wiki"], monkeypatch)
+        dflt = ServerConfig.default()
+        assert dflt.collections == []
+        assert dflt.data_path == cli.data_path
+        assert dflt.host == cli.host
+        assert dflt.port == cli.port
+        assert dflt.ingest_sources == cli.ingest_sources
 
-
-def test_trace_flags_from_env(monkeypatch):
-    cfg = _build(
-        ["--collections", "wiki"],
-        monkeypatch,
-        env={"HUGINN_TRACE_DEFAULT": "1", "HUGINN_TRACE_POINTER": "yes"},
-    )
-    assert cfg.trace_default is True   # any_trace_enabled()
-    assert cfg.trace_pointer is True   # pointer_mode_enabled()
-
-
-def test_trace_flags_default_off(monkeypatch):
-    cfg = _build(["--collections", "wiki"], monkeypatch)
-    assert cfg.trace_default is False
-    assert cfg.trace_pointer is False
-
-
-def test_default_config_is_env_only(monkeypatch):
-    for name in _CONFIG_ENV_VARS:
-        monkeypatch.delenv(name, raising=False)
-    cfg = ServerConfig.default()
-    assert cfg.collections == []
-    assert cfg.port == DEFAULT_PORT
-    assert set(cfg.ingest_sources) == {src.name for src in INGEST_SOURCES}
+    def test_env_fallbacks_apply(self, monkeypatch):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("HUGINN_DATA_PATH", "/env/data")
+        monkeypatch.setenv("TIKTOK_SOURCES_PATH", "/env/tiktok")
+        monkeypatch.setenv("TIKTOK_COLLECTION", "env-tiktok-coll")
+        cfg = ServerConfig.default()
+        assert cfg.data_path == "/env/data"
+        assert cfg.ingest("tiktok").path == "/env/tiktok"
+        assert cfg.ingest("tiktok").collection == "env-tiktok-coll"

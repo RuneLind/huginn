@@ -2,11 +2,11 @@
 import logging
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from main.core.search_pipeline import run_search_request
 from main.core.search_trace import create_trace
-from main.core.trace_store import default_trace_store
+from main.core.trace_store import any_trace_enabled, default_trace_store, pointer_mode_enabled
 from main.graph.graph_search_augmenter import GraphSearchAugmenter
 from main.runtime.knowledge_store import KnowledgeStore, get_store
 
@@ -30,10 +30,8 @@ def search(
     min_relevance: float = Query(None, ge=0.0, le=1.0, description="Drop results below this relevance (0.0-1.0). If all are below, returns empty results plus retryHints and noConfidentResults=true."),
     corrective: Literal["auto", "off", "force"] = Query("auto", description="Corrective-rescue mode: 'auto' (default; rescue when first search is weak and a usable hint exists), 'off' (today's behaviour, no rescue), 'force' (rescue whenever a hint exists — test knob)."),
     trace: bool = Query(False, description="Return per-stage search trace (entities, scores, timings) for debugging"),
-    request: Request = None,
     store: KnowledgeStore = Depends(get_store),
 ):
-    config = request.app.state.config
     if collection:
         for c in collection:
             if not store.has_collection(c):
@@ -45,7 +43,7 @@ def search(
 
     skip_reranker = not rerank if rerank is not None else brief
 
-    trace_enabled = trace or config.trace_default
+    trace_enabled = trace or any_trace_enabled()
     trace_obj = create_trace(trace_enabled)
     trace_obj.set_query_raw(q)
 
@@ -85,7 +83,7 @@ def search(
     )
     if trace_enabled:
         trace_dict = trace_obj.to_dict()
-        if config.trace_pointer:
+        if pointer_mode_enabled():
             response["traceId"] = default_trace_store().put(trace_dict)
         else:
             response["trace"] = trace_dict
