@@ -65,8 +65,8 @@ def discover_graph_paths(extra_paths=None):
     return paths
 
 
-def resolve_graph_output_path(collection, output=None):
-    """Resolve where a collection's ``*_llm_graph.json`` extraction output belongs.
+def resolve_graph_output_path(collection, output=None, filename=None):
+    """Resolve where a collection's graph extraction output belongs.
 
     Precedence:
       1. An explicit ``output`` (the ``--output`` flag) always wins.
@@ -77,11 +77,15 @@ def resolve_graph_output_path(collection, output=None):
          collection no other file lists.
       3. Otherwise raise ``ValueError`` — the caller must pass ``--output``.
 
+    ``filename`` overrides the default ``<collection>_llm_graph.json`` output
+    name (e.g. the Jira extractor writes ``jira_graph.json``).
+
     Keeping collection ownership in the private routing files means no private
     collection names live in this public repo.
     """
     if output:
         return Path(output)
+    filename = filename or f"{collection}_llm_graph.json"
 
     default_dir = None
     for search_dir in _AUTO_GLOB_DIRS:
@@ -94,12 +98,18 @@ def resolve_graph_output_path(collection, output=None):
             logger.warning(f"Ignoring unreadable routing config {routing_path}: {e}")
             continue
         if collection in cfg.get("collections", []):
-            return Path(search_dir) / f"{collection}_llm_graph.json"
-        if cfg.get("default") and default_dir is None:
-            default_dir = Path(search_dir)
+            return Path(search_dir) / filename
+        if cfg.get("default"):
+            if default_dir is None:
+                default_dir = Path(search_dir)
+            else:
+                logger.warning(
+                    f"Multiple graph routing configs claim \"default\": true — "
+                    f"using {default_dir}, ignoring {routing_path}"
+                )
 
     if default_dir is not None:
-        return default_dir / f"{collection}_llm_graph.json"
+        return default_dir / filename
 
     raise ValueError(
         f"No output routing for collection '{collection}'. Pass --output <path>, "
@@ -108,41 +118,54 @@ def resolve_graph_output_path(collection, output=None):
     )
 
 
-def check_graph_staleness(paths, data_path):
-    """Warn when a stamped graph JSON diverges from its indexed collection.
+def get_collection_manifest(base_path, collection):
+    """Read a collection's ``manifest.json``; ``None`` when missing or unreadable."""
+    manifest_path = Path(base_path) / collection / "manifest.json"
+    try:
+        return json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def check_graph_staleness(graphs, data_path):
+    """Warn when a stamped graph diverges from its indexed collection.
+
+    ``graphs`` is an iterable of ``(path, parsed_graph_dict)`` pairs — the
+    caller parses each graph file once and shares the data with the
+    ``KnowledgeGraph`` construction, so no file is read twice per (re)load.
 
     A graph produced by the extractor carries a ``source_stamp`` describing the
     collection it was built from. Here we compare it against the collection's
-    current ``manifest.json``. Unstamped graphs (older extractions) and
-    collections without a readable manifest are skipped silently, so a fresh
-    clone or a legacy graph never warns. This is a signal only — nothing rebuilds.
+    current ``manifest.json``: ``document_count`` vs ``numberOfDocuments`` and
+    ``last_modified_document_time`` vs ``lastModifiedDocumentTime``. The latter
+    only moves on real content change — ``updatedTime`` is deliberately NOT
+    compared, since it is rewritten on every (no-op) reindex run and would warn
+    permanently. Unstamped graphs (older extractions) and collections without a
+    readable manifest are skipped silently, so a fresh clone or a legacy graph
+    never warns. This is a signal only — nothing rebuilds.
     """
-    for path in paths:
-        try:
-            data = json.loads(Path(path).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
+    for path, data in graphs:
         stamp = data.get("source_stamp")
         if not isinstance(stamp, dict):
             continue
         collection = stamp.get("collection")
         if not collection:
             continue
-        manifest_path = Path(data_path) / collection / "manifest.json"
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        manifest = get_collection_manifest(data_path, collection)
+        if manifest is None:
             continue
 
         reasons = []
         stamp_count = stamp.get("document_count")
         cur_count = manifest.get("numberOfDocuments")
-        if stamp_count is not None and cur_count is not None and stamp_count != cur_count:
+        # str() both sides: a stamp edited by hand (or an int-vs-string manifest)
+        # must not warn forever on a type mismatch alone.
+        if stamp_count is not None and cur_count is not None and str(stamp_count) != str(cur_count):
             reasons.append(f"document_count {stamp_count} → {cur_count}")
-        stamp_updated = stamp.get("updated_time")
-        cur_updated = manifest.get("updatedTime")
-        if stamp_updated and cur_updated and stamp_updated != cur_updated:
-            reasons.append(f"collection re-indexed ({stamp_updated} → {cur_updated})")
+        stamp_modified = stamp.get("last_modified_document_time")
+        cur_modified = manifest.get("lastModifiedDocumentTime")
+        if stamp_modified and cur_modified and str(stamp_modified) != str(cur_modified):
+            reasons.append(f"documents changed ({stamp_modified} → {cur_modified})")
 
         if reasons:
             logger.warning(
@@ -157,15 +180,18 @@ def load_default_knowledge_graph(extra_paths=None, data_path=None):
 
     Returns ``None`` (and logs an info line) when no graph paths resolve. When
     ``data_path`` is given, stamped graphs are checked against their collection
-    manifests and a warning is logged on divergence.
+    manifests and a warning is logged on divergence. Each graph file is parsed
+    once and shared between the staleness check and the graph construction.
     """
     paths = discover_graph_paths(extra_paths)
     if not paths:
         logger.info("No knowledge graph found — graph features disabled")
         return None
+    # Parse errors propagate, same as KnowledgeGraph(paths) did before.
+    graphs = [(path, json.loads(Path(path).read_text(encoding="utf-8"))) for path in paths]
     if data_path:
-        check_graph_staleness(paths, data_path)
-    graph = KnowledgeGraph(paths)
+        check_graph_staleness(graphs, data_path)
+    graph = KnowledgeGraph([data for _, data in graphs])
     logger.info(
         f"Knowledge graph loaded from {len(paths)} file(s): "
         f"{graph.node_count()} nodes, {graph.edge_count()} edges"

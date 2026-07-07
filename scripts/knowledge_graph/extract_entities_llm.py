@@ -27,7 +27,7 @@ from pathlib import Path
 # private-sub-repo discovery convention).
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from main.graph.graph_loader import resolve_graph_output_path
+from main.graph.graph_loader import get_collection_manifest, resolve_graph_output_path
 
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
@@ -208,25 +208,30 @@ def build_graph(all_extractions: list[dict], doc_titles: dict[str, str]) -> dict
     }
 
 
-def build_source_stamp(collection: str, data_path: str, doc_file_count: int) -> dict:
+def build_source_stamp(collection: str, data_path: str, processed_doc_count: int | None = None) -> dict:
     """Cheap provenance stamp for staleness detection at load time.
 
-    Records the collection name plus its document count (and index time when a
-    manifest is present). The loader compares this against the collection's
-    current manifest and warns on divergence. Prefers the manifest's
-    ``numberOfDocuments`` (authoritative), falling back to the raw file count
-    the extractor already scanned.
+    The loader compares the stamp against the collection's current manifest
+    and warns on divergence. Fields:
+
+    - ``document_count``: on a full run, the manifest's authoritative
+      ``numberOfDocuments`` — omitted when no manifest is readable (a raw file
+      count would not be comparable against a later manifest). When ``--limit``
+      truncated the run, ``processed_doc_count`` is stamped as-is so the
+      partial graph honestly triggers the staleness warning.
+    - ``last_modified_document_time``: the manifest's
+      ``lastModifiedDocumentTime``, which only moves on real content change
+      (``updatedTime`` is rewritten on every reindex run, including no-ops,
+      and would warn permanently).
     """
-    stamp = {"collection": collection, "document_count": doc_file_count}
-    manifest_path = Path(data_path) / collection / "manifest.json"
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return stamp
-    if manifest.get("numberOfDocuments") is not None:
+    stamp = {"collection": collection}
+    manifest = get_collection_manifest(data_path, collection)
+    if processed_doc_count is not None:
+        stamp["document_count"] = processed_doc_count
+    elif manifest and manifest.get("numberOfDocuments") is not None:
         stamp["document_count"] = manifest["numberOfDocuments"]
-    if manifest.get("updatedTime"):
-        stamp["updated_time"] = manifest["updatedTime"]
+    if manifest and manifest.get("lastModifiedDocumentTime"):
+        stamp["last_modified_document_time"] = manifest["lastModifiedDocumentTime"]
     return stamp
 
 
@@ -254,7 +259,7 @@ def main():
 
     # Find all document JSON files
     doc_files = sorted(docs_dir.rglob("*.json"))
-    total_doc_files = len(doc_files)  # full count for the source stamp (pre --limit)
+    limited = 0 < args.limit < len(doc_files)
     if args.limit > 0:
         doc_files = doc_files[:args.limit]
 
@@ -342,7 +347,9 @@ def main():
     graph = build_graph(all_extractions, doc_titles)
     # Stamp provenance so the loader can warn when the collection has moved on
     # since this graph was extracted (staleness signal, not a rebuild trigger).
-    graph["source_stamp"] = build_source_stamp(args.collection, args.data_path, total_doc_files)
+    graph["source_stamp"] = build_source_stamp(
+        args.collection, args.data_path, len(doc_files) if limited else None
+    )
 
     # Write output
     output_path.parent.mkdir(parents=True, exist_ok=True)

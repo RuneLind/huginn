@@ -19,10 +19,13 @@ ENTITY_PREFIX = "entity:"
 class KnowledgeGraph:
 
     def __init__(self, graph_path):
-        """Load graph from one or more JSON files.
+        """Load graph from one or more JSON files (or pre-parsed graph dicts).
 
         Args:
             graph_path: Single Path or list of Paths to graph JSON files.
+                Entries may also be already-parsed graph dicts, so a caller
+                that has read the file for other reasons (e.g. the staleness
+                check in graph_loader) doesn't force a second parse.
         """
         if isinstance(graph_path, (list, tuple)):
             paths = graph_path
@@ -35,7 +38,7 @@ class KnowledgeGraph:
 
         seen_edges: set[tuple[str, str, str]] = set()
         for path in paths:
-            data = json.loads(Path(path).read_text())
+            data = path if isinstance(path, dict) else json.loads(Path(path).read_text())
             for node in data["nodes"]:
                 existing = self.nodes.get(node["id"])
                 if existing is None:

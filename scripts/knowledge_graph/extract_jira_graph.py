@@ -8,11 +8,12 @@ tilhører_epic and refererer_til edges.
 Usage:
     uv run scripts/knowledge_graph/extract_jira_graph.py
     uv run scripts/knowledge_graph/extract_jira_graph.py --source ./data/sources/jira-issues
-    uv run scripts/knowledge_graph/extract_jira_graph.py --output ./huginn-nav/scripts/knowledge_graph/jira_graph.json
+    uv run scripts/knowledge_graph/extract_jira_graph.py --output <path>/jira_graph.json
 
-Output auto-routes to private sub-repos when no --output is given:
-    huginn-nav/scripts/knowledge_graph/jira_graph.json (NAV-internal data)
-    huginn-jarvis/scripts/knowledge_graph/jira_graph.json (otherwise)
+Output routing when no --output is given: a graph_routing.json in one of the
+private sub-repo knowledge_graph dirs decides which dir owns the source
+collection (matched by the --source directory name). Without any routing
+config the run fails and asks for --output.
 """
 
 import argparse
@@ -25,6 +26,7 @@ from pathlib import Path
 # Allow running as a script (uv run scripts/...) by putting the repo root on sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from main.graph.graph_loader import resolve_graph_output_path
 from main.utils.frontmatter import read_frontmatter_from_path, strip_frontmatter
 
 ISSUE_KEY_RE = re.compile(r'\b([A-Z][A-Z0-9]+-\d+)\b')
@@ -48,25 +50,12 @@ def extract_cross_references(body: str, self_key: str, epic_key: str) -> set[str
     return refs
 
 
-def _default_output_path() -> Path:
-    """Auto-route output to a private sub-repo so customer-confidential graphs
-    don't land in the public working tree. Falls back to a NAV-only error if
-    neither private repo is checked out."""
-    nav_dir = Path("./huginn-nav/scripts/knowledge_graph")
-    jarvis_dir = Path("./huginn-jarvis/scripts/knowledge_graph")
-    if nav_dir.exists():
-        return nav_dir / "jira_graph.json"
-    if jarvis_dir.exists():
-        return jarvis_dir / "jira_graph.json"
-    return Path("")
-
-
 def main():
     parser = argparse.ArgumentParser(description="Extract Jira knowledge graph from markdown files")
     parser.add_argument("--source", default="./data/sources/jira-issues",
                         help="Directory with Jira markdown files")
     parser.add_argument("--output", default=None,
-                        help="Output JSON file path (default: auto-route to ./huginn-nav/ or ./huginn-jarvis/)")
+                        help="Output JSON file path (default: routed via graph_routing.json in the private sub-repos)")
     args = parser.parse_args()
 
     source_dir = Path(args.source)
@@ -74,14 +63,17 @@ def main():
         print(f"Error: Source directory not found: {source_dir}")
         return
 
-    if args.output:
-        output_path = Path(args.output)
-    else:
-        output_path = _default_output_path()
-        if not output_path:
-            print("Error: no --output given and no private sub-repo (huginn-nav/ or huginn-jarvis/) is checked out.")
-            print("Pass --output explicitly. Do NOT write to ./scripts/knowledge_graph/ — that path leaks customer data into the public repo.")
-            return
+    # Route by the source directory name (matches the collection name in the
+    # private routing configs) so no private path or collection allow-list is
+    # baked into this public script.
+    try:
+        output_path = resolve_graph_output_path(
+            source_dir.name, args.output, filename="jira_graph.json"
+        )
+    except ValueError as e:
+        print(f"Error: {e}")
+        print("Do NOT write to ./scripts/knowledge_graph/ — that path leaks customer data into the public repo.")
+        return
 
     print(f"Scanning {source_dir} for Jira markdown files...")
 
