@@ -21,6 +21,45 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def deduplicate_document(doc_id, doc_url, text_provider, seen_urls, seen_text_hashes):
+    """Decide whether a newly-encountered document duplicates one already kept.
+
+    Two dedup signals, checked in order:
+
+    1. **URL** — same source ``documentUrl`` means the same page regardless of
+       path or text. Checked first so a URL-duplicate never triggers a document
+       read (``text_provider`` stays uncalled).
+    2. **Content** — MD5 hash of the document body text; identical non-empty
+       bodies collapse to the first-seen document.
+
+    On a non-duplicate the document's URL and text hash are registered into
+    ``seen_urls`` / ``seen_text_hashes`` (both mutated in place) so later
+    documents dedup against it.
+
+    ``text_provider`` is a zero-arg callable returning the document body text;
+    it is invoked lazily (only past the URL check) to preserve the original
+    lazy-read behaviour.
+
+    Returns ``True`` if ``doc_id`` is a duplicate and should be skipped,
+    ``False`` if it was registered as the canonical document.
+    """
+    if doc_url and doc_url in seen_urls:
+        logger.debug(f"Dedup: skipping {doc_id}, same URL as {seen_urls[doc_url]}")
+        return True
+
+    text_content = text_provider()
+    text_hash = hashlib.md5(text_content.encode(), usedforsecurity=False).hexdigest()
+
+    if text_content and text_hash in seen_text_hashes:
+        logger.debug(f"Dedup: skipping {doc_id}, same content as {seen_text_hashes[text_hash]}")
+        return True
+
+    if doc_url:
+        seen_urls[doc_url] = doc_id
+    seen_text_hashes[text_hash] = doc_id
+    return False
+
+
 class DocumentCollectionSearcher:
     # Cross-encoder reranker score thresholds (negative scores, more negative =
     # more relevant). Defined in search_response_formatter, which derives the
@@ -346,25 +385,20 @@ class DocumentCollectionSearcher:
                 continue
 
             if doc_id not in result:
-                # URL-based dedup: same source URL means same page regardless of path/text
                 doc_url = mapping.get("documentUrl", "")
-                if doc_url and doc_url in seen_urls:
+
+                def _load_text():
+                    document = self._get_document_cached(mapping["documentPath"])
+                    return document.get("text", "") if document else ""
+
+                if deduplicate_document(doc_id, doc_url, _load_text, seen_urls, seen_text_hashes):
                     skipped_doc_ids.add(doc_id)
-                    logger.debug(f"Dedup: skipping {doc_id}, same URL as {seen_urls[doc_url]}")
                     continue
 
+                # Guaranteed cache hit: reaching here means deduplicate_document
+                # returned False, which always loaded the document via
+                # ``_load_text`` (URL-duplicates return True and never get here).
                 document = self._get_document_cached(mapping["documentPath"])
-                text_content = document.get("text", "") if document else ""
-                text_hash = hashlib.md5(text_content.encode(), usedforsecurity=False).hexdigest()
-
-                if text_content and text_hash in seen_text_hashes:
-                    skipped_doc_ids.add(doc_id)
-                    logger.debug(f"Dedup: skipping {doc_id}, same content as {seen_text_hashes[text_hash]}")
-                    continue
-
-                if doc_url:
-                    seen_urls[doc_url] = doc_id
-                seen_text_hashes[text_hash] = doc_id
 
                 doc_result = {
                     "id": doc_id,

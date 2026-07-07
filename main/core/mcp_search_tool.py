@@ -12,8 +12,7 @@ import json
 import logging
 from typing import Callable, Literal
 
-from main.core.search_pipeline import search_and_shape
-from main.core.search_response_formatter import run_corrective_search
+from main.core.search_pipeline import run_search_request
 from main.core.search_trace import create_trace
 from main.graph.graph_search_augmenter import GraphSearchAugmenter
 
@@ -63,48 +62,19 @@ def build_search_tool_fn(
         )
         shape_kwargs = dict(limit=max_number_of_documents)
 
-        results, per_collection, any_low_confidence = search_and_shape(
+        response = run_search_request(
             target_searchers,
-            search_q,
+            raw_query=query,
+            search_query=search_q,
             augmenter=augmenter,
             detected_entities=detected_entities,
+            graph_answer=graph_answer,
             trace=trace,
-            title_boost_query=query,
             search_kwargs=search_kwargs,
             shape_kwargs=shape_kwargs,
-        )
-
-        reranked = bool(per_collection[0][1].get("reranked", True))
-
-        def rerun_search_fn(rescue_query: str):
-            rescue_results, _, _ = search_and_shape(
-                target_searchers,
-                rescue_query,
-                augmenter=augmenter,
-                detected_entities=detected_entities,
-                trace=trace,
-                title_boost_query=rescue_query,
-                search_kwargs=search_kwargs,
-                shape_kwargs=shape_kwargs,
-            )
-            return rescue_results
-
-        results, response = run_corrective_search(
-            results,
-            query=query,
-            augmenter=augmenter,
-            detected_entities=detected_entities,
             min_relevance=min_relevance,
-            trace=trace,
-            reranked=reranked,
-            mode=corrective,
-            rerun_search_fn=rerun_search_fn,
-            limit=max_number_of_documents,
+            corrective_mode=corrective,
         )
-        if graph_answer:
-            response["graph_answer"] = graph_answer
-        if any_low_confidence:
-            response["lowConfidence"] = True
         if trace_default:
             response["trace"] = trace.to_dict()
         return json.dumps(response, indent=2, ensure_ascii=False)
