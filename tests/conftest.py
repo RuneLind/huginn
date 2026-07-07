@@ -33,3 +33,14 @@ def make_mock_reranker(predict_scores, model_name="mock-reranker"):
         reranker.model = MagicMock()
         reranker.model.predict.return_value = np.array(predict_scores, dtype=np.float32)
         return reranker
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _query_log_off(monkeypatch):
+    """Keep the suite from appending to the real query log (main/core/query_log.py).
+
+    Tests that exercise the log re-point HUGINN_QUERY_LOG at a tmp_path.
+    """
+    monkeypatch.setenv("HUGINN_QUERY_LOG", "off")

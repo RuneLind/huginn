@@ -7,6 +7,7 @@ enrichment. They run it twice each — once for the initial query and once for
 the corrective-rescue rerun. ``search_and_shape`` owns that sequence so all
 four call sites share one copy.
 """
+from main.core.query_log import log_search_request
 from main.core.search_response_formatter import (
     run_corrective_search,
     shape_search_results,
@@ -156,4 +157,9 @@ def run_search_request(
         response["graph_answer"] = graph_answer
     if any_low_confidence:
         response["lowConfidence"] = True
+    log_search_request(
+        collections=target_searchers.keys(),
+        query=raw_query,
+        response=response,
+    )
     return response
