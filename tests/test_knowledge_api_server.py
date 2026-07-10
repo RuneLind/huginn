@@ -1309,3 +1309,90 @@ class TestJiraIngestUnit:
         assert metadata["issue_key"] == "MELOSYS-1234"
         # A key with no file returns (None, {})
         assert _find_existing_jira_file(str(tmp_path), "MELOSYS-9999") == (None, {})
+
+
+class TestReaderPatterns:
+    """`_reader_patterns` mirrors the update factory's effective localFiles defaults."""
+
+    def test_localfiles_explicit_patterns_passthrough(self):
+        from main.routes.collections import _reader_patterns
+        manifest = {"reader": {"type": "localFiles",
+                               "includePatterns": ["^life/.*"],
+                               "excludePatterns": ["^index\\.md$"]}}
+        assert _reader_patterns(manifest) == (["^life/.*"], ["^index\\.md$"])
+
+    def test_localfiles_omitted_include_defaults_to_index_all(self):
+        # Mirrors _build_local_files: include defaults to [".*"], exclude to [].
+        from main.routes.collections import _reader_patterns
+        assert _reader_patterns({"reader": {"type": "localFiles"}}) == ([".*"], [])
+
+    def test_non_localfiles_reader_has_no_file_patterns(self):
+        from main.routes.collections import _reader_patterns
+        assert _reader_patterns({"reader": {"type": "jira"}}) == ([], [])
+
+    def test_missing_reader_block(self):
+        from main.routes.collections import _reader_patterns
+        assert _reader_patterns({}) == ([], [])
+
+
+class TestListCollectionsReaderPatterns:
+    """GET /api/collections exposes each collection's reader include/exclude rules."""
+
+    class _FakeIndexer:
+        def get_size(self):
+            return 42
+
+    class _FakeSearcher:
+        def __init__(self):
+            self.indexer = TestListCollectionsReaderPatterns._FakeIndexer()
+
+    class _FakePersister:
+        def __init__(self, manifests):
+            self._manifests = manifests
+
+        def read_text_file(self, path):
+            name = path.split("/")[0]
+            if name not in self._manifests:
+                raise FileNotFoundError(path)
+            return json.dumps(self._manifests[name])
+
+    class _FakeStore:
+        def __init__(self, manifests):
+            self._searchers = {n: TestListCollectionsReaderPatterns._FakeSearcher() for n in manifests}
+            self.disk_persister = TestListCollectionsReaderPatterns._FakePersister(manifests)
+
+        def get_searchers(self):
+            return self._searchers
+
+    def _client(self, store) -> TestClient:
+        from main.runtime.knowledge_store import get_store
+        app.dependency_overrides[get_store] = lambda: store
+        return TestClient(app)
+
+    def teardown_method(self):
+        from main.runtime.knowledge_store import get_store
+        app.dependency_overrides.pop(get_store, None)
+
+    def test_wiki_collection_reports_meta_denylist(self):
+        store = self._FakeStore({
+            "wiki": {
+                "numberOfDocuments": 729,
+                "reader": {
+                    "type": "localFiles",
+                    "includePatterns": [".*"],
+                    "excludePatterns": ["^index\\.md$", "^log\\.md$", "^plans/.*"],
+                },
+            },
+        })
+        body = self._client(store).get("/api/collections").json()
+        entry = next(c for c in body["collections"] if c["name"] == "wiki")
+        assert entry["includePatterns"] == [".*"]
+        assert entry["excludePatterns"] == ["^index\\.md$", "^log\\.md$", "^plans/.*"]
+        assert entry["document_count"] == 729
+
+    def test_localfiles_without_patterns_defaults_index_all(self):
+        store = self._FakeStore({"notes": {"reader": {"type": "localFiles"}}})
+        body = self._client(store).get("/api/collections").json()
+        entry = next(c for c in body["collections"] if c["name"] == "notes")
+        assert entry["includePatterns"] == [".*"]
+        assert entry["excludePatterns"] == []
