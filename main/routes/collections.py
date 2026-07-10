@@ -12,6 +12,28 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _reader_patterns(manifest: dict) -> tuple[list, list]:
+    """The reader's EFFECTIVE include/exclude patterns for a localFiles collection.
+
+    Mirrors ``_build_local_files`` in the update-collection factory: a localFiles
+    reader that omits ``includePatterns`` defaults to ``[".*"]`` (index-all) and an
+    omitted ``excludePatterns`` to ``[]``. Returning the effective patterns (not the
+    literal manifest fields) matters for consumers that partition on-disk files by
+    these rules (muninn's wiki index-coverage card) — an empty include would
+    otherwise read as "index nothing" and mislabel every page. Non-localFiles
+    readers (jira/confluence/notion) have no such concept ⇒ empty arrays.
+    """
+    reader = manifest.get("reader") or {}
+    if reader.get("type") == "localFiles":
+        include = reader.get("includePatterns")
+        exclude = reader.get("excludePatterns")
+        return (
+            include if include is not None else [".*"],
+            exclude if exclude is not None else [],
+        )
+    return [], []
+
+
 @router.get("/api/collections")
 def list_collections(store: KnowledgeStore = Depends(get_store)):
     result = []
@@ -21,12 +43,18 @@ def list_collections(store: KnowledgeStore = Depends(get_store)):
             manifest = json.loads(manifest_text)
         except FileNotFoundError:
             manifest = {}
+        include_patterns, exclude_patterns = _reader_patterns(manifest)
         result.append({
             "name": name,
             "document_count": manifest.get("numberOfDocuments", 0),
             "chunk_count": manifest.get("numberOfChunks", 0),
             "embedding_count": searcher.indexer.get_size(),
             "updatedTime": manifest.get("updatedTime"),
+            # Reader file-selection rules, exposed so callers can tell a deliberately
+            # excluded/out-of-scope file (meta denylist, scoped include) from a real
+            # indexing gap. Empty arrays for readers without file patterns.
+            "includePatterns": include_patterns,
+            "excludePatterns": exclude_patterns,
         })
     return {"collections": result}
 
