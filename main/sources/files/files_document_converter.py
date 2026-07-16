@@ -3,7 +3,7 @@ import re
 
 from main.sources.files.markdown_heading_splitter import MarkdownHeadingSplitter
 from main.sources.files.session_markdown_splitter import SessionMarkdownSplitter
-from main.utils.frontmatter import read_frontmatter, strip_frontmatter
+from main.utils.frontmatter import parse_tags, read_frontmatter, strip_frontmatter
 
 # Frontmatter fields to preserve as document metadata (key in frontmatter -> key in metadata)
 _FRONTMATTER_METADATA_FIELDS = {"wip", "title", "breadcrumb", "space", "page_id", "session_id", "project", "gitBranch", "tags", "category", "date", "url",
@@ -102,7 +102,10 @@ class FilesDocumentConverter:
                         chunk_meta.update(fm_metadata)
 
                     # Inject tags and epic context into indexed text for embedding + BM25 enrichment
-                    tags_line = f"tags: {chunk_meta['tags']}\n" if chunk_meta.get('tags') else ""
+                    # parse_tags normalizes bracketed (`[a, b]`) or bare (`a, b`) forms;
+                    # re-join to a clean comma string so the indexed line never carries
+                    # brackets or a stray Python list repr.
+                    tags_line = f"tags: {', '.join(parse_tags(chunk_meta['tags']))}\n" if chunk_meta.get('tags') else ""
                     epic_line = f"epic: {chunk_meta['epic_summary']}\n" if chunk_meta.get('epic_summary') else ""
                     context_lines = tags_line + epic_line
                     if heading:

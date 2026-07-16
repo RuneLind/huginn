@@ -17,6 +17,7 @@ from main.indexes.indexer_factory import (
     load_search_indexer,
 )
 from main.persisters.disk_persister import DiskPersister
+from main.utils.frontmatter import parse_tags
 
 logger = logging.getLogger(__name__)
 
@@ -252,10 +253,8 @@ class KnowledgeStore:
             try:
                 doc = json.loads(self.disk_persister.read_text_file(f"{docs_dir}/{doc_file}"))
                 tags_str = (doc.get("metadata") or {}).get("tags", "")
-                for tag in tags_str.split(","):
-                    tag = tag.strip()
-                    if tag:
-                        tag_counts[tag] += 1
+                for tag in parse_tags(tags_str):
+                    tag_counts[tag] += 1
             except Exception:
                 continue
         return dict(tag_counts.most_common())

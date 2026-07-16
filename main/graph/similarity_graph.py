@@ -11,6 +11,8 @@ import numpy as np
 import networkx as nx
 from networkx.algorithms.community import louvain_communities
 
+from main.utils.frontmatter import parse_tags
+
 logger = logging.getLogger(__name__)
 
 
@@ -188,16 +190,16 @@ def build_similarity_graph(name, searcher, disk_persister):
             if chunk_meta.get("category"):
                 category = chunk_meta["category"]
             elif stored_meta.get("tags"):
-                first_tag = stored_meta["tags"].split(",")[0].strip()
-                if first_tag:
-                    category = first_tag
+                parsed = parse_tags(stored_meta["tags"])
+                if parsed:
+                    category = parsed[0]
             elif stored_meta.get("epic_summary"):
                 category = stored_meta["epic_summary"]
 
             if stored_meta.get("title"):
                 title = stored_meta["title"]
             if stored_meta.get("tags"):
-                tags_list = [t.strip() for t in stored_meta["tags"].split(",") if t.strip()]
+                tags_list = parse_tags(stored_meta["tags"])
 
             headings = [c["heading"] for c in doc_json.get("chunks", []) if c.get("heading")]
             text = doc_json.get("text", "")
