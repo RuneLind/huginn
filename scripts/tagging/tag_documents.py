@@ -178,12 +178,21 @@ def process_files(args):
     source_dir = Path(args.source)
     taxonomy = load_taxonomy(args.taxonomy)
 
-    # Collect markdown files
+    # Collect markdown files. Hidden directories/files (.claude/, .git/, …) are
+    # never candidates — mirrors the wiki reader's dot-exclusion, so the tagger
+    # can't touch files no consumer will ever see.
     md_files = sorted(source_dir.rglob("*.md"))
     md_files = [f for f in md_files if ".excluded" not in f.parts]
+    md_files = [
+        f for f in md_files
+        if not any(part.startswith(".") for part in f.relative_to(source_dir).parts)
+    ]
 
     if args.pattern:
         md_files = [f for f in md_files if fnmatch.fnmatch(str(f.relative_to(source_dir)), args.pattern)]
+
+    for pattern in args.exclude or []:
+        md_files = [f for f in md_files if not fnmatch.fnmatch(str(f.relative_to(source_dir)), pattern)]
 
     logger.info(f"Found {len(md_files)} markdown files in {source_dir}")
 
@@ -280,6 +289,9 @@ def main():
     parser.add_argument("--force", action="store_true", help="Re-tag files that already have tags")
     parser.add_argument("--limit", type=int, help="Max number of files to process")
     parser.add_argument("--pattern", help="Glob pattern to filter files (relative to source dir)")
+    parser.add_argument("--exclude", action="append", default=None, metavar="GLOB",
+                        help="Glob (relative to source dir) to exclude; repeatable. "
+                             "Hidden directories (.claude/, .git/, …) are always excluded.")
     parser.add_argument("--workers", type=int, default=None,
                         help="Parallel workers (default: 10 for claude-cli, 1 for ollama — a single thread saturates the GPU)")
     parser.add_argument("--model", default="claude-haiku-4-5-20251001", help="Claude model to use (claude-cli backend)")
