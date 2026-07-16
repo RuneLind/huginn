@@ -194,8 +194,12 @@ def process_files(args):
     tagged_count = 0
     skipped_count = 0
     error_count = 0
+    # success = a file that got a usable model response (tagged, incl. empty tags).
+    # Distinct from skipped (already-tagged / no excerpt) and error (call failed).
+    success_count = 0
     completed = 0
     tag_distribution: dict[str, int] = {}
+    written_files: list[Path] = []
 
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = {
@@ -221,6 +225,8 @@ def process_files(args):
                 error_count += 1
                 continue
 
+            # Reached the model and got a response (tags may still be empty).
+            success_count += 1
             tags = result["tags"]
             for tag in tags:
                 tag_distribution[tag] = tag_distribution.get(tag, 0) + 1
@@ -235,6 +241,7 @@ def process_files(args):
             else:
                 new_content = inject_tags(result["content"], tags)
                 result["file"].write_text(new_content, encoding='utf-8')
+                written_files.append(result["file"].resolve())
 
             if completed % 20 == 0:
                 logger.info(f"Progress: {completed}/{len(md_files)} processed, {tagged_count} tagged")
@@ -249,6 +256,20 @@ def process_files(args):
         print(f"\nTag distribution:")
         for tag, count in sorted(tag_distribution.items(), key=lambda x: -x[1]):
             print(f"  {tag}: {count}")
+
+    # Emit the exact list of files written this run (absolute paths, one per line),
+    # so a caller can commit precisely those and nothing else. Non-dry-run only —
+    # a dry run writes no files, so it produces no changed-files manifest.
+    if args.changed_files_out and not args.dry_run:
+        Path(args.changed_files_out).write_text(
+            "".join(f"{p}\n" for p in written_files), encoding="utf-8")
+
+    # Signal total failure: candidate files were attempted but every one errored
+    # (e.g. the backend model is missing). Partial failures stay a success exit.
+    all_failed = error_count > 0 and success_count == 0
+    return {"tagged": tagged_count, "skipped": skipped_count,
+            "errors": error_count, "success": success_count,
+            "all_failed": all_failed}
 
 
 def main():
@@ -267,6 +288,10 @@ def main():
     parser.add_argument("--ollama-model", default=DEFAULT_OLLAMA_MODEL,
                         help=f"Ollama model to use (ollama backend; default: {DEFAULT_OLLAMA_MODEL})")
     parser.add_argument("--timeout", type=int, default=60, help="Timeout per document in seconds")
+    parser.add_argument("--changed-files-out", default=None,
+                        help="Write the absolute path of each file actually tagged this run "
+                             "(one per line) to this path. Non-dry-run only; empty when nothing "
+                             "was written. Lets a caller commit exactly those files.")
     args = parser.parse_args()
 
     # Ollama saturates the GPU with a single thread; claude-cli parallelizes to 10.
@@ -281,7 +306,11 @@ def main():
             print("Error: `claude` CLI not found. Install it first.", file=sys.stderr)
             sys.exit(1)
 
-    process_files(args)
+    result = process_files(args)
+    if result["all_failed"]:
+        logger.error("All %d candidate file(s) failed to tag — exiting non-zero",
+                     result["errors"])
+        sys.exit(1)
 
 
 if __name__ == "__main__":
