@@ -27,6 +27,35 @@ def escape_frontmatter_value(value) -> str:
     return '"' + text.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
+def parse_tags(value: str) -> list[str]:
+    """Split a frontmatter ``tags`` scalar into a clean list of tag strings.
+
+    Handles both canonical inline arrays (``[a, b, c]``) and bare comma lists
+    (``a, b, c``) — huginn's frontmatter parser stores the value literally, so a
+    bracketed doc arrives here as the string ``"[a, b, c]"``. Strips wrapping
+    brackets and per-tag quotes, splits on commas, and drops empties. Returns
+    ``[]`` for a falsy/whitespace value.
+
+    This is the single normalization point for every doc-metadata tags consumer
+    (``?tags=`` filter, indexed-text enrichment, graph node category/tags, the
+    per-collection tag histogram) so a bracketed doc's first/last tag no longer
+    leaks the ``[``/``]`` into a chip or a filter key.
+    """
+    if not value:
+        return []
+    inner = value.strip()
+    if inner.startswith("["):
+        inner = inner[1:]
+    if inner.endswith("]"):
+        inner = inner[:-1]
+    tags = []
+    for part in inner.split(","):
+        tag = part.strip().strip('"').strip("'").strip()
+        if tag:
+            tags.append(tag)
+    return tags
+
+
 def read_frontmatter(text: str) -> dict[str, str]:
     """Parse YAML frontmatter from markdown text into a ``dict[str, str]``.
 

@@ -31,9 +31,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+# Repo root on path so `main.*` imports resolve regardless of cwd / invocation
+# (scripts/tagging/<file>.py → parents[2] is the huginn repo root).
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from claude_cli import FRONTMATTER_RE, extract_json_array, get_content_excerpt
 from main.utils.claude_cli import call_claude
 from main.utils.frontmatter import read_frontmatter
+from main.utils.ollama_cli import DEFAULT_MODEL as DEFAULT_OLLAMA_MODEL
+from main.utils.ollama_cli import call_ollama
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -60,7 +65,9 @@ def load_taxonomy(path: str) -> dict:
     all_tags = []
     for category, tags in data["tags"].items():
         all_tags.extend(tags)
-    return {"categories": data["tags"], "flat": all_tags}
+    # Optional top-level "prompt_note" is appended verbatim to the tagging prompt
+    # (e.g. mimir's "first tag = owning project" rule).
+    return {"categories": data["tags"], "flat": all_tags, "note": data.get("prompt_note", "")}
 
 
 def has_tags(content: str) -> bool:
@@ -72,8 +79,13 @@ def has_tags(content: str) -> bool:
 
 
 def inject_tags(content: str, tags: list[str]) -> str:
-    """Add or replace tags field in YAML frontmatter."""
-    tags_str = ", ".join(tags)
+    """Add or replace tags field in YAML frontmatter.
+
+    Emits the canonical **bracketed inline** form ``tags: [a, b, c]`` — muninn's
+    /wiki reader only splits bracketed arrays into per-tag chips, and huginn's
+    doc-metadata consumers normalize both forms via ``parse_tags``.
+    """
+    tags_str = "[" + ", ".join(tags) + "]"
     match = FRONTMATTER_RE.match(content)
     if not match:
         return f"---\ntags: {tags_str}\n---\n{content}"
@@ -90,10 +102,11 @@ def inject_tags(content: str, tags: list[str]) -> str:
 
 
 def build_prompt(title: str, breadcrumb: str, content_excerpt: str, taxonomy: dict) -> str:
-    """Build the full prompt for Claude CLI."""
+    """Build the full tagging prompt (backend-agnostic)."""
     taxonomy_text = json.dumps(taxonomy["categories"], indent=2, ensure_ascii=False)
+    note = f"\n{taxonomy['note']}\n" if taxonomy.get("note") else ""
     return f"""{SYSTEM_PROMPT}
-
+{note}
 Taxonomy (pick from these tags only):
 {taxonomy_text}
 
@@ -104,12 +117,20 @@ Document:
 {content_excerpt}"""
 
 
+def call_backend(prompt: str, backend: str, model: str, ollama_model: str, timeout: int) -> str:
+    """Dispatch a tagging prompt to the selected backend, returning raw model text."""
+    if backend == "ollama":
+        return call_ollama(prompt, model=ollama_model, timeout=timeout)
+    return call_claude(prompt, model=model, timeout=timeout)
+
+
 def tag_document(title: str, breadcrumb: str, content_excerpt: str,
                  taxonomy: dict, model: str, timeout: int,
-                 rel_path: str = "") -> list[str]:
-    """Call Claude CLI to generate tags for a document."""
+                 rel_path: str = "", backend: str = "claude-cli",
+                 ollama_model: str = DEFAULT_OLLAMA_MODEL) -> list[str]:
+    """Call the selected backend to generate tags for a document."""
     prompt = build_prompt(title, breadcrumb, content_excerpt, taxonomy)
-    raw_text = call_claude(prompt, model=model, timeout=timeout)
+    raw_text = call_backend(prompt, backend, model, ollama_model, timeout)
 
     tags = extract_json_array(raw_text)
     if tags is None:
@@ -125,7 +146,9 @@ def tag_document(title: str, breadcrumb: str, content_excerpt: str,
 
 
 def _tag_single_file(md_file: Path, source_dir: Path, taxonomy: dict,
-                     model: str, timeout: int, force: bool) -> dict:
+                     model: str, timeout: int, force: bool,
+                     backend: str = "claude-cli",
+                     ollama_model: str = DEFAULT_OLLAMA_MODEL) -> dict:
     """Tag a single file. Returns result dict for aggregation."""
     rel_path = str(md_file.relative_to(source_dir))
     content = md_file.read_text(encoding='utf-8')
@@ -142,7 +165,8 @@ def _tag_single_file(md_file: Path, source_dir: Path, taxonomy: dict,
         return {"path": rel_path, "status": "skipped", "tags": []}
 
     try:
-        tags = tag_document(title, breadcrumb, excerpt, taxonomy, model, timeout, rel_path=rel_path)
+        tags = tag_document(title, breadcrumb, excerpt, taxonomy, model, timeout,
+                            rel_path=rel_path, backend=backend, ollama_model=ollama_model)
     except Exception as e:
         logger.error(f"Error tagging {rel_path}: {e}")
         return {"path": rel_path, "status": "error", "tags": []}
@@ -170,13 +194,18 @@ def process_files(args):
     tagged_count = 0
     skipped_count = 0
     error_count = 0
+    # success = a file that got a usable model response (tagged, incl. empty tags).
+    # Distinct from skipped (already-tagged / no excerpt) and error (call failed).
+    success_count = 0
     completed = 0
     tag_distribution: dict[str, int] = {}
+    written_files: list[Path] = []
 
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = {
             executor.submit(_tag_single_file, f, source_dir, taxonomy,
-                            args.model, args.timeout, args.force): f
+                            args.model, args.timeout, args.force,
+                            args.backend, args.ollama_model): f
             for f in md_files
         }
 
@@ -196,6 +225,8 @@ def process_files(args):
                 error_count += 1
                 continue
 
+            # Reached the model and got a response (tags may still be empty).
+            success_count += 1
             tags = result["tags"]
             for tag in tags:
                 tag_distribution[tag] = tag_distribution.get(tag, 0) + 1
@@ -210,6 +241,7 @@ def process_files(args):
             else:
                 new_content = inject_tags(result["content"], tags)
                 result["file"].write_text(new_content, encoding='utf-8')
+                written_files.append(result["file"].resolve())
 
             if completed % 20 == 0:
                 logger.info(f"Progress: {completed}/{len(md_files)} processed, {tagged_count} tagged")
@@ -225,6 +257,20 @@ def process_files(args):
         for tag, count in sorted(tag_distribution.items(), key=lambda x: -x[1]):
             print(f"  {tag}: {count}")
 
+    # Emit the exact list of files written this run (absolute paths, one per line),
+    # so a caller can commit precisely those and nothing else. Non-dry-run only —
+    # a dry run writes no files, so it produces no changed-files manifest.
+    if args.changed_files_out and not args.dry_run:
+        Path(args.changed_files_out).write_text(
+            "".join(f"{p}\n" for p in written_files), encoding="utf-8")
+
+    # Signal total failure: candidate files were attempted but every one errored
+    # (e.g. the backend model is missing). Partial failures stay a success exit.
+    all_failed = error_count > 0 and success_count == 0
+    return {"tagged": tagged_count, "skipped": skipped_count,
+            "errors": error_count, "success": success_count,
+            "all_failed": all_failed}
+
 
 def main():
     parser = argparse.ArgumentParser(description="Tag markdown documents using Claude CLI (Max subscription)")
@@ -234,19 +280,37 @@ def main():
     parser.add_argument("--force", action="store_true", help="Re-tag files that already have tags")
     parser.add_argument("--limit", type=int, help="Max number of files to process")
     parser.add_argument("--pattern", help="Glob pattern to filter files (relative to source dir)")
-    parser.add_argument("--workers", type=int, default=10, help="Parallel workers (default: 10)")
-    parser.add_argument("--model", default="claude-haiku-4-5-20251001", help="Claude model to use")
+    parser.add_argument("--workers", type=int, default=None,
+                        help="Parallel workers (default: 10 for claude-cli, 1 for ollama — a single thread saturates the GPU)")
+    parser.add_argument("--model", default="claude-haiku-4-5-20251001", help="Claude model to use (claude-cli backend)")
+    parser.add_argument("--backend", choices=["claude-cli", "ollama"], default="claude-cli",
+                        help="Tagging backend (default: claude-cli)")
+    parser.add_argument("--ollama-model", default=DEFAULT_OLLAMA_MODEL,
+                        help=f"Ollama model to use (ollama backend; default: {DEFAULT_OLLAMA_MODEL})")
     parser.add_argument("--timeout", type=int, default=60, help="Timeout per document in seconds")
+    parser.add_argument("--changed-files-out", default=None,
+                        help="Write the absolute path of each file actually tagged this run "
+                             "(one per line) to this path. Non-dry-run only; empty when nothing "
+                             "was written. Lets a caller commit exactly those files.")
     args = parser.parse_args()
 
-    # Verify claude CLI is available
-    try:
-        subprocess.run(["claude", "--version"], capture_output=True, timeout=5)
-    except FileNotFoundError:
-        print("Error: `claude` CLI not found. Install it first.", file=sys.stderr)
-        sys.exit(1)
+    # Ollama saturates the GPU with a single thread; claude-cli parallelizes to 10.
+    if args.workers is None:
+        args.workers = 1 if args.backend == "ollama" else 10
 
-    process_files(args)
+    if args.backend == "claude-cli":
+        # Verify claude CLI is available
+        try:
+            subprocess.run(["claude", "--version"], capture_output=True, timeout=5)
+        except FileNotFoundError:
+            print("Error: `claude` CLI not found. Install it first.", file=sys.stderr)
+            sys.exit(1)
+
+    result = process_files(args)
+    if result["all_failed"]:
+        logger.error("All %d candidate file(s) failed to tag — exiting non-zero",
+                     result["errors"])
+        sys.exit(1)
 
 
 if __name__ == "__main__":

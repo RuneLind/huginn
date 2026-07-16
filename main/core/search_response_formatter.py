@@ -8,6 +8,7 @@ import math
 import re
 
 from main.utils.filename import title_from_doc_path
+from main.utils.frontmatter import parse_tags
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +141,7 @@ def apply_metadata_filters(results, project=None, git_branch=None, tags=None):
         if git_branch and merged.get("gitBranch") != git_branch:
             continue
         if requested_tags:
-            doc_tags = {t.strip() for t in merged.get("tags", "").split(",") if t.strip()}
+            doc_tags = set(parse_tags(merged.get("tags", "")))
             if not requested_tags & doc_tags:
                 continue
         filtered.append(r)

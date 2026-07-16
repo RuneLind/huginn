@@ -1,10 +1,44 @@
 from main.utils.frontmatter import (
     escape_frontmatter_value,
+    parse_tags,
     read_frontmatter,
     read_frontmatter_and_body,
     read_frontmatter_from_path,
     strip_frontmatter,
 )
+
+
+class TestParseTags:
+    """parse_tags is the single normalization point for the doc-metadata tags seams."""
+
+    def test_bracketed_inline(self):
+        assert parse_tags("[muninn, tracing, dashboard]") == ["muninn", "tracing", "dashboard"]
+
+    def test_bare_comma_list(self):
+        assert parse_tags("a, b, c") == ["a", "b", "c"]
+
+    def test_first_and_last_tag_of_bracketed_are_clean(self):
+        # Regression for the 198 pre-existing bracketed files: without normalization
+        # the first tag was "[muninn" and the last "dashboard]".
+        parsed = parse_tags("[muninn, tracing, dashboard]")
+        assert parsed[0] == "muninn"
+        assert parsed[-1] == "dashboard"
+
+    def test_quoted_tags(self):
+        assert parse_tags('["a", "b"]') == ["a", "b"]
+        assert parse_tags("['a', 'b']") == ["a", "b"]
+
+    def test_empty_and_falsy(self):
+        assert parse_tags("") == []
+        assert parse_tags("[]") == []
+        assert parse_tags("   ") == []
+
+    def test_single_tag(self):
+        assert parse_tags("[solo]") == ["solo"]
+        assert parse_tags("solo") == ["solo"]
+
+    def test_drops_empty_segments(self):
+        assert parse_tags("[a, , b,]") == ["a", "b"]
 
 
 class TestEscapeRoundTrip:

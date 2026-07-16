@@ -26,9 +26,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+# Repo root on path so `main.*` imports resolve regardless of cwd / invocation.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from claude_cli import extract_json_array, get_content_excerpt
 from main.utils.claude_cli import call_claude
 from main.utils.frontmatter import read_frontmatter
+from main.utils.ollama_cli import DEFAULT_MODEL as DEFAULT_OLLAMA_MODEL
+from main.utils.ollama_cli import call_ollama
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -53,7 +57,8 @@ Document:
 
 
 def discover_tags_for_file(md_file: Path, source_dir: Path, description: str,
-                           model: str, timeout: int) -> tuple[str, list[str]]:
+                           model: str, timeout: int, backend: str = "claude-cli",
+                           ollama_model: str = DEFAULT_OLLAMA_MODEL) -> tuple[str, list[str]]:
     """Discover free-form tags for a single file. Returns (rel_path, tags)."""
     rel_path = str(md_file.relative_to(source_dir))
     content = md_file.read_text(encoding='utf-8')
@@ -68,7 +73,10 @@ def discover_tags_for_file(md_file: Path, source_dir: Path, description: str,
     prompt = PROMPT_TEMPLATE.format(description=description, title=title, breadcrumb=breadcrumb, excerpt=excerpt)
 
     try:
-        raw_text = call_claude(prompt, model=model, timeout=timeout)
+        if backend == "ollama":
+            raw_text = call_ollama(prompt, model=ollama_model, timeout=timeout)
+        else:
+            raw_text = call_claude(prompt, model=model, timeout=timeout)
     except RuntimeError as e:
         logger.error(f"Failed for {rel_path}: {e}")
         return rel_path, []
@@ -87,11 +95,19 @@ def main():
     parser.add_argument("--description", default="a document collection",
                         help="Short description of the collection domain (e.g. 'a Norwegian social security IT system called Melosys')")
     parser.add_argument("--sample", type=int, help="Random sample size (default: all files)")
-    parser.add_argument("--workers", type=int, default=10, help="Parallel workers (default: 10)")
-    parser.add_argument("--model", default="claude-haiku-4-5-20251001", help="Claude model")
+    parser.add_argument("--workers", type=int, default=None,
+                        help="Parallel workers (default: 10 for claude-cli, 1 for ollama)")
+    parser.add_argument("--model", default="claude-haiku-4-5-20251001", help="Claude model (claude-cli backend)")
+    parser.add_argument("--backend", choices=["claude-cli", "ollama"], default="claude-cli",
+                        help="Discovery backend (default: claude-cli)")
+    parser.add_argument("--ollama-model", default=DEFAULT_OLLAMA_MODEL,
+                        help=f"Ollama model (ollama backend; default: {DEFAULT_OLLAMA_MODEL})")
     parser.add_argument("--timeout", type=int, default=60, help="Timeout per file in seconds")
     parser.add_argument("--output", help="Save raw results to JSON file")
     args = parser.parse_args()
+
+    if args.workers is None:
+        args.workers = 1 if args.backend == "ollama" else 10
 
     source_dir = Path(args.source)
     md_files = sorted(source_dir.rglob("*.md"))
@@ -113,7 +129,7 @@ def main():
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = {
             executor.submit(discover_tags_for_file, f, source_dir, args.description,
-                            args.model, args.timeout): f
+                            args.model, args.timeout, args.backend, args.ollama_model): f
             for f in md_files
         }
 
