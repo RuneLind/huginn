@@ -104,7 +104,7 @@ def _make_args(source, taxonomy, **overrides):
     args = argparse.Namespace(
         source=str(source), taxonomy=str(taxonomy), dry_run=False, force=False,
         limit=None, pattern=None, workers=1, model="m", backend="claude-cli",
-        ollama_model="qwen", timeout=60, changed_files_out=None,
+        ollama_model="qwen", timeout=60, changed_files_out=None, exclude=None,
     )
     for k, v in overrides.items():
         setattr(args, k, v)
@@ -217,3 +217,48 @@ class TestAllFailedExit:
 
         assert result["errors"] == 0
         assert result["all_failed"] is False
+
+
+class TestFileExclusion:
+    """Hidden dirs are never candidates; --exclude globs drop files by relative path."""
+
+    def test_hidden_directories_always_excluded(self, tmp_path, taxonomy_file):
+        src = tmp_path / "src"
+        (src / ".claude" / "skills").mkdir(parents=True)
+        (src / ".claude" / "skills" / "SKILL.md").write_text("body about muninn", encoding="utf-8")
+        (src / "a.md").write_text("body about muninn", encoding="utf-8")
+
+        args = _make_args(src, taxonomy_file, dry_run=True)
+        seen = []
+
+        def fake_tag(title, breadcrumb, excerpt, taxonomy, model, timeout,
+                     rel_path="", backend="claude-cli", ollama_model="qwen"):
+            seen.append(rel_path)
+            return ["muninn"]
+
+        with patch("tag_documents.tag_document", side_effect=fake_tag):
+            process_files(args)
+
+        assert seen == ["a.md"]
+
+    def test_exclude_globs_filter_relative_paths(self, tmp_path, taxonomy_file):
+        src = tmp_path / "src"
+        (src / "plans").mkdir(parents=True)
+        (src / "log.md").write_text("body about muninn", encoding="utf-8")
+        (src / "index.md").write_text("body about muninn", encoding="utf-8")
+        (src / "plans" / "index.md").write_text("body about muninn", encoding="utf-8")
+        (src / "plans" / "real.md").write_text("body about muninn", encoding="utf-8")
+
+        args = _make_args(src, taxonomy_file, dry_run=True,
+                          exclude=["log.md", "index.md", "*/index.md"])
+        seen = []
+
+        def fake_tag(title, breadcrumb, excerpt, taxonomy, model, timeout,
+                     rel_path="", backend="claude-cli", ollama_model="qwen"):
+            seen.append(rel_path)
+            return ["muninn"]
+
+        with patch("tag_documents.tag_document", side_effect=fake_tag):
+            process_files(args)
+
+        assert seen == ["plans/real.md"]
