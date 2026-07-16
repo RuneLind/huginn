@@ -14,7 +14,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "taggin
 from tag_documents import (  # noqa: E402
     build_prompt,
     call_backend,
+    get_html_excerpt,
+    has_html_tags,
     has_tags,
+    html_title,
+    inject_html_tags,
     inject_tags,
     process_files,
 )
@@ -105,6 +109,7 @@ def _make_args(source, taxonomy, **overrides):
         source=str(source), taxonomy=str(taxonomy), dry_run=False, force=False,
         limit=None, pattern=None, workers=1, model="m", backend="claude-cli",
         ollama_model="qwen", timeout=60, changed_files_out=None, exclude=None,
+        include_html=False,
     )
     for k, v in overrides.items():
         setattr(args, k, v)
@@ -217,6 +222,159 @@ class TestAllFailedExit:
 
         assert result["errors"] == 0
         assert result["all_failed"] is False
+
+
+class TestInjectHtmlTags:
+    """HTML mode: keywords-meta injection, anchor fallback chain, byte-for-byte."""
+
+    META = '<meta name="keywords" content="muninn, tracing">'
+
+    def test_after_viewport(self):
+        html = (
+            '<!DOCTYPE html>\n<html>\n<head>\n'
+            '    <meta charset="UTF-8">\n'
+            '    <meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
+            '    <title>X</title>\n</head>\n<body>hi</body>\n</html>\n'
+        )
+        out = inject_html_tags(html, ["muninn", "tracing"])
+        assert '<meta name="viewport" content="width=device-width, initial-scale=1.0">\n' \
+               f'    {self.META}\n    <title>X</title>' in out
+        # Everything except the inserted line is byte-identical.
+        assert out.replace(f"    {self.META}\n", "", 1) == html
+
+    def test_after_charset_when_no_viewport(self):
+        html = ('<!DOCTYPE html>\n<html>\n<head>\n'
+                '    <meta charset="UTF-8">\n    <title>X</title>\n</head>\n')
+        out = inject_html_tags(html, ["muninn", "tracing"])
+        assert f'    <meta charset="UTF-8">\n    {self.META}\n    <title>X</title>' in out
+        assert out.replace(f"    {self.META}\n", "", 1) == html
+
+    def test_after_head_when_no_charset(self):
+        html = '<html>\n<head>\n    <title>X</title>\n</head>\n<body>hi</body>\n'
+        out = inject_html_tags(html, ["muninn", "tracing"])
+        assert f'<head>\n{self.META}\n    <title>X</title>' in out
+        assert out.replace(f"{self.META}\n", "", 1) == html
+
+    def test_prepend_for_headless_fragment(self):
+        # No <head>, no charset — starts directly at <title>. Meta prepended.
+        html = '<title>X</title>\n<p>body</p>\n'
+        out = inject_html_tags(html, ["muninn", "tracing"])
+        assert out == f"{self.META}\n{html}"
+
+    def test_replace_existing_keywords_in_place(self):
+        html = ('<head>\n    <meta name="viewport" content="w">\n'
+                '    <meta name="keywords" content="old, stale">\n    <title>X</title>\n</head>\n')
+        out = inject_html_tags(html, ["new1", "new2"])
+        assert '<meta name="keywords" content="new1, new2">' in out
+        assert "old, stale" not in out
+        # Position unchanged (replaced in place, not re-anchored).
+        assert out == html.replace('content="old, stale"', 'content="new1, new2"')
+
+    def test_has_html_tags_detection(self):
+        assert has_html_tags('<meta name="keywords" content="a, b">') is True
+        assert has_html_tags('<meta name="keywords" content="">') is False
+        assert has_html_tags('<meta name="viewport" content="w">') is False
+
+    def test_injection_idempotent(self):
+        html = '<head>\n    <meta charset="UTF-8">\n</head>\n'
+        once = inject_html_tags(html, ["muninn"])
+        assert has_html_tags(once) is True
+        # Second inject replaces in place; the shape is stable.
+        twice = inject_html_tags(once, ["muninn"])
+        assert twice == once
+
+    def test_html_title_and_excerpt(self):
+        html = ('<head><title>My &amp; Page</title><style>.a{color:red}</style></head>'
+                '<body><script>var x=1</script><p>Hello world</p></body>')
+        assert html_title(html, "fallback") == "My & Page"
+        assert html_title("<p>no title</p>", "fallback") == "fallback"
+        excerpt = get_html_excerpt(html)
+        assert "Hello world" in excerpt
+        assert "color:red" not in excerpt
+        assert "var x=1" not in excerpt
+
+
+class TestHtmlMode:
+    """process_files with/without --include-html: discovery, skip, manifest, exclude."""
+
+    def _fake_tag(self, *a, **k):
+        return ["muninn"]
+
+    def test_md_only_default_leaves_html_untouched(self, tmp_path, taxonomy_file):
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "a.md").write_text("body about muninn", encoding="utf-8")
+        html = '<head>\n    <meta charset="UTF-8">\n</head>\n<body>muninn tracing</body>\n'
+        (src / "page.html").write_text(html, encoding="utf-8")
+
+        args = _make_args(src, taxonomy_file)  # include_html defaults False
+        with patch("tag_documents.tag_document", side_effect=self._fake_tag):
+            process_files(args)
+
+        # html file untouched (no keywords meta), md file tagged.
+        assert (src / "page.html").read_text(encoding="utf-8") == html
+        assert has_tags((src / "a.md").read_text(encoding="utf-8"))
+
+    def test_dry_run_include_html_touches_zero_html(self, tmp_path, taxonomy_file):
+        src = tmp_path / "src"
+        src.mkdir()
+        html = '<head>\n    <meta charset="UTF-8">\n</head>\n<body>muninn</body>\n'
+        (src / "page.html").write_text(html, encoding="utf-8")
+        seen = []
+
+        def fake(title, breadcrumb, excerpt, taxonomy, model, timeout,
+                 rel_path="", backend="claude-cli", ollama_model="qwen"):
+            seen.append(rel_path)
+            return ["muninn"]
+
+        args = _make_args(src, taxonomy_file, include_html=True, dry_run=True)
+        with patch("tag_documents.tag_document", side_effect=fake):
+            process_files(args)
+
+        assert seen == ["page.html"]  # discovered
+        assert (src / "page.html").read_text(encoding="utf-8") == html  # but not written
+
+    def test_include_html_writes_and_manifest_lists_html(self, tmp_path, taxonomy_file):
+        src = tmp_path / "src"
+        src.mkdir()
+        html = '<head>\n    <meta name="viewport" content="w">\n</head>\n<body>muninn</body>\n'
+        (src / "page.html").write_text(html, encoding="utf-8")
+        out = tmp_path / "changed.txt"
+
+        args = _make_args(src, taxonomy_file, include_html=True, changed_files_out=str(out))
+        with patch("tag_documents.tag_document", side_effect=self._fake_tag):
+            process_files(args)
+
+        written = (src / "page.html").read_text(encoding="utf-8")
+        assert '<meta name="keywords" content="muninn">' in written
+        # Byte-for-byte outside the inserted line.
+        assert written.replace('    <meta name="keywords" content="muninn">\n', "", 1) == html
+        # Second run skips (idempotent).
+        with patch("tag_documents.tag_document", side_effect=self._fake_tag):
+            result2 = process_files(_make_args(src, taxonomy_file, include_html=True))
+        assert result2["tagged"] == 0
+
+        lines = [ln for ln in out.read_text(encoding="utf-8").splitlines() if ln]
+        assert lines == [str((src / "page.html").resolve())]
+
+    def test_exclude_globs_apply_to_html(self, tmp_path, taxonomy_file):
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "keep.html").write_text('<head></head><body>muninn</body>', encoding="utf-8")
+        (src / "drop.html").write_text('<head></head><body>muninn</body>', encoding="utf-8")
+        seen = []
+
+        def fake(title, breadcrumb, excerpt, taxonomy, model, timeout,
+                 rel_path="", backend="claude-cli", ollama_model="qwen"):
+            seen.append(rel_path)
+            return ["muninn"]
+
+        args = _make_args(src, taxonomy_file, include_html=True, dry_run=True,
+                          exclude=["drop.html"])
+        with patch("tag_documents.tag_document", side_effect=fake):
+            process_files(args)
+
+        assert seen == ["keep.html"]
 
 
 class TestFileExclusion:

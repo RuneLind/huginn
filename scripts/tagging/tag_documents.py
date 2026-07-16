@@ -28,6 +28,7 @@ import re
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from html import unescape
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -44,6 +45,87 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 TAGS_LINE_RE = re.compile(r'^tags:\s*(.+)$', re.MULTILINE)
+
+# --- HTML mode (opt-in behind --include-html) -----------------------------
+# HTML explainers carry tags as a `<meta name="keywords" content="a, b, c">`
+# in the head instead of YAML frontmatter. Whole-tag matcher (attr order is
+# tolerated); used for both idempotent-skip detection and in-place replace.
+KEYWORDS_META_RE = re.compile(
+    r'<meta\b[^>]*\bname=["\']keywords["\'][^>]*>', re.IGNORECASE)
+_META_CONTENT_RE = re.compile(r'\bcontent=["\'](.*?)["\']', re.IGNORECASE | re.DOTALL)
+_TITLE_RE = re.compile(r'<title\b[^>]*>(.*?)</title>', re.IGNORECASE | re.DOTALL)
+
+# Anchor fallback chain for inserting a fresh keywords meta, most-specific first.
+# Each captures the anchor line's leading indentation so the inserted meta lines
+# up with its neighbours. If none match, the meta is prepended at the very top
+# (downstream consumers regex-match a raw prefix and don't require <head>).
+_HTML_ANCHORS = [
+    re.compile(r'(?P<indent>[ \t]*)<meta\b[^>]*\bname=["\']viewport["\'][^>]*>', re.IGNORECASE),
+    re.compile(r'(?P<indent>[ \t]*)<meta\b[^>]*\bcharset[^>]*>', re.IGNORECASE),
+    re.compile(r'(?P<indent>[ \t]*)<head\b[^>]*>', re.IGNORECASE),
+]
+
+# Body-text extraction for the prompt excerpt: drop script/style, strip tags,
+# unescape entities, collapse whitespace. A bounded regex strip (no heavy
+# unstructured import); same 2000-char cap as the markdown path.
+_SCRIPT_STYLE_RE = re.compile(r'<(script|style)\b[^>]*>.*?</\1>', re.IGNORECASE | re.DOTALL)
+_TAG_RE = re.compile(r'<[^>]+>')
+_WS_RE = re.compile(r'\s+')
+
+
+def has_html_tags(content: str) -> bool:
+    """True if a non-empty `<meta name="keywords">` is already present."""
+    m = KEYWORDS_META_RE.search(content)
+    if not m:
+        return False
+    cm = _META_CONTENT_RE.search(m.group(0))
+    return bool(cm and cm.group(1).strip())
+
+
+def inject_html_tags(content: str, tags: list[str]) -> str:
+    """Insert or replace `<meta name="keywords">`, preserving the rest of the
+    file byte-for-byte.
+
+    Replace-in-place when a keywords meta already exists (regardless of
+    position); otherwise insert after the anchor chain (viewport → charset →
+    <head> → prepend at top).
+    """
+    meta = f'<meta name="keywords" content="{", ".join(tags)}">'
+
+    existing = KEYWORDS_META_RE.search(content)
+    if existing:
+        return content[:existing.start()] + meta + content[existing.end():]
+
+    for anchor in _HTML_ANCHORS:
+        m = anchor.search(content)
+        if m:
+            indent = m.group("indent")
+            end = m.end()
+            return f"{content[:end]}\n{indent}{meta}{content[end:]}"
+
+    # No <head>/charset/viewport (headless fragment) — prepend at the top.
+    return f"{meta}\n{content}"
+
+
+def get_html_excerpt(content: str, max_chars: int = 2000) -> str:
+    """Body text of an HTML file for the tagging prompt (2000-char cap)."""
+    text = _SCRIPT_STYLE_RE.sub(" ", content)
+    text = _TAG_RE.sub(" ", text)
+    text = unescape(text)
+    text = _WS_RE.sub(" ", text).strip()
+    if len(text) > max_chars:
+        return text[:max_chars] + "..."
+    return text
+
+
+def html_title(content: str, fallback: str) -> str:
+    """The `<title>` text if present and non-empty, else the fallback."""
+    m = _TITLE_RE.search(content)
+    if m:
+        title = unescape(m.group(1)).strip()
+        if title:
+            return title
+    return fallback
 
 SYSTEM_PROMPT = """\
 You are a document tagger. Given a document's title, breadcrumb path, and content
@@ -149,17 +231,24 @@ def _tag_single_file(md_file: Path, source_dir: Path, taxonomy: dict,
                      model: str, timeout: int, force: bool,
                      backend: str = "claude-cli",
                      ollama_model: str = DEFAULT_OLLAMA_MODEL) -> dict:
-    """Tag a single file. Returns result dict for aggregation."""
+    """Tag a single file (markdown or HTML). Returns result dict for aggregation."""
     rel_path = str(md_file.relative_to(source_dir))
     content = md_file.read_text(encoding='utf-8')
+    is_html = md_file.suffix.lower() == ".html"
 
-    if has_tags(content) and not force:
-        return {"path": rel_path, "status": "skipped", "tags": []}
-
-    fields = read_frontmatter(content)
-    title = fields.get('title', md_file.stem)
-    breadcrumb = fields.get('breadcrumb', str(md_file.relative_to(source_dir).parent))
-    excerpt = get_content_excerpt(content)
+    if is_html:
+        if has_html_tags(content) and not force:
+            return {"path": rel_path, "status": "skipped", "tags": []}
+        title = html_title(content, md_file.stem)
+        breadcrumb = str(md_file.relative_to(source_dir).parent)
+        excerpt = get_html_excerpt(content)
+    else:
+        if has_tags(content) and not force:
+            return {"path": rel_path, "status": "skipped", "tags": []}
+        fields = read_frontmatter(content)
+        title = fields.get('title', md_file.stem)
+        breadcrumb = fields.get('breadcrumb', str(md_file.relative_to(source_dir).parent))
+        excerpt = get_content_excerpt(content)
 
     if not excerpt.strip():
         return {"path": rel_path, "status": "skipped", "tags": []}
@@ -171,17 +260,22 @@ def _tag_single_file(md_file: Path, source_dir: Path, taxonomy: dict,
         logger.error(f"Error tagging {rel_path}: {e}")
         return {"path": rel_path, "status": "error", "tags": []}
 
-    return {"path": rel_path, "status": "tagged", "tags": tags, "file": md_file, "content": content}
+    return {"path": rel_path, "status": "tagged", "tags": tags, "file": md_file,
+            "content": content, "is_html": is_html}
 
 
 def process_files(args):
     source_dir = Path(args.source)
     taxonomy = load_taxonomy(args.taxonomy)
 
-    # Collect markdown files. Hidden directories/files (.claude/, .git/, …) are
-    # never candidates — mirrors the wiki reader's dot-exclusion, so the tagger
-    # can't touch files no consumer will ever see.
+    # Collect candidate files. Markdown always; HTML explainers only when
+    # --include-html is set (opt-in — an unconditional html sweep would bulk-tag
+    # explainers unsupervised on the nightly job). Hidden directories/files
+    # (.claude/, .git/, …) are never candidates — mirrors the wiki reader's
+    # dot-exclusion, so the tagger can't touch files no consumer will ever see.
     md_files = sorted(source_dir.rglob("*.md"))
+    if args.include_html:
+        md_files = sorted(md_files + list(source_dir.rglob("*.html")))
     md_files = [f for f in md_files if ".excluded" not in f.parts]
     md_files = [
         f for f in md_files
@@ -194,7 +288,8 @@ def process_files(args):
     for pattern in args.exclude or []:
         md_files = [f for f in md_files if not fnmatch.fnmatch(str(f.relative_to(source_dir)), pattern)]
 
-    logger.info(f"Found {len(md_files)} markdown files in {source_dir}")
+    kind = "markdown + html" if args.include_html else "markdown"
+    logger.info(f"Found {len(md_files)} {kind} files in {source_dir}")
 
     if args.limit:
         md_files = md_files[:args.limit]
@@ -248,7 +343,8 @@ def process_files(args):
             if args.dry_run:
                 print(f"  {result['path']}: {tags}")
             else:
-                new_content = inject_tags(result["content"], tags)
+                inject = inject_html_tags if result.get("is_html") else inject_tags
+                new_content = inject(result["content"], tags)
                 result["file"].write_text(new_content, encoding='utf-8')
                 written_files.append(result["file"].resolve())
 
@@ -289,6 +385,9 @@ def main():
     parser.add_argument("--force", action="store_true", help="Re-tag files that already have tags")
     parser.add_argument("--limit", type=int, help="Max number of files to process")
     parser.add_argument("--pattern", help="Glob pattern to filter files (relative to source dir)")
+    parser.add_argument("--include-html", action="store_true",
+                        help="Also tag .html explainer files via a <meta name=\"keywords\"> "
+                             "tag in the head (opt-in; without it only *.md is touched).")
     parser.add_argument("--exclude", action="append", default=None, metavar="GLOB",
                         help="Glob (relative to source dir) to exclude; repeatable. "
                              "Hidden directories (.claude/, .git/, …) are always excluded.")
