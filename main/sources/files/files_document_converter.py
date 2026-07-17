@@ -128,7 +128,7 @@ class FilesDocumentConverter:
     def __build_url(self, document):
         file_path = document['fileFullPath']
 
-        if file_path.endswith('.md'):
+        if file_path.endswith(('.md', '.mdx')):
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     content = f.read()
