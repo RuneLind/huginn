@@ -133,6 +133,8 @@ class FilesDocumentReader:
             ".json": self.__read_text_file, # By some reason unstructured lib tries to read json files as ndjson and fails
             ".md": self.__read_text_file, # Read as plain text so converter can strip frontmatter delimiters intact
             ".markdown": self.__read_text_file, # Unstructured lib doesn't recognize .markdown extension (only .md)
+            ".mdx": self.__read_text_file, # Markdown + JSX components; read as plain text (frontmatter-tolerant), unstructured mangles JSX tags
+
         }
         self.default_reader = self.__read_file_by_unstructured_lib
 
