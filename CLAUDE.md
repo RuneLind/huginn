@@ -146,6 +146,17 @@ job last ran, how long it took, and whether it failed. Backed by JSONL files at
   `stage: "end"` folds to `running`, then `incomplete` past
   `INCOMPLETE_AFTER_SECONDS` (6h), with its duration dropped. A script killed
   after the reindex would otherwise fold to a tidy 15-minute success.
+- **`skipped` is not `succeeded`.** A reindex skipped because the API answered
+  409 exits 0, and huginn writes no record at all on that path (`try_begin_update`
+  returns False before the opening partial), so recording the phase as
+  `succeeded` would assert an index freshness the run never delivered — every
+  hour, for the hourly job where 409 is the likeliest outcome. Call sites pass
+  the literal `skipped` to `phase_end`. It is deliberately NOT a degradation
+  (another process is doing that exact work; alarming would train the reader to
+  ignore `degraded`): neutral beside real work, `skipped` when every phase was,
+  loses to any genuine failure, and excluded from `medianDurationSeconds`.
+  A phase with no status at all degrades the run — absence of an outcome is not
+  evidence of a good one.
 - **Correlation:** `POST /api/collections/{name}/update` takes an optional body
   `{runId, job, trigger}`, and the CLI adapter takes `--run-id/--job/--trigger`.
   Records sharing a `runId` are folded at read time, which is how a wrapping
