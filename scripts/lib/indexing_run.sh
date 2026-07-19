@@ -84,6 +84,22 @@ run_begin() {
     return 0
 }
 
+# run_variant <incremental|rebuild>
+#
+# Reclassify a run already in flight. x-feed only learns which kind of run it is
+# doing partway through: cleanup runs first, and only if it actually deleted
+# something does the script drop the collection and do a full rebuild instead of
+# an incremental update. The two differ by an order of magnitude, so a single
+# median over both is meaningless — the dashboard medians them separately, which
+# it can only do if the record says which one this was.
+run_variant() {
+    [ "$_IR_ACTIVE" = "1" ] || return 0
+    case "${1:-}" in
+        incremental|rebuild) _IR_VARIANT="$1" ;;
+    esac
+    return 0
+}
+
 # phase_begin <name> [fatal]
 #
 # `fatal` (1) means a failure of this phase fails the whole run; the default (0)

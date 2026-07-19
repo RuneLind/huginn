@@ -437,7 +437,7 @@ def _fold_group(run_id, records):
     folded = {"runId": run_id, "collection": records[0].get("collection")}
 
     # Script-side wins: it is the process that knows the job label and trigger.
-    for field in ("job", "trigger", "variant"):
+    for field in ("job", "trigger"):
         value = None
         for record in records:
             candidate = record.get(field)
@@ -448,6 +448,14 @@ def _fold_group(run_id, records):
                 break
         folded[field] = value
     folded.setdefault("trigger", None)
+
+    # `variant` is script-side too, but its OPENING record only carries a guess.
+    # x-feed cannot know whether it is doing an incremental update or a full
+    # rebuild until cleanup has run and reported what it deleted, so the closing
+    # record is the reclassified one and must outrank the partial that opened
+    # the run — otherwise every rebuild medians in with the incrementals it is
+    # an order of magnitude slower than.
+    folded["variant"] = _pick_variant(records)
 
     # huginn-side wins: only huginn reads the collection manifest.
     for field in ("documentCount", "chunkCount"):
@@ -477,6 +485,24 @@ def _fold_group(run_id, records):
     if any(r.get("backfilled") for r in records):
         folded["backfilled"] = True
     return folded
+
+
+def _pick_variant(records):
+    """Best `variant` in the group: a script's closing word beats its opening
+    guess, and either beats huginn's (which only ever infers)."""
+    def rank(record):
+        if record.get("source") != "script":
+            return 0
+        return 1 if record.get("stage") == "begin" else 2
+
+    best, best_rank = None, -1
+    for record in records:
+        value = record.get("variant")
+        if value is None:
+            continue
+        if rank(record) >= best_rank:
+            best, best_rank = value, rank(record)
+    return best
 
 
 def _merge_phases(records):

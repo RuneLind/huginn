@@ -16,7 +16,7 @@ import pytest
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HELPER = os.path.join(REPO_ROOT, "scripts", "lib", "indexing_run.sh")
 
-EXPORTED = ("run_begin", "phase_begin", "phase_end", "run_end")
+EXPORTED = ("run_begin", "run_variant", "phase_begin", "phase_end", "run_end")
 
 
 @pytest.fixture(scope="module")
@@ -89,7 +89,8 @@ PROJECT_DIR={REPO_ROOT!r}
 API_URL={api_url!r}
 HELPER={helper!r}
 if [ -f "${{HELPER:-}}" ] && . "$HELPER"; then :; else
-    run_begin(){{ :; }}; phase_begin(){{ :; }}; phase_end(){{ :; }}; run_end(){{ :; }}; RUN_ID=""
+    run_begin(){{ :; }}; run_variant(){{ :; }}; phase_begin(){{ :; }}
+    phase_end(){{ :; }}; run_end(){{ :; }}; RUN_ID=""
 fi
 """
     env = dict(os.environ, HUGINN_RUNS_DIR=str(runs_dir))
@@ -136,6 +137,43 @@ def test_a_dead_api_does_not_abort_the_job_and_still_records(tmp_path):
     assert {p["name"] for p in run["phases"]} == {"tag", "reindex"}
     # A failed non-fatal phase degrades the run; it does not fail it.
     assert run["status"] == "degraded"
+
+
+def test_a_run_can_be_reclassified_after_it_starts(tmp_path):
+    """x-feed only learns which kind of run it is doing partway through: cleanup
+    runs first, and only if it deleted something does the script drop the
+    collection and rebuild rather than update incrementally. The two differ by an
+    order of magnitude, so the record has to say which one this was."""
+    result = _run(
+        'run_begin c j scheduled || true\n'
+        'phase_begin cleanup 0; rc=0; true || rc=$?; phase_end "$rc" || true\n'
+        'run_variant rebuild || true\n'
+        'run_end "" || true\n',
+        tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+
+    sys.path.insert(0, REPO_ROOT)
+    from main.runtime.indexing_run_ledger import IndexingRunLedger
+    run = IndexingRunLedger(runs_dir=str(tmp_path)).recent("c", limit=5)[0]
+    assert run["variant"] == "rebuild"
+
+
+def test_reclassifying_rejects_a_variant_the_dashboard_cannot_median(tmp_path):
+    """The dashboard medians `incremental` and `rebuild` separately. A typo'd
+    third value would silently become its own bucket of one."""
+    result = _run(
+        'run_begin c j scheduled || true\n'
+        'run_variant nonsense || true\n'
+        'run_end "" || true\n',
+        tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+
+    sys.path.insert(0, REPO_ROOT)
+    from main.runtime.indexing_run_ledger import IndexingRunLedger
+    run = IndexingRunLedger(runs_dir=str(tmp_path)).recent("c", limit=5)[0]
+    assert run["variant"] == "incremental"
 
 
 def test_a_failed_phase_does_not_poison_every_later_phase(tmp_path):

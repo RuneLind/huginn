@@ -99,14 +99,31 @@ job last ran, how long it took, and whether it failed. Backed by JSONL files at
   and `loaded`. Rows are the union of ledger files and served collections; a
   collection this server does not serve appears with `loaded: false` rather than
   being hidden.
+- **Schedule routing:** `main/runtime/indexing_schedule.py` maps job → collections
+  by script basename. That table is **empty in this public repo by design** —
+  most of the scheduled collection names were never public and one is
+  customer-adjacent, which `CLAUDE.local.md` bans outright. The names live in
+  each private sub-repo's `scripts/schedule_routing.json`, discovered under
+  `huginn-*/scripts/`, mirroring the `graph_routing.json` precedent. No routing
+  file ⇒ `schedule: null`, the designed degradation. A plist whose
+  `StartCalendarInterval` is 24 entries at one minute reports
+  `{kind: "hourly"}` rather than the first entry's wall-clock time.
 - Writers: `KnowledgeStore.__finish_update` (the API path) and
   `collection_update_cmd_adapter.py` (the CLI fallback). Both emit a `reindex`
   phase. `try_begin_update` also appends an *opening* partial, so a server
   restarted mid-reindex leaves a trace instead of nothing.
-- **Script phases:** the daily shell jobs report their own phases via
-  `scripts/lib/indexing_run.sh` — `run_begin` / `phase_begin` / `phase_end` /
-  `run_end`. This is what makes mimir's ~51-minute tagging step visible; without
-  it the ledger reports the ~15-minute reindex for a job that blocks for ~76.
+- **Script phases:** all seven shell jobs report their own phases via
+  `scripts/lib/indexing_run.sh` — `run_begin` / `run_variant` / `phase_begin` /
+  `phase_end` / `run_end`. This is what makes the non-reindex work visible: the
+  anthropic job folds to ~110s whole-job against ~19s of reindex, and x-feed's
+  fetch/score phases were previously outside any record at all. Each converted
+  step is classified fatal or non-fatal explicitly — the scripts genuinely
+  differ, and wrapping them mechanically would silently change which failures
+  are fatal.
+  `run_variant` reclassifies a run already in flight, for x-feed: it only learns
+  whether it is doing an incremental update or a full rebuild after cleanup
+  reports what it deleted, and the two differ by an order of magnitude. The
+  closing record outranks the opening partial's guess.
   `run_end` POSTs to `POST /api/indexing/runs`, falling back to
   `python -m main.runtime.indexing_run_ledger append --file -` when the API is
   down. Never `>>` the JSONL from shell: macOS has no `flock(1)`, so a redirect

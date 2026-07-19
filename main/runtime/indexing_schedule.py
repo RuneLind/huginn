@@ -11,8 +11,16 @@ collections in three different shell syntaxes (``COLLECTION="mimir"``,
 ``COLLECTIONS=("wiki" "wiki-life")``, ``COLLECTIONS="${COLLECTIONS:-jira-issues}"``).
 Parsing that is more fragile than a ten-line table. Basename-keyed because the
 script directories are private sub-repos and gitignored.
+
+The table itself lives in those private sub-repos, not here, mirroring the
+``graph_routing.json`` precedent: each carries a ``scripts/schedule_routing.json``
+mapping script basename → collections. Five of the seven scheduled collection
+names were never public, and one of them is customer-adjacent, which this repo's
+own conventions ban outright. Absent routing files ⇒ ``schedule: null``, which is
+the designed degradation.
 """
 import glob
+import json
 import logging
 import os
 import plistlib
@@ -21,15 +29,43 @@ logger = logging.getLogger(__name__)
 
 LAUNCH_AGENTS_GLOB = os.path.expanduser("~/Library/LaunchAgents/com.huginn.*.plist")
 
-# script basename -> collections it reindexes
-SCRIPT_COLLECTIONS = {
-    "daily_mimir_update.sh": ["mimir"],
-    "daily_wiki_update.sh": ["wiki", "wiki-life"],
-    "daily_nav_wiki_update.sh": ["nav-wiki"],
-    "daily_capra_wiki_update.sh": ["capra-wiki"],
-    "daily_melosys_kode_wiki_update.sh": ["melosys-kode-wiki"],
-    "daily_anthropic_update.sh": ["anthropic-knowledge"],
-}
+_HERE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROUTING_GLOBS = (
+    os.path.join(_HERE, "huginn-*", "scripts", "schedule_routing.json"),
+    os.path.join(_HERE, "scripts", "schedule_routing.json"),
+)
+
+# Intentionally empty in the public repo — see the module docstring. A private
+# deployment supplies its own names through schedule_routing.json.
+SCRIPT_COLLECTIONS = {}
+
+
+def load_script_collections(globs=ROUTING_GLOBS):
+    """script basename -> collections, merged across the private routing files.
+
+    Best effort in the same sense as everything else here: an unreadable or
+    malformed routing file costs that file's schedules, never the endpoint.
+    """
+    mapping = dict(SCRIPT_COLLECTIONS)
+    for pattern in globs:
+        try:
+            paths = sorted(glob.glob(pattern))
+        except OSError:
+            continue
+        for path in paths:
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    data = json.load(handle)
+            except (OSError, ValueError):
+                logger.debug("Could not read schedule routing %s", path, exc_info=True)
+                continue
+            entries = data.get("scriptCollections")
+            if not isinstance(entries, dict):
+                continue
+            for script, collections in entries.items():
+                if isinstance(collections, list) and collections:
+                    mapping[script] = collections
+    return mapping
 
 
 def _schedule_from_plist(data):
@@ -43,11 +79,21 @@ def _schedule_from_plist(data):
         }
     if isinstance(calendar, list) and calendar:
         first = calendar[0]
+        hours = {e.get("Hour") for e in calendar if isinstance(e, dict)}
+        minutes = {e.get("Minute") for e in calendar if isinstance(e, dict)}
+        # x-feed is 24 entries at the same minute — hourly, expressed as a
+        # calendar array because StartInterval is load-time-relative and cannot
+        # be pinned to an offset. Reporting only calendar[0] would render that
+        # as "daily at 00:35", understating the cadence 24-fold and making its
+        # "next run" wrong for 23 hours out of every 24.
+        if len(minutes) == 1 and hours == set(range(24)):
+            return {"kind": "hourly", "minute": minutes.pop()}
         return {
             "kind": "calendar",
             "hour": first.get("Hour"),
             "minute": first.get("Minute"),
             "weekday": first.get("Weekday"),
+            "entries": len(calendar),
         }
     interval = data.get("StartInterval")
     if isinstance(interval, int):
@@ -65,6 +111,7 @@ def load_schedules(pattern=LAUNCH_AGENTS_GLOB):
     unreadable or every plist is malformed.
     """
     schedules = {}
+    script_collections = load_script_collections()
     try:
         paths = sorted(glob.glob(pattern))
     except OSError:
@@ -84,7 +131,7 @@ def load_schedules(pattern=LAUNCH_AGENTS_GLOB):
              if isinstance(a, str) and a.endswith(".sh")),
             None,
         )
-        collections = SCRIPT_COLLECTIONS.get(script)
+        collections = script_collections.get(script)
         if not collections:
             continue
 
