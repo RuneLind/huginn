@@ -23,6 +23,7 @@ from main.ingest.anthropic_summaries import (
     AnthropicSummaryIngestRequest,
     ingest_anthropic_summary,
 )
+from main.ingest.articles import ArticleIngestRequest, ingest_article
 from main.ingest.jira import JiraIngestRequest, ingest_jira
 from main.ingest.tiktok import TikTokIngestRequest, ingest_tiktok
 from main.ingest.x_articles import XArticleIngestRequest, ingest_x_article
@@ -161,6 +162,25 @@ INGEST_SOURCES: list[IngestSource] = [
         operation="Anthropic summary ingest",
         not_configured_detail="Anthropic summaries sources path not configured (--anthropic-summaries-sources-path)",
         response_fields=("file_path", "category", "summary"),
+        similar_query=lambda req, result: req.summary[:2000],
+        exclude_match=lambda req, doc: doc.get("url", "") == req.url,
+    ),
+    IngestSource(
+        name="article",
+        route_path="/api/articles/ingest",
+        request_model=ArticleIngestRequest,
+        ingest_fn=ingest_article,
+        path_kwarg="sources_path",
+        path_arg="--articles-sources-path",
+        path_env="ARTICLES_SOURCES_PATH",
+        path_help="Path to save pasted-article summary markdown files",
+        collection_arg="--articles-collection",
+        collection_env="ARTICLES_COLLECTION",
+        collection_default="article-summaries",
+        collection_help="Collection name for pasted-article summaries",
+        operation="Article ingest",
+        not_configured_detail="Articles sources path not configured (--articles-sources-path)",
+        response_fields=("file_path", "author", "category", "summary"),
         similar_query=lambda req, result: req.summary[:2000],
         exclude_match=lambda req, doc: doc.get("url", "") == req.url,
     ),

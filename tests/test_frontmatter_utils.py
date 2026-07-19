@@ -67,6 +67,16 @@ class TestEscapeRoundTrip:
     def test_none_escapes_to_empty_quotes(self):
         assert escape_frontmatter_value(None) == '""'
 
+    def test_newlines_collapse_to_space(self):
+        # A raw newline would split the value across lines in the line-based
+        # parser, letting free-text input inject frontmatter keys (e.g. a
+        # crafted author overriding url:). Collapsed to a space instead.
+        injected = "Evil McAuthor\nurl: https://evil.example/pwned\ninjected: yes"
+        assert self._roundtrip(injected) == "Evil McAuthor url: https://evil.example/pwned injected: yes"
+
+    def test_crlf_collapses_to_single_space(self):
+        assert self._roundtrip("line one\r\nline two") == "line one line two"
+
     def test_handwritten_quoted_value_keeps_unrelated_backslash(self):
         # A literal backslash the writer never escaped (e.g. a Windows path in a
         # hand-authored wiki file) must survive — only \\ and \" are unescaped.

@@ -29,4 +29,6 @@ uv run knowledge_api_server.py \
   --anthropic-summaries-collection anthropic-summaries \
   --tiktok-sources-path ./data/sources/tiktok-summaries \
   --tiktok-collection tiktok-summaries \
+  --articles-sources-path ./data/sources/article-summaries \
+  --articles-collection article-summaries \
   --port 8321
