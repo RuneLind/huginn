@@ -3,9 +3,9 @@
 # indexing_run.sh — observational helpers for the daily indexing scripts.
 #
 # The daily scripts spend most of their wall clock OUTSIDE the reindex huginn
-# can see (mimir: ~51 min tagging vs ~15 min reindex). These helpers let a
-# script report its own phases, so the run ledger records the whole job instead
-# of the last quarter of it.
+# can see — a wiki job's tagging step has run 3x longer than its own reindex.
+# These helpers let a script report its own phases, so the run ledger records
+# the whole job instead of the last quarter of it.
 #
 # Sourced from the private sub-repos, all of which compute PROJECT_DIR as the
 # huginn root:
@@ -86,8 +86,8 @@ run_begin() {
 
 # run_variant <incremental|rebuild>
 #
-# Reclassify a run already in flight. x-feed only learns which kind of run it is
-# doing partway through: cleanup runs first, and only if it actually deleted
+# Reclassify a run already in flight. The hourly feed job only learns which kind
+# of run it is doing partway through: cleanup runs first, and only if it deleted
 # something does the script drop the collection and do a full rebuild instead of
 # an incremental update. The two differ by an order of magnitude, so a single
 # median over both is meaningless — the dashboard medians them separately, which
@@ -123,7 +123,7 @@ phase_begin() {
 # Prescribed call shape, because under `set -e` an unguarded failing step aborts
 # before phase_end is ever reached:
 #
-#     phase_begin tag; rc=0; tag_mimir || rc=$?; phase_end "$rc" || true
+#     phase_begin tag; rc=0; tag_pages || rc=$?; phase_end "$rc" || true
 phase_end() {
     [ "$_IR_ACTIVE" = "1" ] || return 0
     [ -n "$_IR_PHASE_NAME" ] || return 0

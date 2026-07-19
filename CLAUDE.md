@@ -115,13 +115,14 @@ job last ran, how long it took, and whether it failed. Backed by JSONL files at
 - **Script phases:** all seven shell jobs report their own phases via
   `scripts/lib/indexing_run.sh` — `run_begin` / `run_variant` / `phase_begin` /
   `phase_end` / `run_end`. This is what makes the non-reindex work visible: the
-  anthropic job folds to ~110s whole-job against ~19s of reindex, and x-feed's
+  fetch-then-index jobs fold to a whole-job duration several times their
+  reindex (one measured 110s against 19s), and the hourly feed job's
   fetch/score phases were previously outside any record at all. Each converted
   step is classified fatal or non-fatal explicitly — the scripts genuinely
   differ, and wrapping them mechanically would silently change which failures
   are fatal.
-  `run_variant` reclassifies a run already in flight, for x-feed: it only learns
-  whether it is doing an incremental update or a full rebuild after cleanup
+  `run_variant` reclassifies a run already in flight, for the hourly feed job:
+  it only learns whether it is an incremental update or a full rebuild after cleanup
   reports what it deleted, and the two differ by an order of magnitude. The
   closing record outranks the opening partial's guess.
   `run_end` POSTs to `POST /api/indexing/runs`, falling back to
