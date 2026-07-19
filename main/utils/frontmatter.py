@@ -22,8 +22,13 @@ def escape_frontmatter_value(value) -> str:
     Symmetric with the unescaping in ``_parse_block`` so a value containing a
     double-quote round-trips intact. Shared by every markdown ingest writer so
     they can't drift into writing unescaped (or differently-escaped) YAML.
+
+    Newlines are collapsed to spaces: the parser is line-based, so a raw
+    newline would split the value and let free-text input (e.g. an article
+    ``author``) inject arbitrary frontmatter keys or override ``url:``.
     """
     text = "" if value is None else str(value)
+    text = re.sub(r"[\r\n]+", " ", text)
     return '"' + text.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
