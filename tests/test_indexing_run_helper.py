@@ -139,6 +139,48 @@ def test_a_dead_api_does_not_abort_the_job_and_still_records(tmp_path):
     assert run["status"] == "degraded"
 
 
+def test_a_skipped_phase_is_not_a_succeeded_one(tmp_path):
+    """A reindex skipped on 409 exits 0. Recording that as `succeeded` asserts an
+    index freshness the run never delivered — and at hourly cadence 409 is the
+    single most likely outcome, so the dashboard would repeat that lie all day."""
+    result = _run(
+        'run_begin c j scheduled || true\n'
+        'phase_begin reindex 1; rc=0\n'
+        'phase_end skipped || true\n'
+        'run_end "" || true\n',
+        tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+
+    sys.path.insert(0, REPO_ROOT)
+    from main.runtime.indexing_run_ledger import IndexingRunLedger
+    run = IndexingRunLedger(runs_dir=str(tmp_path)).recent("c", limit=5)[0]
+    assert [p["status"] for p in run["phases"]] == ["skipped"]
+    # Every phase skipped ⇒ the run did nothing, and says so.
+    assert run["status"] == "skipped"
+
+
+def test_a_skipped_phase_does_not_alarm_alongside_real_work(tmp_path):
+    """Skipping is not a degradation: another process is already doing that
+    work. Alarming on it would train the reader to ignore `degraded`."""
+    result = _run(
+        'run_begin c j scheduled || true\n'
+        'phase_begin fetch 1; rc=0; true || rc=$?; phase_end "$rc" || true\n'
+        'phase_begin reindex 1; rc=0\n'
+        'phase_end skipped || true\n'
+        'run_end "" || true\n',
+        tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+
+    sys.path.insert(0, REPO_ROOT)
+    from main.runtime.indexing_run_ledger import IndexingRunLedger
+    run = IndexingRunLedger(runs_dir=str(tmp_path)).recent("c", limit=5)[0]
+    assert run["status"] == "succeeded"
+    phases = {p["name"]: p["status"] for p in run["phases"]}
+    assert phases == {"fetch": "succeeded", "reindex": "skipped"}
+
+
 def test_a_run_can_be_reclassified_after_it_starts(tmp_path):
     """x-feed only learns which kind of run it is doing partway through: cleanup
     runs first, and only if it deleted something does the script drop the

@@ -58,7 +58,8 @@ _COLLECTION_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 VALID_TRIGGERS = ("scheduled", "manual", "cli", "unknown")
 VALID_VARIANTS = ("incremental", "rebuild")
-VALID_STATUSES = ("succeeded", "degraded", "failed", "unknown", "running", "incomplete")
+VALID_STATUSES = ("succeeded", "degraded", "failed", "unknown", "running",
+                  "incomplete", "skipped")
 
 # A run whose opening record never got a matching closing record from the same
 # writer is `running` until this age, then `incomplete`. Well clear of the
@@ -107,22 +108,36 @@ def rollup_status(phases):
     """Run-level status from phase statuses.
 
     ``failed`` if any phase marked ``fatal`` failed, ``degraded`` if any
-    non-fatal phase failed (or any phase is itself degraded), else ``succeeded``.
+    non-fatal phase failed (or any phase is itself degraded or unknown),
+    ``skipped`` if every phase was skipped, else ``succeeded``.
+
+    ``skipped`` is deliberately NOT a degradation. A reindex skipped on 409
+    means another process is already doing that exact work — expected several
+    times a day for an hourly job — and alarming on it would train the reader to
+    ignore `degraded`. It just must not read as `succeeded`, which would assert
+    an index freshness the run did not deliver.
     """
     if not phases:
         return "unknown"
     degraded = False
+    skipped = 0
     for phase in phases:
         status = phase.get("status")
         if status == "failed":
             if phase.get("fatal"):
                 return "failed"
             degraded = True
-        elif status == "degraded":
+        elif status in ("degraded", "unknown"):
             degraded = True
-        elif status == "unknown":
+        elif status == "skipped":
+            skipped += 1
+        elif status != "succeeded":
+            # A phase with no status, or one this version does not know, is not
+            # evidence of success. Say so rather than rounding it up.
             degraded = True
-    return "degraded" if degraded else "succeeded"
+    if degraded:
+        return "degraded"
+    return "skipped" if skipped == len(phases) else "succeeded"
 
 
 class IndexingRunLedger:
@@ -553,7 +568,9 @@ def _merge_phases(records):
     return [merged[key][0] for key in order]
 
 
-_PHASE_STATUS_ORDER = ("failed", "degraded", "unknown", "succeeded")
+# Worst first. `skipped` sits just above `succeeded`: it did less work, so it
+# wins a disagreement against a copy claiming success, but it is not a fault.
+_PHASE_STATUS_ORDER = ("failed", "degraded", "unknown", "skipped", "succeeded")
 
 
 def _worse_phase_status(*statuses):

@@ -523,3 +523,46 @@ class TestPhaseMerging:
         assert reindex["durationSeconds"] == 13
         assert reindex["status"] == "failed"
         assert folded["status"] == "failed"
+
+
+class TestSkippedRollup:
+    """`skipped` distinguishes "did not run" from "ran fine". A reindex skipped
+    on 409 exits 0, and rolling that up as `succeeded` asserts a freshness the
+    run never delivered."""
+
+    def test_all_phases_skipped_is_a_skipped_run(self):
+        assert rollup_status([{"name": "reindex", "status": "skipped", "fatal": True}]) \
+            == "skipped"
+
+    def test_skipping_beside_real_work_is_not_a_degradation(self):
+        phases = [{"name": "fetch", "status": "succeeded"},
+                  {"name": "reindex", "status": "skipped", "fatal": True}]
+        assert rollup_status(phases) == "succeeded"
+
+    def test_a_real_failure_still_outranks_a_skip(self):
+        phases = [{"name": "fetch", "status": "failed", "fatal": True},
+                  {"name": "reindex", "status": "skipped", "fatal": True}]
+        assert rollup_status(phases) == "failed"
+
+    def test_a_statusless_phase_is_not_rounded_up_to_success(self):
+        """A phase with no outcome is not evidence of one. Previously it fell
+        through the elif chain and the run reported `succeeded`."""
+        assert rollup_status([{"name": "reindex"}]) == "degraded"
+
+    def test_a_skip_wins_a_disagreement_against_a_claimed_success(self):
+        """Pessimistic merge: the copy that did less work wins, but a skip is
+        not escalated to a failure."""
+        script = {"collection": "c", "runId": "r", "source": "script",
+                  "phases": [{"name": "reindex", "status": "skipped"}]}
+        huginn = {"collection": "c", "runId": "r", "source": "huginn",
+                  "phases": [{"name": "reindex", "status": "succeeded"}]}
+        folded = fold_records([script, huginn])[0]
+        assert folded["phases"][0]["status"] == "skipped"
+
+    def test_a_skipped_run_is_excluded_from_the_median(self):
+        """Its duration covers a job that never reindexed, so medianing it in
+        would understate how long a real incremental takes."""
+        from main.routes.collections import _median_by_variant
+        runs = [{"durationSeconds": 10, "status": "succeeded", "variant": "incremental"},
+                {"durationSeconds": 2, "status": "skipped", "variant": "incremental"}]
+        assert _median_by_variant(runs) == {"incremental": 10}

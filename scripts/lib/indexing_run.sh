@@ -118,12 +118,18 @@ phase_begin() {
     return 0
 }
 
-# phase_end <exit-code> [json-detail]
+# phase_end <exit-code|skipped> [json-detail]
 #
 # Prescribed call shape, because under `set -e` an unguarded failing step aborts
 # before phase_end is ever reached:
 #
 #     phase_begin tag; rc=0; tag_pages || rc=$?; phase_end "$rc" || true
+#
+# The literal `skipped` records a phase that did not run at all. Exit code 0 is
+# NOT the same thing: a reindex skipped because the API answered 409 (another
+# process already rebuilding) exits 0, and recording that as `succeeded` would
+# assert an index freshness the run never delivered — a lie the dashboard would
+# repeat every hour for the hourly feed job.
 phase_end() {
     [ "$_IR_ACTIVE" = "1" ] || return 0
     [ -n "$_IR_PHASE_NAME" ] || return 0
@@ -131,7 +137,9 @@ phase_end() {
     now="$(date +%s)" || now="$_IR_PHASE_START"
     duration=$((now - _IR_PHASE_START))
     [ "$duration" -ge 0 ] || duration=0
-    if [ "$rc_in" = "0" ]; then
+    if [ "$rc_in" = "skipped" ]; then
+        status="skipped"
+    elif [ "$rc_in" = "0" ]; then
         status="succeeded"
     elif [ "$_IR_PHASE_FATAL" = "1" ]; then
         status="failed"
