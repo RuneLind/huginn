@@ -467,11 +467,7 @@ def _fold_group(run_id, records):
     folded["finishedAt"] = _iso(max(finishes)) if finishes else None
     folded["durationSeconds"] = _duration(folded["startedAt"], folded["finishedAt"])
 
-    phases = []
-    for record in records:
-        for phase in record.get("phases") or []:
-            if isinstance(phase, dict):
-                phases.append(phase)
+    phases = _merge_phases(records)
     folded["phases"] = phases
     folded["status"] = rollup_status(phases) if phases else _worst_status(records)
 
@@ -481,6 +477,56 @@ def _fold_group(run_id, records):
     if any(r.get("backfilled") for r in records):
         folded["backfilled"] = True
     return folded
+
+
+def _merge_phases(records):
+    """Union the phase lists, but only ONE phase per name.
+
+    Both sides legitimately report a `reindex` phase for the same work: huginn
+    times the rebuild, the script times trigger-plus-poll around it. Appending
+    both leaves a phase list whose durations sum to more than the run itself (a
+    real 26s run folded to 13s + 16s of "reindex"). huginn's copy wins where it
+    exists — it measures the rebuild rather than the wait for it — and the
+    script's survives on the API-down path where huginn never wrote a record.
+    """
+    merged = {}
+    order = []
+    for record in records:
+        from_huginn = record.get("source") != "script"
+        for phase in record.get("phases") or []:
+            if not isinstance(phase, dict):
+                continue
+            name = phase.get("name")
+            if name is None:
+                order.append(len(merged))
+                merged[len(merged)] = (phase, from_huginn)
+                continue
+            if name not in merged:
+                order.append(name)
+                merged[name] = (phase, from_huginn)
+                continue
+            existing, existing_from_huginn = merged[name]
+            winner = phase if (from_huginn and not existing_from_huginn) else existing
+            # Duration and detail come from the winner, but the STATUS is the
+            # worse of the two. huginn reporting a clean rebuild must not erase
+            # the script's report that its own wait around that rebuild failed —
+            # in a ledger built to surface failures, a disagreement resolves
+            # pessimistically.
+            winner = dict(winner)
+            winner["status"] = _worse_phase_status(existing.get("status"),
+                                                   phase.get("status"))
+            merged[name] = (winner, existing_from_huginn or from_huginn)
+    return [merged[key][0] for key in order]
+
+
+_PHASE_STATUS_ORDER = ("failed", "degraded", "unknown", "succeeded")
+
+
+def _worse_phase_status(*statuses):
+    for candidate in _PHASE_STATUS_ORDER:
+        if candidate in statuses:
+            return candidate
+    return next((s for s in statuses if s), None)
 
 
 def _worst_status(records):

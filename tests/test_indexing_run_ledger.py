@@ -447,3 +447,68 @@ class TestUnclosedRuns:
             "phases": [{"name": "tag", "status": "succeeded"}],
         }], now=datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc))[0]
         assert closed["status"] == "succeeded"
+
+
+class TestPhaseMerging:
+    """Both sides report a `reindex` phase for the same work — huginn times the
+    rebuild, the script times trigger-plus-poll around it. Observed live on the
+    2026-07-19 09:15 mimir run: a 26-second run folded to 13s + 16s of reindex."""
+
+    def _script(self, **extra):
+        record = {
+            "collection": "c", "runId": "shared", "source": "script",
+            "startedAt": "2026-07-19T07:15:05Z", "finishedAt": "2026-07-19T07:15:31Z",
+            "phases": [
+                {"name": "tag", "status": "succeeded", "durationSeconds": 10},
+                {"name": "reindex", "status": "succeeded", "durationSeconds": 16,
+                 "fatal": True},
+            ],
+        }
+        record.update(extra)
+        return record
+
+    def _huginn(self):
+        return {
+            "collection": "c", "runId": "shared", "source": "huginn",
+            "startedAt": "2026-07-19T07:15:15Z", "finishedAt": "2026-07-19T07:15:29Z",
+            "phases": [{"name": "reindex", "status": "succeeded",
+                        "durationSeconds": 13, "fatal": True}],
+        }
+
+    def test_a_phase_reported_by_both_sides_appears_once(self):
+        folded = fold_records([self._script(), self._huginn()])[0]
+        names = [p["name"] for p in folded["phases"]]
+        assert names.count("reindex") == 1
+        # Phase durations must not sum past the run's own duration.
+        assert sum(p["durationSeconds"] for p in folded["phases"]) <= \
+            folded["durationSeconds"]
+
+    def test_huginns_copy_wins_because_it_times_the_rebuild(self):
+        folded = fold_records([self._script(), self._huginn()])[0]
+        reindex = next(p for p in folded["phases"] if p["name"] == "reindex")
+        assert reindex["durationSeconds"] == 13
+
+    def test_arrival_order_does_not_change_the_winner(self):
+        folded = fold_records([self._huginn(), self._script()])[0]
+        reindex = next(p for p in folded["phases"] if p["name"] == "reindex")
+        assert reindex["durationSeconds"] == 13
+
+    def test_the_scripts_copy_survives_when_huginn_wrote_nothing(self):
+        """The API-down path: the CLI does the rebuild and huginn's store never
+        sees it, so the script's phase is the only record of the reindex."""
+        folded = fold_records([self._script()])[0]
+        reindex = next(p for p in folded["phases"] if p["name"] == "reindex")
+        assert reindex["durationSeconds"] == 16
+
+    def test_a_failed_script_phase_is_not_masked_by_huginns_copy(self):
+        """huginn's copy wins on duration, but a disagreement on STATUS resolves
+        pessimistically — a clean rebuild must not erase the script's report that
+        its wait around that rebuild failed."""
+        script = self._script()
+        script["phases"][1] = {"name": "reindex", "status": "failed",
+                               "durationSeconds": 16, "fatal": True}
+        folded = fold_records([script, self._huginn()])[0]
+        reindex = next(p for p in folded["phases"] if p["name"] == "reindex")
+        assert reindex["durationSeconds"] == 13
+        assert reindex["status"] == "failed"
+        assert folded["status"] == "failed"
