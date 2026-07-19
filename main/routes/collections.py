@@ -3,8 +3,13 @@ import json
 import logging
 import os
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from datetime import datetime, timezone
+from statistics import median
 
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+
+from main.runtime.indexing_run_ledger import VALID_TRIGGERS, IndexingRunLedger
+from main.runtime.indexing_schedule import load_schedules
 from main.runtime.knowledge_store import KnowledgeStore, get_store, run_collection_update
 
 logger = logging.getLogger(__name__)
@@ -172,16 +177,53 @@ def get_document(collection: str, doc_id: str, store: KnowledgeStore = Depends(g
         raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
 
 
+async def _optional_correlation(request: Request) -> dict:
+    """Parse the optional {runId, job, trigger, variant} body of POST /update.
+
+    Existing callers (the launchd shell scripts today) send no body and no
+    Content-Type at all, so anything unparseable is treated as "no correlation
+    supplied" rather than a 400 — backward compatibility of this endpoint is
+    mandatory in both directions.
+    """
+    try:
+        raw = await request.body()
+    except Exception:
+        return {}
+    if not raw:
+        return {}
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(body, dict):
+        return {}
+    trigger = body.get("trigger")
+    return {
+        "run_id": body.get("runId") or None,
+        "job": body.get("job") or None,
+        "trigger": trigger if trigger in VALID_TRIGGERS else None,
+        "variant": body.get("variant") or None,
+    }
+
+
 @router.post("/api/collections/{name}/update")
-def update_collection(
+async def update_collection(
     name: str,
+    request: Request,
     background_tasks: BackgroundTasks,
     store: KnowledgeStore = Depends(get_store),
 ):
     if not store.has_collection(name):
         raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
 
-    if not store.try_begin_update(name):
+    correlation = await _optional_correlation(request)
+    if not store.try_begin_update(
+        name,
+        run_id=correlation.get("run_id"),
+        job=correlation.get("job"),
+        trigger=correlation.get("trigger"),
+        variant=correlation.get("variant") or "incremental",
+    ):
         raise HTTPException(
             status_code=409, detail=f"An update for collection '{name}' is already in progress"
         )
@@ -201,3 +243,96 @@ def collection_update_status(name: str, store: KnowledgeStore = Depends(get_stor
         raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
 
     return store.get_update_status(name)
+
+
+def _elapsed_seconds(started_at: str | None) -> int | None:
+    if not started_at:
+        return None
+    try:
+        start = datetime.fromisoformat(started_at)
+    except ValueError:
+        return None
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    return max(0, int((datetime.now(timezone.utc) - start).total_seconds()))
+
+
+def _median_by_variant(runs: list[dict]) -> dict:
+    """Median duration per variant. Incremental and rebuild runs differ by an
+    order of magnitude, so a single pooled median would track the mix rather than
+    any real drift in either."""
+    buckets: dict[str, list] = {}
+    for run in runs:
+        duration = run.get("durationSeconds")
+        if duration is None or run.get("status") == "failed":
+            continue
+        buckets.setdefault(run.get("variant") or "incremental", []).append(duration)
+    return {variant: int(median(values)) for variant, values in buckets.items() if values}
+
+
+@router.get("/api/indexing/jobs")
+def indexing_jobs(
+    history: int = Query(20, ge=0, le=500, description="History entries per collection"),
+    store: KnowledgeStore = Depends(get_store),
+):
+    """Per-collection indexing run overview: live status, last run, history, schedule.
+
+    Rows are the UNION of collections with a ledger file and collections this
+    server currently serves. Iterating only loaded collections would hide every
+    collection this process does not happen to serve (the whole Jira / Confluence
+    / Notion backfill); iterating only ledger files would advertise collections
+    huginn cannot answer searches for. Rows the server does not serve are marked
+    ``loaded: false`` instead of being dropped.
+    """
+    ledger = IndexingRunLedger()
+    try:
+        ledger_collections = set(ledger.collections())
+    except OSError:
+        ledger_collections = set()
+    loaded = set(store.collection_names())
+    try:
+        schedules = load_schedules()
+    except Exception:
+        # A missing/unreadable LaunchAgents dir costs the "schedule" field, not
+        # the endpoint. The run history is the part that matters here.
+        logger.warning("Could not read launchd schedules", exc_info=True)
+        schedules = {}
+
+    jobs = []
+    for name in sorted(ledger_collections | loaded):
+        try:
+            runs = ledger.recent(name, limit=max(history, 50))
+        except Exception:
+            logger.warning("Could not read run ledger for %s", name, exc_info=True)
+            runs = []
+
+        state = store.get_update_status(name) if name in loaded else None
+        current = None
+        if state and state.get("status") == "running":
+            current = {
+                "status": "running",
+                "startedAt": state.get("startedAt"),
+                "elapsedSeconds": _elapsed_seconds(state.get("startedAt")),
+            }
+
+        schedule_entry = schedules.get(name) or {}
+        jobs.append({
+            "collection": name,
+            "loaded": name in loaded,
+            "job": schedule_entry.get("job"),
+            "schedule": schedule_entry.get("schedule"),
+            "current": current,
+            "lastRun": runs[-1] if runs else None,
+            "history": [
+                {
+                    "runId": run.get("runId"),
+                    "startedAt": run.get("startedAt"),
+                    "durationSeconds": run.get("durationSeconds"),
+                    "status": run.get("status"),
+                    "variant": run.get("variant"),
+                }
+                for run in runs[-history:]
+            ] if history else [],
+            "medianDurationSeconds": _median_by_variant(runs),
+        })
+    return {"jobs": jobs}

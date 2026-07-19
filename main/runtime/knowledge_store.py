@@ -17,9 +17,33 @@ from main.indexes.indexer_factory import (
     load_search_indexer,
 )
 from main.persisters.disk_persister import DiskPersister
+from main.runtime.indexing_run_ledger import IndexingRunLedger, mint_run_id
 from main.utils.frontmatter import parse_tags
 
 logger = logging.getLogger(__name__)
+
+
+def _to_ledger_ts(value):
+    """Normalize an internal isoformat timestamp to the ledger's ...Z form."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value).astimezone(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+    except ValueError:
+        return value
+
+
+def _duration_seconds(started_at, finished_at):
+    if not started_at or not finished_at:
+        return None
+    try:
+        start = datetime.fromisoformat(started_at)
+        finish = datetime.fromisoformat(finished_at)
+    except ValueError:
+        return None
+    return max(0, int((finish - start).total_seconds()))
 
 
 class KnowledgeStore:
@@ -51,6 +75,14 @@ class KnowledgeStore:
         # collection_name -> {status, startedAt, finishedAt, error}; guarded by _lock.
         # The "running" status doubles as a per-collection rebuild mutex (H4).
         self._update_states = {}
+        # collection_name -> {runId, job, trigger}; guarded by _lock. Deliberately
+        # NOT stored in _update_states: (a) __finish_update REPLACES that dict
+        # wholesale rather than mutating it, so anything stashed there is dropped
+        # before the ledger record is built, and (b) get_update_status returns
+        # {"collection": name, **state}, so extra keys would leak onto the public
+        # GET /api/collections/{name}/update-status response, which has an
+        # exact-dict-equality test and an external consumer.
+        self._update_correlation = {}
 
     def load_collections(self, collection_names, data_path="./data/collections",
                          faiss_index_name=None, extra_graph_paths=None,
@@ -126,7 +158,8 @@ class KnowledgeStore:
         self._load_knowledge_graph(extra_paths=self._extra_graph_paths)
         logger.info(f"Collection {collection_name} reloaded ({searcher.indexer.get_size()} embeddings)")
 
-    def try_begin_update(self, collection_name):
+    def try_begin_update(self, collection_name, run_id=None, job=None, trigger=None,
+                         variant="incremental"):
         """Reserve the rebuild slot for a collection.
 
         Returns False if an update is already running for it (the caller should
@@ -134,16 +167,29 @@ class KnowledgeStore:
         slot is released by mark_update_succeeded / mark_update_failed once the
         background task finishes. Acts as the per-collection rebuild mutex (H4),
         so concurrent updates can't race on disk and clobber each other.
+
+        ``run_id``/``job``/``trigger`` are the correlation channel: a caller that
+        already owns a run id (a launchd shell script wrapping tag+reindex) passes
+        it so its own ledger record and huginn's fold into a single run. Absent
+        one, huginn mints its own. These live in ``_update_correlation``, never in
+        ``_update_states`` — see the comment on that field.
         """
         with self._lock:
             state = self._update_states.get(collection_name)
             if state and state.get("status") == "running":
                 return False
+            started_at = self.__now()
             self._update_states[collection_name] = {
                 "status": "running",
-                "startedAt": self.__now(),
+                "startedAt": started_at,
                 "finishedAt": None,
                 "error": None,
+            }
+            self._update_correlation[collection_name] = {
+                "runId": run_id or mint_run_id(collection_name, started_at),
+                "job": job,
+                "trigger": trigger or "manual",
+                "variant": variant or "incremental",
             }
             return True
 
@@ -154,14 +200,71 @@ class KnowledgeStore:
         self.__finish_update(collection_name, "failed", str(error))
 
     def __finish_update(self, collection_name, status, error):
+        # Everything that touches shared state happens under the lock; the ledger
+        # write and the manifest read happen after it is released. This lock is
+        # the same one get_searchers() takes on the search hot path, so file I/O
+        # inside it would stall every concurrent search for its duration. Same
+        # split _build_tag_counts and _load_knowledge_graph already use.
         with self._lock:
             started_at = self._update_states.get(collection_name, {}).get("startedAt")
+            finished_at = self.__now()
             self._update_states[collection_name] = {
                 "status": status,
                 "startedAt": started_at,
-                "finishedAt": self.__now(),
+                "finishedAt": finished_at,
                 "error": error,
             }
+            correlation = self._update_correlation.pop(collection_name, None) or {}
+
+        self.__record_run(collection_name, status, error, started_at, finished_at, correlation)
+
+    def __record_run(self, collection_name, status, error, started_at, finished_at, correlation):
+        """Append the run to the durable ledger. Never fails the update itself."""
+        try:
+            phase = {
+                "name": "reindex",
+                "status": "succeeded" if status == "succeeded" else "failed",
+                "durationSeconds": _duration_seconds(started_at, finished_at),
+                # The reindex is the one phase whose failure means the run failed;
+                # script-side phases (tagging) only degrade it.
+                "fatal": True,
+            }
+            record = {
+                "runId": correlation.get("runId") or mint_run_id(collection_name, started_at),
+                "collection": collection_name,
+                "job": correlation.get("job"),
+                "trigger": correlation.get("trigger") or "manual",
+                "variant": correlation.get("variant") or "incremental",
+                "startedAt": _to_ledger_ts(started_at),
+                "finishedAt": _to_ledger_ts(finished_at),
+                "durationSeconds": phase["durationSeconds"],
+                "status": "succeeded" if status == "succeeded" else "failed",
+                "phases": [phase],
+                "error": error,
+                "source": "huginn",
+            }
+            if status == "succeeded":
+                counts = self.__manifest_counts(collection_name)
+                record["documentCount"] = counts.get("numberOfDocuments")
+                record["chunkCount"] = counts.get("numberOfChunks")
+            IndexingRunLedger().append(record)
+        except Exception:
+            logger.warning("Could not write indexing run ledger record for %s",
+                           collection_name, exc_info=True)
+
+    def __manifest_counts(self, collection_name):
+        """Document/chunk counts from the manifest, or empty if it is missing.
+
+        A missing manifest is expected rather than exceptional: the failure path
+        never rewrote it, and collection creation removes the whole folder when it
+        reads zero documents.
+        """
+        try:
+            return json.loads(
+                self.disk_persister.read_text_file(f"{collection_name}/manifest.json")
+            )
+        except Exception:
+            return {}
 
     def get_update_status(self, collection_name):
         with self._lock:

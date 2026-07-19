@@ -86,6 +86,44 @@ uv run scripts/knowledge_graph/extract_entities_llm.py --collection <collection-
 - Tests: `.venv/bin/python -m pytest tests/`
 - Detailed docs in `docs/` — check there for design decisions, architecture, and plans
 
+## Indexing run ledger
+
+Durable per-collection history of indexing runs, so a dashboard can show when each
+job last ran, how long it took, and whether it failed. Backed by JSONL files at
+`data/state/runs/<collection>.jsonl` (gitignored), written by
+`main/runtime/indexing_run_ledger.py`.
+
+- Read it over HTTP: `GET /api/indexing/jobs` — per collection returns `current`
+  (live status + elapsed), `lastRun`, `history`, `medianDurationSeconds` split by
+  variant, `schedule` (from the installed `~/Library/LaunchAgents/com.huginn.*.plist`),
+  and `loaded`. Rows are the union of ledger files and served collections; a
+  collection this server does not serve appears with `loaded: false` rather than
+  being hidden.
+- Writers: `KnowledgeStore.__finish_update` (the API path) and
+  `collection_update_cmd_adapter.py` (the CLI fallback). Both emit a `reindex`
+  phase. Shell scripts can append their own phases via
+  `python -m main.runtime.indexing_run_ledger append --file -`.
+- **Correlation:** `POST /api/collections/{name}/update` takes an optional body
+  `{runId, job, trigger}`, and the CLI adapter takes `--run-id/--job/--trigger`.
+  Records sharing a `runId` are folded at read time, which is how a wrapping
+  script's tagging phase and huginn's reindex phase become one run. Passing no
+  body is still valid and unchanged.
+- `HUGINN_RUNS_DIR` overrides the ledger directory (the test suite points it at a
+  tmp dir).
+- Locking is load-bearing: take the flock on `<collection>.lock` BEFORE opening
+  the JSONL, never cache the data fd. Compaction swaps the inode via `os.replace`,
+  so an fd opened before the lock writes into an unlinked inode and the record is
+  lost silently. `tests/test_indexing_run_ledger.py` has a test that fails if this
+  ordering is inverted.
+
+One-off backfill from the existing `logs/daily_*.log` files (already run; it is
+idempotent, keyed on `runId`):
+
+```sh
+.venv/bin/python scripts/backfill_indexing_runs.py --dry-run   # summary only
+.venv/bin/python scripts/backfill_indexing_runs.py
+```
+
 ## Running the API server
 
 Local dev uses a personal `start.sh` (gitignored) that launches `knowledge_api_server.py` with the user's full set of collections and `KNOWLEDGE_GRAPH_PATH` / `JIRA_GRAPH_PATH` env vars. It's the canonical record of which collections are live and which graph JSONs auto-load — see `start.sh.example` for the template. To run a slimmer subset manually:
