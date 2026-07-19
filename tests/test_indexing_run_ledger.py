@@ -500,6 +500,17 @@ class TestPhaseMerging:
         reindex = next(p for p in folded["phases"] if p["name"] == "reindex")
         assert reindex["durationSeconds"] == 16
 
+    def test_winning_copy_borrows_a_duration_it_does_not_have(self):
+        """The CLI adapter writes a reindex phase with no duration at all. Seen
+        live on the API-down dry-run of daily_capra_wiki_update.sh: preferring
+        huginn's copy left the phase timeless inside a timed 9-second run.
+        Preference decides WHICH copy wins, never whether data is dropped."""
+        huginn = self._huginn()
+        del huginn["phases"][0]["durationSeconds"]
+        folded = fold_records([self._script(), huginn])[0]
+        reindex = next(p for p in folded["phases"] if p["name"] == "reindex")
+        assert reindex["durationSeconds"] == 16
+
     def test_a_failed_script_phase_is_not_masked_by_huginns_copy(self):
         """huginn's copy wins on duration, but a disagreement on STATUS resolves
         pessimistically — a clean rebuild must not erase the script's report that

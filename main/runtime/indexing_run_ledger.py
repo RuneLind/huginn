@@ -506,7 +506,8 @@ def _merge_phases(records):
                 merged[name] = (phase, from_huginn)
                 continue
             existing, existing_from_huginn = merged[name]
-            winner = phase if (from_huginn and not existing_from_huginn) else existing
+            prefer_new = from_huginn and not existing_from_huginn
+            winner, loser = (phase, existing) if prefer_new else (existing, phase)
             # Duration and detail come from the winner, but the STATUS is the
             # worse of the two. huginn reporting a clean rebuild must not erase
             # the script's report that its own wait around that rebuild failed —
@@ -515,6 +516,13 @@ def _merge_phases(records):
             winner = dict(winner)
             winner["status"] = _worse_phase_status(existing.get("status"),
                                                    phase.get("status"))
+            # Preferring huginn's copy must not COST information. The CLI
+            # adapter writes a reindex phase carrying no duration, so on the
+            # API-down path a blind preference dropped the script's measured
+            # duration and left the phase timeless inside a timed run.
+            for field in ("durationSeconds", "detail"):
+                if winner.get(field) is None and loser.get(field) is not None:
+                    winner[field] = loser[field]
             merged[name] = (winner, existing_from_huginn or from_huginn)
     return [merged[key][0] for key in order]
 
