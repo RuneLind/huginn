@@ -982,6 +982,52 @@ class TestIndexingJobsEndpoint:
             os.chmod(ledger.path_for("c"), 0o644)
 
 
+class TestIndexingRunsEndpoint:
+    """POST /api/indexing/runs — the channel the shell helper reports phases on."""
+
+    def _patch(self, monkeypatch, tmp_path):
+        from main.runtime.indexing_run_ledger import IndexingRunLedger
+        runs_dir = str(tmp_path / "runs")
+        monkeypatch.setattr("main.routes.collections.IndexingRunLedger",
+                            lambda *a, **k: IndexingRunLedger(runs_dir=runs_dir))
+        return IndexingRunLedger(runs_dir=runs_dir)
+
+    def test_a_script_record_lands_in_the_ledger(self, monkeypatch, tmp_path):
+        ledger = self._patch(monkeypatch, tmp_path)
+        resp = TestClient(app).post("/api/indexing/runs", json={
+            "collection": "c", "runId": "shared", "source": "script", "stage": "end",
+            "job": "com.huginn.mimir-index", "trigger": "scheduled",
+            "startedAt": "2026-07-18T09:28:37Z", "finishedAt": "2026-07-18T10:44:14Z",
+            "phases": [{"name": "tag", "status": "degraded", "durationSeconds": 3033}],
+        })
+        assert resp.status_code == 200
+        assert resp.json()["runId"] == "shared"
+        assert ledger.recent("c", limit=5)[0]["phases"][0]["name"] == "tag"
+
+    def test_it_accepts_runs_for_collections_this_server_does_not_serve(
+            self, monkeypatch, tmp_path):
+        """The CLI-fallback and rebuild paths report for unloaded collections;
+        rejecting those would restore the blind spot the ledger removes."""
+        ledger = self._patch(monkeypatch, tmp_path)
+        resp = TestClient(app).post("/api/indexing/runs",
+                                    json={"collection": "not-loaded", "runId": "r"})
+        assert resp.status_code == 200
+        assert len(ledger.recent("not-loaded", limit=5)) == 1
+
+    def test_a_traversing_collection_name_is_rejected(self, monkeypatch, tmp_path):
+        self._patch(monkeypatch, tmp_path)
+        resp = TestClient(app).post("/api/indexing/runs",
+                                    json={"collection": "../../escape", "runId": "r"})
+        assert resp.status_code == 400
+        assert not (tmp_path / "escape.jsonl").exists()
+
+    def test_a_non_object_body_is_rejected(self, monkeypatch, tmp_path):
+        self._patch(monkeypatch, tmp_path)
+        assert TestClient(app).post("/api/indexing/runs", json=[1, 2]).status_code == 400
+        assert TestClient(app).post(
+            "/api/indexing/runs", content=b"not json").status_code == 400
+
+
 class TestMaybeEnqueueReindex:
     """Ingest reindex enqueueing skips (does not fail) when a rebuild is in flight."""
 

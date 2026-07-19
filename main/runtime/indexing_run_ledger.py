@@ -58,7 +58,13 @@ _COLLECTION_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 VALID_TRIGGERS = ("scheduled", "manual", "cli", "unknown")
 VALID_VARIANTS = ("incremental", "rebuild")
-VALID_STATUSES = ("succeeded", "degraded", "failed", "unknown")
+VALID_STATUSES = ("succeeded", "degraded", "failed", "unknown", "running", "incomplete")
+
+# A run whose opening record never got a matching closing record from the same
+# writer is `running` until this age, then `incomplete`. Well clear of the
+# slowest observed job (mimir, ~76 min) and of POLL_TIMEOUT (3600s), and well
+# inside the daily cadence, so a genuinely in-flight run is never mislabelled.
+INCOMPLETE_AFTER_SECONDS = 6 * 3600
 
 
 class InvalidCollectionName(ValueError):
@@ -367,7 +373,7 @@ def _duration(started_at, finished_at):
     return max(0, int((finish - start).total_seconds()))
 
 
-def fold_records(records):
+def fold_records(records, now=None):
     """Fold records sharing a ``runId`` into one run each, oldest group first.
 
     Scalar precedence when two partials collide: job/trigger/variant come from the
@@ -376,6 +382,7 @@ def fold_records(records):
     manifest), errors are concatenated, and status is always recomputed from the
     folded phase list rather than taken from either side.
     """
+    now = now or datetime.now(timezone.utc)
     order = []
     groups = {}
     for index, record in enumerate(records):
@@ -386,7 +393,39 @@ def fold_records(records):
             groups[run_id] = []
             order.append(run_id)
         groups[run_id].append(record)
-    return [_fold_group(run_id, groups[run_id]) for run_id in order]
+    return [_mark_unclosed(_fold_group(run_id, groups[run_id]), groups[run_id], now)
+            for run_id in order]
+
+
+def _mark_unclosed(folded, records, now):
+    """Downgrade a run whose writer opened it but never closed it.
+
+    Each writer that appends an opening partial (``stage: "begin"``) is expected
+    to append a matching ``stage: "end"``. If the script is killed after the
+    reindex finished but before ``run_end``, the group still holds huginn's
+    complete reindex record — and folding it naively would report a tidy
+    15-minute success for a job that actually blocked for 76 and then died. So
+    the missing closer wins over the surviving partial, and the duration is
+    dropped rather than published as if it were the whole run.
+    """
+    begun = {r.get("source") for r in records if r.get("stage") == "begin"}
+    # Compaction rewrites folded runs, which drops the per-record stage markers.
+    # Carrying the unclosed set on the folded record keeps this re-derivable, so
+    # a run compacted while still open is re-evaluated on later reads (and
+    # properly closed by a late-arriving `end`) rather than frozen as `running`.
+    for record in records:
+        begun.update(record.get("unclosedSources") or [])
+    ended = {r.get("source") for r in records if r.get("stage") == "end"}
+    unclosed = sorted(s for s in begun - ended if s)
+    if not unclosed:
+        return folded
+    folded["unclosedSources"] = unclosed
+    started = _parse_ts(folded.get("startedAt"))
+    age = (now - started).total_seconds() if started else None
+    folded["status"] = "running" if age is not None and age < INCOMPLETE_AFTER_SECONDS \
+        else "incomplete"
+    folded["durationSeconds"] = None
+    return folded
 
 
 def _fold_group(run_id, records):
@@ -464,7 +503,9 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     appender = sub.add_parser("append", help="Append a JSON run record")
     appender.add_argument("--file", default="-", help="JSON file, or '-' for stdin")
-    appender.add_argument("--runs-dir", default=DEFAULT_RUNS_DIR)
+    # Default None, not DEFAULT_RUNS_DIR: an explicit value would shadow
+    # HUGINN_RUNS_DIR, and this CLI is how the shell fallback writes.
+    appender.add_argument("--runs-dir", default=None)
     args = parser.parse_args(argv)
 
     payload = sys.stdin.read() if args.file == "-" else open(args.file, encoding="utf-8").read()

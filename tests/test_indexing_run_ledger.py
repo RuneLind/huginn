@@ -13,7 +13,10 @@ import textwrap
 
 import pytest
 
+from datetime import datetime, timedelta, timezone
+
 from main.runtime.indexing_run_ledger import (
+    INCOMPLETE_AFTER_SECONDS,
     IndexingRunLedger,
     InvalidCollectionName,
     MAX_RUNS_PER_COLLECTION,
@@ -363,3 +366,84 @@ class TestConcurrency:
             "were lost — the appender opened its data fd before taking the lock and "
             "wrote into the replaced inode"
         )
+
+
+class TestUnclosedRuns:
+    """A writer that opens a run and never closes it must not fold into a tidy
+    short success — that is the "15 min for a job that blocked for 76" error
+    returning as a crash mode."""
+
+    def _open(self, source="script", **extra):
+        record = {
+            "collection": "c", "runId": "shared", "source": source,
+            "stage": "begin", "startedAt": "2026-07-18T09:28:37Z",
+            "job": "com.huginn.mimir-index", "trigger": "scheduled",
+        }
+        record.update(extra)
+        return record
+
+    def _huginn_reindex(self):
+        return {
+            "collection": "c", "runId": "shared", "source": "huginn",
+            "stage": "end", "status": "succeeded",
+            "startedAt": "2026-07-18T10:19:13Z", "finishedAt": "2026-07-18T10:44:14Z",
+            "phases": [{"name": "reindex", "status": "succeeded", "fatal": True,
+                        "durationSeconds": 1501}],
+        }
+
+    def test_script_dying_after_the_reindex_does_not_fold_to_a_short_success(self):
+        now = datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc)
+        folded = fold_records([self._open(), self._huginn_reindex()], now=now)[0]
+        assert folded["status"] == "incomplete"
+        # The reindex's own 25 minutes must not be published as the run duration.
+        assert folded["durationSeconds"] is None
+
+    def test_an_open_run_is_running_before_the_threshold(self):
+        started = datetime(2026, 7, 18, 9, 28, 37, tzinfo=timezone.utc)
+        now = started + timedelta(seconds=INCOMPLETE_AFTER_SECONDS - 60)
+        folded = fold_records([self._open()], now=now)[0]
+        assert folded["status"] == "running"
+
+    def test_an_open_run_becomes_incomplete_after_the_threshold(self):
+        started = datetime(2026, 7, 18, 9, 28, 37, tzinfo=timezone.utc)
+        now = started + timedelta(seconds=INCOMPLETE_AFTER_SECONDS + 60)
+        folded = fold_records([self._open()], now=now)[0]
+        assert folded["status"] == "incomplete"
+
+    def test_a_matching_end_closes_the_run(self):
+        now = datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc)
+        closing = {
+            "collection": "c", "runId": "shared", "source": "script", "stage": "end",
+            "finishedAt": "2026-07-18T10:44:20Z",
+            "phases": [{"name": "tag", "status": "succeeded", "durationSeconds": 3033}],
+        }
+        folded = fold_records([self._open(), self._huginn_reindex(), closing], now=now)[0]
+        assert folded["status"] == "succeeded"
+        assert folded["durationSeconds"] == 4543
+
+    def test_a_server_restart_mid_reindex_leaves_an_incomplete_run(self):
+        """huginn's own opening partial with no __finish_update behind it."""
+        now = datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc)
+        folded = fold_records([self._open(source="huginn")], now=now)[0]
+        assert folded["status"] == "incomplete"
+
+    def test_openness_survives_compaction(self, ledger):
+        """Compaction rewrites folded runs and drops the stage markers, so the
+        unclosed set is carried on the folded record and re-derived on read."""
+        ledger.append(self._open())
+        ledger.append(self._huginn_reindex())
+        folded = ledger.recent("c", limit=10)[0]
+        assert folded["unclosedSources"] == ["script"]
+
+        # Simulate the compacted form being all that is left on disk.
+        refolded = fold_records([folded],
+                                now=datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc))[0]
+        assert refolded["status"] == "incomplete"
+
+        # ...and a late-arriving closer still closes it.
+        closed = fold_records([folded, {
+            "collection": "c", "runId": "shared", "source": "script", "stage": "end",
+            "finishedAt": "2026-07-18T10:45:00Z",
+            "phases": [{"name": "tag", "status": "succeeded"}],
+        }], now=datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc))[0]
+        assert closed["status"] == "succeeded"
