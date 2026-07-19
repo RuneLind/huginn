@@ -44,3 +44,15 @@ def _query_log_off(monkeypatch):
     Tests that exercise the log re-point HUGINN_QUERY_LOG at a tmp_path.
     """
     monkeypatch.setenv("HUGINN_QUERY_LOG", "off")
+
+
+@pytest.fixture(autouse=True)
+def _run_ledger_to_tmp(monkeypatch, tmp_path):
+    """Keep the suite from appending to the real indexing run ledger.
+
+    Any test that drives a collection update through the store now writes a run
+    record, and without this every such test would leave rows in
+    data/state/runs/. Tests that assert on ledger contents pass an explicit
+    runs_dir and are unaffected.
+    """
+    monkeypatch.setenv("HUGINN_RUNS_DIR", str(tmp_path / "runs"))

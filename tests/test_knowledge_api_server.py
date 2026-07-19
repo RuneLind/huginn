@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 from fastapi.testclient import TestClient
@@ -720,6 +721,265 @@ class TestCollectionUpdateConcurrency:
     def test_update_status_unknown_collection_404(self):
         resp = self._client(self._store()).get("/api/collections/nope/update-status")
         assert resp.status_code == 404
+
+
+class TestUpdateCorrelation:
+    """The optional {runId, job, trigger} body on POST /update.
+
+    The correlation fields must stay OUT of _update_states: __finish_update
+    replaces that dict wholesale (so they would be dropped before the ledger
+    record is built) and get_update_status splats it into the public response
+    (so they would leak onto an endpoint with an exact-shape contract).
+    """
+
+    def _store(self):
+        from main.runtime.knowledge_store import KnowledgeStore
+        store = KnowledgeStore()
+        store.searchers["c"] = object()
+        return store
+
+    def _client(self, store) -> TestClient:
+        from main.runtime.knowledge_store import get_store
+        app.dependency_overrides[get_store] = lambda: store
+        return TestClient(app)
+
+    def teardown_method(self):
+        from main.runtime.knowledge_store import get_store
+        app.dependency_overrides.pop(get_store, None)
+
+    def test_update_without_body_still_works(self, monkeypatch):
+        """Existing callers send no body and no Content-Type at all."""
+        monkeypatch.setattr("main.routes.collections.run_collection_update", lambda *a, **k: None)
+        store = self._store()
+        resp = self._client(store).post("/api/collections/c/update")
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "update_started", "collection": "c"}
+
+    def test_no_body_mints_a_run_id_and_trigger_manual(self, monkeypatch):
+        monkeypatch.setattr("main.routes.collections.run_collection_update", lambda *a, **k: None)
+        store = self._store()
+        self._client(store).post("/api/collections/c/update")
+        correlation = store._update_correlation["c"]
+        assert correlation["runId"]
+        assert correlation["trigger"] == "manual"
+
+    def test_body_correlation_is_stored(self, monkeypatch):
+        monkeypatch.setattr("main.routes.collections.run_collection_update", lambda *a, **k: None)
+        store = self._store()
+        resp = self._client(store).post(
+            "/api/collections/c/update",
+            json={"runId": "mimir-2026-07-18T09:28:37Z", "job": "com.huginn.mimir-index",
+                  "trigger": "scheduled"},
+        )
+        assert resp.status_code == 200
+        assert store._update_correlation["c"] == {
+            "runId": "mimir-2026-07-18T09:28:37Z",
+            "job": "com.huginn.mimir-index",
+            "trigger": "scheduled",
+            "variant": "incremental",
+        }
+
+    def test_garbage_body_is_ignored_not_rejected(self, monkeypatch):
+        monkeypatch.setattr("main.routes.collections.run_collection_update", lambda *a, **k: None)
+        store = self._store()
+        resp = self._client(store).post(
+            "/api/collections/c/update",
+            content=b"not json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 200
+        assert store._update_correlation["c"]["trigger"] == "manual"
+
+    def test_invalid_trigger_falls_back_to_manual(self, monkeypatch):
+        monkeypatch.setattr("main.routes.collections.run_collection_update", lambda *a, **k: None)
+        store = self._store()
+        self._client(store).post("/api/collections/c/update", json={"trigger": "bogus"})
+        assert store._update_correlation["c"]["trigger"] == "manual"
+
+    def test_correlation_does_not_leak_into_update_status(self, monkeypatch):
+        """GET /update-status response shape must be UNCHANGED by this feature."""
+        monkeypatch.setattr("main.routes.collections.run_collection_update", lambda *a, **k: None)
+        store = self._store()
+        client = self._client(store)
+        client.post("/api/collections/c/update",
+                    json={"runId": "r1", "job": "j", "trigger": "scheduled"})
+        body = client.get("/api/collections/c/update-status").json()
+        assert set(body) == {"collection", "status", "startedAt", "finishedAt", "error"}
+        assert body["status"] == "running"
+
+    def test_idle_update_status_shape_is_unchanged(self):
+        body = self._client(self._store()).get("/api/collections/c/update-status").json()
+        assert body == {
+            "collection": "c", "status": "idle",
+            "startedAt": None, "finishedAt": None, "error": None,
+        }
+
+    def test_finish_writes_a_ledger_record_with_the_correlation(self, monkeypatch, tmp_path):
+        import main.runtime.knowledge_store as ks
+        from main.runtime.indexing_run_ledger import IndexingRunLedger
+
+        runs_dir = str(tmp_path / "runs")
+        monkeypatch.setattr(ks, "IndexingRunLedger",
+                            lambda *a, **k: IndexingRunLedger(runs_dir=runs_dir))
+        monkeypatch.setattr("main.routes.collections.run_collection_update", lambda *a, **k: None)
+        store = self._store()
+        self._client(store).post(
+            "/api/collections/c/update",
+            json={"runId": "shared-run", "job": "com.huginn.c", "trigger": "scheduled"},
+        )
+        store.mark_update_succeeded("c")
+
+        runs = IndexingRunLedger(runs_dir=runs_dir).recent("c", limit=10)
+        assert len(runs) == 1
+        assert runs[0]["runId"] == "shared-run"
+        assert runs[0]["job"] == "com.huginn.c"
+        assert runs[0]["trigger"] == "scheduled"
+        assert [p["name"] for p in runs[0]["phases"]] == ["reindex"]
+
+    def test_failed_run_is_recorded_as_failed(self, monkeypatch, tmp_path):
+        import main.runtime.knowledge_store as ks
+        from main.runtime.indexing_run_ledger import IndexingRunLedger
+
+        runs_dir = str(tmp_path / "runs")
+        monkeypatch.setattr(ks, "IndexingRunLedger",
+                            lambda *a, **k: IndexingRunLedger(runs_dir=runs_dir))
+        store = self._store()
+        store.try_begin_update("c")
+        store.mark_update_failed("c", RuntimeError("boom"))
+
+        runs = IndexingRunLedger(runs_dir=runs_dir).recent("c", limit=10)
+        assert runs[0]["status"] == "failed"
+        assert runs[0]["error"] == "boom"
+        assert runs[0]["documentCount"] is None
+
+    def test_a_ledger_failure_never_breaks_the_update(self, monkeypatch):
+        """The ledger is observability — it must not be able to fail a reindex."""
+        import main.runtime.knowledge_store as ks
+
+        def explode(*a, **k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(ks, "IndexingRunLedger", explode)
+        store = self._store()
+        store.try_begin_update("c")
+        store.mark_update_succeeded("c")
+        assert store.get_update_status("c")["status"] == "succeeded"
+
+
+class TestIndexingJobsEndpoint:
+    def _store(self, names=("c",)):
+        from main.runtime.knowledge_store import KnowledgeStore
+        store = KnowledgeStore()
+        for name in names:
+            store.searchers[name] = object()
+        return store
+
+    def _client(self, store) -> TestClient:
+        from main.runtime.knowledge_store import get_store
+        app.dependency_overrides[get_store] = lambda: store
+        return TestClient(app)
+
+    def teardown_method(self):
+        from main.runtime.knowledge_store import get_store
+        app.dependency_overrides.pop(get_store, None)
+
+    def _patch(self, monkeypatch, tmp_path, schedules=None):
+        from main.runtime.indexing_run_ledger import IndexingRunLedger
+        runs_dir = str(tmp_path / "runs")
+        monkeypatch.setattr("main.routes.collections.IndexingRunLedger",
+                            lambda *a, **k: IndexingRunLedger(runs_dir=runs_dir))
+        monkeypatch.setattr("main.routes.collections.load_schedules",
+                            lambda *a, **k: schedules or {})
+        return IndexingRunLedger(runs_dir=runs_dir)
+
+    def test_returns_a_row_per_collection(self, monkeypatch, tmp_path):
+        self._patch(monkeypatch, tmp_path)
+        body = self._client(self._store()).get("/api/indexing/jobs").json()
+        assert [j["collection"] for j in body["jobs"]] == ["c"]
+
+    def test_enumerates_the_union_of_ledger_files_and_loaded_collections(
+            self, monkeypatch, tmp_path):
+        """A collection with history but not served must still appear, flagged
+        loaded:false — otherwise the whole Jira/Confluence/Notion backfill is
+        invisible. And a served collection with no history must appear too."""
+        ledger = self._patch(monkeypatch, tmp_path)
+        ledger.append({"collection": "jira-issues", "runId": "j1",
+                       "startedAt": "2026-07-18T09:00:00Z",
+                       "finishedAt": "2026-07-18T09:05:00Z", "status": "succeeded"})
+        body = self._client(self._store(names=("c",))).get("/api/indexing/jobs").json()
+        rows = {j["collection"]: j for j in body["jobs"]}
+        assert set(rows) == {"c", "jira-issues"}
+        assert rows["jira-issues"]["loaded"] is False
+        assert rows["jira-issues"]["lastRun"]["runId"] == "j1"
+        assert rows["c"]["loaded"] is True
+        assert rows["c"]["lastRun"] is None
+
+    def test_history_and_last_run(self, monkeypatch, tmp_path):
+        ledger = self._patch(monkeypatch, tmp_path)
+        for i in range(3):
+            ledger.append({"collection": "c", "runId": f"r{i}",
+                           "startedAt": f"2026-07-1{i}T09:00:00Z",
+                           "finishedAt": f"2026-07-1{i}T09:0{i + 1}:00Z",
+                           "status": "succeeded"})
+        row = self._client(self._store()).get("/api/indexing/jobs").json()["jobs"][0]
+        assert row["lastRun"]["runId"] == "r2"
+        assert [h["runId"] for h in row["history"]] == ["r0", "r1", "r2"]
+        assert row["history"][0]["durationSeconds"] == 60
+
+    def test_median_duration_is_split_by_variant(self, monkeypatch, tmp_path):
+        ledger = self._patch(monkeypatch, tmp_path)
+        for i, (variant, seconds) in enumerate(
+                [("incremental", 10), ("incremental", 30), ("rebuild", 600)]):
+            ledger.append({"collection": "c", "runId": f"r{i}", "variant": variant,
+                           "durationSeconds": seconds, "status": "succeeded"})
+        row = self._client(self._store()).get("/api/indexing/jobs").json()["jobs"][0]
+        assert row["medianDurationSeconds"] == {"incremental": 20, "rebuild": 600}
+
+    def test_current_reports_a_running_update(self, monkeypatch, tmp_path):
+        self._patch(monkeypatch, tmp_path)
+        store = self._store()
+        store.try_begin_update("c")
+        row = self._client(store).get("/api/indexing/jobs").json()["jobs"][0]
+        assert row["current"]["status"] == "running"
+        assert row["current"]["elapsedSeconds"] >= 0
+
+    def test_current_is_null_when_idle(self, monkeypatch, tmp_path):
+        self._patch(monkeypatch, tmp_path)
+        row = self._client(self._store()).get("/api/indexing/jobs").json()["jobs"][0]
+        assert row["current"] is None
+
+    def test_schedule_is_attached_when_a_plist_exists(self, monkeypatch, tmp_path):
+        self._patch(monkeypatch, tmp_path, schedules={
+            "c": {"job": "com.huginn.c-index",
+                  "schedule": {"kind": "calendar", "hour": 9, "minute": 15}},
+        })
+        row = self._client(self._store()).get("/api/indexing/jobs").json()["jobs"][0]
+        assert row["job"] == "com.huginn.c-index"
+        assert row["schedule"]["hour"] == 9
+
+    def test_schedule_is_null_when_no_plist(self, monkeypatch, tmp_path):
+        self._patch(monkeypatch, tmp_path)
+        row = self._client(self._store()).get("/api/indexing/jobs").json()["jobs"][0]
+        assert row["schedule"] is None
+
+    def test_unreadable_launch_agents_do_not_fail_the_endpoint(self, monkeypatch, tmp_path):
+        self._patch(monkeypatch, tmp_path)
+        monkeypatch.setattr("main.routes.collections.load_schedules",
+                            lambda *a, **k: (_ for _ in ()).throw(OSError("nope")))
+        # A broken schedule source costs the "schedule" field, not the endpoint.
+        resp = self._client(self._store()).get("/api/indexing/jobs")
+        assert resp.status_code == 200
+        assert resp.json()["jobs"][0]["schedule"] is None
+
+    def test_unreadable_ledger_file_does_not_fail_the_endpoint(self, monkeypatch, tmp_path):
+        ledger = self._patch(monkeypatch, tmp_path)
+        ledger.append({"collection": "c", "runId": "r1", "status": "succeeded"})
+        os.chmod(ledger.path_for("c"), 0o000)
+        try:
+            resp = self._client(self._store()).get("/api/indexing/jobs")
+            assert resp.status_code == 200
+        finally:
+            os.chmod(ledger.path_for("c"), 0o644)
 
 
 class TestMaybeEnqueueReindex:
