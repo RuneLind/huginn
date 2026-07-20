@@ -9,6 +9,7 @@ Usage:
     uv run notion_cleanup_md.py --saveMd ./data/sources/my-notion --dryRun          # preview
     uv run notion_cleanup_md.py --saveMd ./data/sources/my-notion                    # move files
     uv run notion_cleanup_md.py --saveMd ./data/sources/my-notion --minContentLength 100  # stricter
+    uv run notion_cleanup_md.py --saveMd ./data/sources/my-notion --minWordCount 30       # exclude thin pages
 """
 
 import os
@@ -32,31 +33,32 @@ REFERENCE_PATTERNS = [
 ]
 
 
-def classify_body(body_text, min_content_length):
-    """Classify body content. Returns reason string or None if content is fine."""
-    stripped = body_text.strip()
+# Per-source line policy: drop reference-marker lines (child page/database,
+# unsupported blocks).
+NOTION_LINE_FILTERS = [
+    lambda line: any(p.match(line) for p in REFERENCE_PATTERNS),
+]
 
-    if not stripped:
-        return "empty_stub"
 
-    # Check if body is only reference markers
-    non_reference_lines = []
-    for line in stripped.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if any(p.match(line) for p in REFERENCE_PATTERNS):
-            continue
-        non_reference_lines.append(line)
+def classify_body(body_text, min_content_length, min_word_count=0):
+    """Classify body content. Returns reason string or None if content is fine.
 
-    if not non_reference_lines:
-        return "reference_only"
+    Notion policy: strip reference-marker lines; a page with nothing but those
+    is ``reference_only``.
 
-    actual_text = " ".join(non_reference_lines)
-    if len(actual_text) < min_content_length:
-        return "minimal_content"
-
-    return None
+    ``min_word_count`` was silently absent from notion's copy of this function
+    (an accidental drift from its confluence/jira siblings); PR F restores it
+    via the shared ``md_cleanup.classify_body`` skeleton. Default 0 keeps the
+    word-count gate disabled, so cleanup at the previous defaults is byte-stable;
+    the new ``--minWordCount`` flag activates it (now yields ``low_word_count``).
+    """
+    return md_cleanup.classify_body(
+        body_text,
+        min_content_length,
+        NOTION_LINE_FILTERS,
+        min_word_count=min_word_count,
+        filtered_empty_reason="reference_only",
+    )
 
 
 def main():
@@ -65,16 +67,19 @@ def main():
     ap.add_argument("--dryRun", action="store_true", default=False, help="Preview without moving")
     ap.add_argument("--minContentLength", type=int, default=50,
                     help="Minimum chars of actual text to keep a file (default: 50)")
+    ap.add_argument("--minWordCount", type=int, default=0,
+                    help="Minimum word count to keep a file (0 = disabled)")
     args = ap.parse_args()
 
     save_md_path = args.saveMd
     excluded_path = os.path.join(save_md_path, EXCLUDED_DIR)
     min_content_length = args.minContentLength
+    min_word_count = args.minWordCount
 
-    logging.info(f"Scanning {save_md_path} for .md files (minContentLength={min_content_length})...")
+    logging.info(f"Scanning {save_md_path} for .md files (minContentLength={min_content_length}, minWordCount={min_word_count})...")
 
     manifest_entries = []
-    category_counts = {"empty_stub": 0, "reference_only": 0, "minimal_content": 0}
+    category_counts = {"empty_stub": 0, "reference_only": 0, "minimal_content": 0, "low_word_count": 0}
     total_scanned = 0
 
     for filepath, rel_path in md_cleanup.iter_markdown_files(save_md_path):
@@ -86,7 +91,7 @@ def main():
             logging.warning(f"Could not parse {filepath}: {e}")
             continue
 
-        reason = classify_body(body, min_content_length)
+        reason = classify_body(body, min_content_length, min_word_count)
         if reason is None:
             continue
 
@@ -120,7 +125,8 @@ def main():
         f"{action} {total_excluded}: "
         f"empty_stub={category_counts['empty_stub']}, "
         f"reference_only={category_counts['reference_only']}, "
-        f"minimal_content={category_counts['minimal_content']}"
+        f"minimal_content={category_counts['minimal_content']}, "
+        f"low_word_count={category_counts['low_word_count']}"
     )
 
 
