@@ -988,6 +988,71 @@ class TestIndexingJobsEndpoint:
             os.chmod(ledger.path_for("c"), 0o644)
 
 
+class TestIncompleteAfterForSchedule:
+    """The jobs endpoint derives the per-collection `incomplete_after` from launchd
+    cadence — max(2×cadence, floor) — so a dead hourly run stops reading `running`
+    across six later runs the way the flat 6h let it."""
+
+    def _fn(self):
+        from main.routes.collections import _incomplete_after_for_schedule
+        return _incomplete_after_for_schedule
+
+    def test_hourly_is_two_hours(self):
+        assert self._fn()({"kind": "hourly", "minute": 35}) == 2 * 3600
+
+    def test_interval_is_twice_its_seconds_above_the_floor(self):
+        assert self._fn()({"kind": "interval", "seconds": 4 * 3600}) == 8 * 3600
+
+    def test_a_short_interval_is_clamped_to_the_floor(self):
+        assert self._fn()({"kind": "interval", "seconds": 900}) == 2 * 3600
+
+    def test_a_plain_calendar_entry_is_daily(self):
+        assert self._fn()({"kind": "calendar", "hour": 9, "minute": 0}) == 2 * 86400
+
+    def test_a_weekday_calendar_entry_is_weekly(self):
+        assert self._fn()({"kind": "calendar", "hour": 9, "minute": 0,
+                           "weekday": 1}) == 2 * 604800
+
+    def test_no_schedule_keeps_the_flat_constant(self):
+        from main.runtime.indexing_run_ledger import INCOMPLETE_AFTER_SECONDS
+        assert self._fn()(None) == INCOMPLETE_AFTER_SECONDS
+        assert self._fn()({"kind": "mystery"}) == INCOMPLETE_AFTER_SECONDS
+
+
+class TestJobsEndpointCadenceThreshold(TestIndexingJobsEndpoint):
+    """End to end: the SAME 3h-old unclosed run reads `incomplete` for an hourly
+    collection but still `running` for a daily one — the whole point of finding 3."""
+
+    def _open_3h_ago(self, ledger):
+        from datetime import datetime, timedelta, timezone
+        started = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+        ledger.append({"collection": "c", "runId": "open", "source": "script",
+                       "stage": "begin", "startedAt": started})
+
+    def test_hourly_cadence_marks_the_stale_run_incomplete(self, monkeypatch, tmp_path):
+        ledger = self._patch(monkeypatch, tmp_path, schedules={
+            "c": {"job": "com.huginn.c", "schedule": {"kind": "hourly", "minute": 35}}})
+        self._open_3h_ago(ledger)
+        row = self._client(self._store()).get("/api/indexing/jobs").json()["jobs"][0]
+        assert row["lastRun"]["status"] == "incomplete"
+
+    def test_daily_cadence_keeps_the_same_run_running(self, monkeypatch, tmp_path):
+        ledger = self._patch(monkeypatch, tmp_path, schedules={
+            "c": {"job": "com.huginn.c",
+                  "schedule": {"kind": "calendar", "hour": 9, "minute": 0}}})
+        self._open_3h_ago(ledger)
+        row = self._client(self._store()).get("/api/indexing/jobs").json()["jobs"][0]
+        assert row["lastRun"]["status"] == "running"
+
+    def test_no_schedule_keeps_the_run_running_under_the_flat_default(
+            self, monkeypatch, tmp_path):
+        ledger = self._patch(monkeypatch, tmp_path)
+        self._open_3h_ago(ledger)
+        row = self._client(self._store()).get("/api/indexing/jobs").json()["jobs"][0]
+        assert row["lastRun"]["status"] == "running"
+
+
 class TestIndexingRunsEndpoint:
     """POST /api/indexing/runs — the channel the shell helper reports phases on."""
 
@@ -1032,6 +1097,43 @@ class TestIndexingRunsEndpoint:
         assert TestClient(app).post("/api/indexing/runs", json=[1, 2]).status_code == 400
         assert TestClient(app).post(
             "/api/indexing/runs", content=b"not json").status_code == 400
+
+    def test_an_oversize_body_is_rejected_by_content_length(self, monkeypatch, tmp_path):
+        """The unauthenticated endpoint must not buffer an arbitrarily large body
+        into memory. A Content-Length over the ceiling is refused with 413 before
+        the body is read."""
+        from main.routes.collections import MAX_REQUEST_BODY_BYTES
+        ledger = self._patch(monkeypatch, tmp_path)
+        oversize = b'{"collection":"c","runId":"r","x":"' + \
+            b"A" * (MAX_REQUEST_BODY_BYTES + 1) + b'"}'
+        resp = TestClient(app).post("/api/indexing/runs", content=oversize)
+        assert resp.status_code == 413
+        # Nothing was written to the ledger.
+        assert ledger.recent("c", limit=5) == []
+
+    def test_an_oversize_chunked_body_is_rejected_by_the_streamed_read(
+            self, monkeypatch, tmp_path):
+        """A chunked body carries no Content-Length, so the header check cannot
+        catch it — the streamed read is the real guard."""
+        from main.routes.collections import MAX_REQUEST_BODY_BYTES
+        self._patch(monkeypatch, tmp_path)
+
+        def chunks():
+            yield b'{"collection":"c","runId":"r","x":"'
+            for _ in range((MAX_REQUEST_BODY_BYTES // 1024) + 2):
+                yield b"A" * 1024
+
+        # A generator body makes httpx send Transfer-Encoding: chunked (no
+        # Content-Length), exercising the len(body) guard rather than the header.
+        resp = TestClient(app).post("/api/indexing/runs", content=chunks())
+        assert resp.status_code == 413
+
+    def test_a_normal_record_is_still_accepted(self, monkeypatch, tmp_path):
+        ledger = self._patch(monkeypatch, tmp_path)
+        resp = TestClient(app).post("/api/indexing/runs", json={
+            "collection": "c", "runId": "ok", "status": "succeeded"})
+        assert resp.status_code == 200
+        assert len(ledger.recent("c", limit=5)) == 1
 
 
 class TestMaybeEnqueueReindex:

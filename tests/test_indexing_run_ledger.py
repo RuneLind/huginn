@@ -449,6 +449,71 @@ class TestUnclosedRuns:
         assert closed["status"] == "succeeded"
 
 
+class TestCadenceAwareIncompleteThreshold:
+    """The age past which an unclosed run folds `incomplete` is a caller-supplied
+    per-collection value (the jobs endpoint derives it from launchd cadence), so a
+    dead hourly run stops reading as `running` across six later runs the way a flat
+    6h let it. The ledger never imports the schedule module — that would invert the
+    layering and break the CLI path — so the value threads in as a parameter."""
+
+    def _open(self, started="2026-07-18T09:28:37Z"):
+        return {"collection": "c", "runId": "shared", "source": "script",
+                "stage": "begin", "startedAt": started}
+
+    def test_default_still_uses_the_flat_constant(self):
+        started = datetime(2026, 7, 18, 9, 0, tzinfo=timezone.utc)
+        now = started + timedelta(seconds=INCOMPLETE_AFTER_SECONDS - 60)
+        folded = fold_records([self._open("2026-07-18T09:00:00Z")], now=now)[0]
+        assert folded["status"] == "running"
+
+    def test_a_shorter_threshold_flips_running_to_incomplete_sooner(self):
+        started = datetime(2026, 7, 18, 9, 0, tzinfo=timezone.utc)
+        # 3h old: still running under the flat 6h default, but incomplete once
+        # the caller passes a 2×hourly (7200s) threshold.
+        now = started + timedelta(seconds=3 * 3600)
+        assert fold_records([self._open("2026-07-18T09:00:00Z")], now=now)[0][
+            "status"] == "running"
+        assert fold_records([self._open("2026-07-18T09:00:00Z")], now=now,
+                            incomplete_after=7200)[0]["status"] == "incomplete"
+
+    def test_recent_threads_the_threshold_through(self, ledger):
+        from main.runtime.indexing_run_ledger import now_iso
+        ledger.append(self._open(now_iso()))  # opened "just now"
+        # The default keeps a fresh open running (well inside 6h).
+        assert ledger.recent("c", limit=5)[0]["status"] == "running"
+        # A zero threshold flips the same fresh open to incomplete on read.
+        assert ledger.recent("c", limit=5, incomplete_after=0)[0]["status"] == "incomplete"
+
+
+class TestSingleRecordStatusRecompute:
+    """A one-record group re-derives its status from the phases, matching the
+    multi-record path — otherwise a stored `running`/`incomplete` (both now
+    accepted values) reads as permanently running. Recompute only when phases are
+    present: a backfilled record carries a status with no phases and must keep it."""
+
+    def test_a_stored_running_with_succeeded_phases_recomputes(self):
+        record = {"collection": "c", "runId": "r", "status": "running",
+                  "startedAt": "2026-07-18T09:00:00Z", "finishedAt": "2026-07-18T09:10:00Z",
+                  "phases": [{"name": "reindex", "status": "succeeded", "fatal": True}]}
+        assert fold_records([record])[0]["status"] == "succeeded"
+
+    def test_a_stored_status_with_a_failed_phase_recomputes_to_failed(self):
+        record = {"collection": "c", "runId": "r", "status": "running",
+                  "phases": [{"name": "reindex", "status": "failed", "fatal": True}]}
+        assert fold_records([record])[0]["status"] == "failed"
+
+    def test_a_backfilled_record_with_no_phases_keeps_its_stored_status(self):
+        """Rolling up an empty phase list would turn a known `succeeded` into
+        `unknown` — backfilled rows carry a status and no phases on purpose."""
+        record = {"collection": "c", "runId": "r", "status": "succeeded",
+                  "backfilled": True, "phases": []}
+        assert fold_records([record])[0]["status"] == "succeeded"
+
+    def test_a_record_with_no_phases_key_keeps_its_stored_status(self):
+        record = {"collection": "c", "runId": "r", "status": "degraded"}
+        assert fold_records([record])[0]["status"] == "degraded"
+
+
 class TestPhaseMerging:
     """Both sides report a `reindex` phase for the same work — huginn times the
     rebuild, the script times trigger-plus-poll around it. Observed live on the

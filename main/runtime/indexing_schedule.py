@@ -81,12 +81,19 @@ def _schedule_from_plist(data):
         first = calendar[0]
         hours = {e.get("Hour") for e in calendar if isinstance(e, dict)}
         minutes = {e.get("Minute") for e in calendar if isinstance(e, dict)}
+        weekdays = {e.get("Weekday") for e in calendar if isinstance(e, dict)}
         # x-feed is 24 entries at the same minute — hourly, expressed as a
         # calendar array because StartInterval is load-time-relative and cannot
         # be pinned to an offset. Reporting only calendar[0] would render that
         # as "daily at 00:35", understating the cadence 24-fold and making its
         # "next run" wrong for 23 hours out of every 24.
-        if len(minutes) == 1 and hours == set(range(24)):
+        #
+        # Only when NO entry pins a weekday. 24 hourly entries each carrying a
+        # Weekday run 24 times on one day of the week, not 168 times a week —
+        # collapsing that to `hourly` would advertise a cadence 7x the real one.
+        # Fall through to the calendar branch, which preserves the weekday like
+        # the dict branch above.
+        if len(minutes) == 1 and hours == set(range(24)) and weekdays == {None}:
             return {"kind": "hourly", "minute": minutes.pop()}
         return {
             "kind": "calendar",

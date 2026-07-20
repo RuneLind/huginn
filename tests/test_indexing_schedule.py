@@ -87,6 +87,23 @@ class TestScheduleShape:
         assert _schedule_from_plist({"StartCalendarInterval": entries}) == {
             "kind": "hourly", "minute": 35}
 
+    def test_twentyfour_entries_each_with_a_weekday_is_not_hourly(self):
+        """24 entries at one minute each pinning a Weekday run 24 times on ONE
+        day of the week, not 168 times a week. Collapsing to `hourly` would
+        advertise a cadence 7x the real one, so it falls through to calendar and
+        preserves the weekday like the single-dict branch does."""
+        entries = [{"Hour": h, "Minute": 35, "Weekday": 1} for h in range(24)]
+        schedule = _schedule_from_plist({"StartCalendarInterval": entries})
+        assert schedule["kind"] == "calendar"
+        assert schedule["weekday"] == 1
+        assert schedule["entries"] == 24
+
+    def test_twentyfour_weekday_free_entries_are_still_hourly(self):
+        """The unpinned form is the real x-feed shape and must stay hourly."""
+        entries = [{"Hour": h, "Minute": 35} for h in range(24)]
+        assert _schedule_from_plist({"StartCalendarInterval": entries}) == {
+            "kind": "hourly", "minute": 35}
+
     def test_a_partial_array_stays_a_calendar(self):
         entries = [{"Hour": 9, "Minute": 0}, {"Hour": 21, "Minute": 0}]
         schedule = _schedule_from_plist({"StartCalendarInterval": entries})
