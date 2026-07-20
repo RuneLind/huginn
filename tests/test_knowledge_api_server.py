@@ -835,6 +835,12 @@ class TestUpdateCorrelation:
         assert runs[0]["job"] == "com.huginn.c"
         assert runs[0]["trigger"] == "scheduled"
         assert [p["name"] for p in runs[0]["phases"]] == ["reindex"]
+        # The reindex phase carries startedAt so the fold can order phases by time
+        # rather than record-arrival (huginn's record lands before a wrapping
+        # script's closing record, which would otherwise mis-sort reindex early).
+        reindex = runs[0]["phases"][0]
+        assert reindex["startedAt"], "reindex phase carries no startedAt"
+        assert reindex["startedAt"] == runs[0]["startedAt"]
 
     def test_failed_run_is_recorded_as_failed(self, monkeypatch, tmp_path):
         import main.runtime.knowledge_store as ks

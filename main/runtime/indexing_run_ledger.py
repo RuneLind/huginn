@@ -490,7 +490,7 @@ def _fold_group(run_id, records):
     folded["finishedAt"] = _iso(max(finishes)) if finishes else None
     folded["durationSeconds"] = _duration(folded["startedAt"], folded["finishedAt"])
 
-    phases = _merge_phases(records)
+    phases = _sort_phases_by_started_at(_merge_phases(records))
     folded["phases"] = phases
     folded["status"] = rollup_status(phases) if phases else _worst_status(records)
 
@@ -561,11 +561,40 @@ def _merge_phases(records):
             # adapter writes a reindex phase carrying no duration, so on the
             # API-down path a blind preference dropped the script's measured
             # duration and left the phase timeless inside a timed run.
-            for field in ("durationSeconds", "detail"):
+            # `startedAt` rides along: huginn's copy of a `reindex` phase has no
+            # per-phase startedAt (it stamps the whole record, not the phase),
+            # while the script's copy does. If huginn's copy wins the merge but
+            # lacks the field, it must inherit the script's — otherwise the merged
+            # phase has nothing to sort on and pins to arrival order, which on the
+            # API-down path lands `reindex` before the `fetch` that preceded it.
+            for field in ("durationSeconds", "detail", "startedAt"):
                 if winner.get(field) is None and loser.get(field) is not None:
                     winner[field] = loser[field]
             merged[name] = (winner, existing_from_huginn or from_huginn)
     return [merged[key][0] for key in order]
+
+
+def _sort_phases_by_started_at(phases):
+    """Order phases by ``startedAt``, but move ONLY the phases that carry it.
+
+    The fold unions phases in record-arrival order, and huginn's `reindex` record
+    lands before the script's closing record, so a run can legitimately render
+    `reindex` ahead of the `fetch` that preceded it. `startedAt` gives a real
+    order — but every phase written before that field existed (all backfilled
+    runs, everything already in the ledger) has none, and those read correctly by
+    accident today. So sort the timestamped phases into the positions they
+    already occupy, and leave every field-less phase pinned to its arrival index.
+    Stable: equal timestamps keep arrival order.
+    """
+    positions = [i for i, p in enumerate(phases)
+                 if isinstance(p, dict) and p.get("startedAt")]
+    if len(positions) <= 1:
+        return phases
+    ordered = sorted((phases[i] for i in positions), key=lambda p: p["startedAt"])
+    result = list(phases)
+    for position, phase in zip(positions, ordered):
+        result[position] = phase
+    return result
 
 
 # Worst first. `skipped` sits just above `succeeded`: it did less work, so it

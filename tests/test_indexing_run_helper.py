@@ -139,6 +139,31 @@ def test_a_dead_api_does_not_abort_the_job_and_still_records(tmp_path):
     assert run["status"] == "degraded"
 
 
+def test_phases_carry_a_started_at_for_the_fold_to_order_on(tmp_path):
+    """Phases otherwise carry only a duration, which cannot be sorted. The fold
+    unions phases across records in arrival order, so without a per-phase
+    startedAt a `reindex` (huginn's record, appended first) renders before the
+    `fetch` that preceded it. phase_begin stamps an ISO-8601 UTC timestamp."""
+    result = _run(
+        'run_begin c com.huginn.test scheduled || true\n'
+        'phase_begin fetch 1; rc=0; true || rc=$?; phase_end "$rc" || true\n'
+        'phase_begin reindex 1; rc=0; true || rc=$?; phase_end "$rc" || true\n'
+        'run_end "" || true\n',
+        tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+
+    sys.path.insert(0, REPO_ROOT)
+    from main.runtime.indexing_run_ledger import IndexingRunLedger
+    run = IndexingRunLedger(runs_dir=str(tmp_path)).recent("c", limit=5)[0]
+    stamps = {p["name"]: p.get("startedAt") for p in run["phases"]}
+    for name in ("fetch", "reindex"):
+        assert stamps[name], f"{name} phase carries no startedAt"
+        assert stamps[name].endswith("Z"), stamps[name]
+    # fetch began before reindex; the timestamps must reflect that ordering.
+    assert stamps["fetch"] <= stamps["reindex"]
+
+
 def test_a_skipped_phase_is_not_a_succeeded_one(tmp_path):
     """A reindex skipped on 409 exits 0. Recording that as `succeeded` asserts an
     index freshness the run never delivered — and at hourly cadence 409 is the
