@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from main.core import search_response_formatter as _formatter
 from main.core.search_policy import SearchPolicy
@@ -145,7 +146,10 @@ class TestApplyTitleBoost:
         self.policy.apply_title_boost("gamma", scores, indexes, mapping, FakeTrace())
         assert len(recorded) == 1
         assert recorded[0][0] == "B"
-        assert recorded[0][1] < 0.0
+        # Single-term overlap stays below the cap: delta is exactly one
+        # boost_per_term = -score_range * 0.5 = -(0.2) * 0.5. Pins the boost
+        # weight itself, which the cap-saturated ordering tests cannot.
+        assert recorded[0][1] == pytest.approx(-0.1)
 
     def test_hyphen_and_underscore_titles_tokenized(self):
         # A hyphen/underscore filename is split into tokens ("multi", "word",
