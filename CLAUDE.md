@@ -142,10 +142,27 @@ job last ran, how long it took, and whether it failed. Backed by JSONL files at
   no-op stub guard sound. `poll_update_status` stays duplicated in each script
   on purpose: it is functional, so stubbing it to `:` would make a script treat
   every reindex as instantly complete.
+- Phases carry a per-phase `startedAt` (all three writers: `__record_run`, the
+  CLI adapter, and `phase_begin` in the shell helper — identical fixed-width UTC
+  format, so lexicographic sort is chronological). The fold sorts phases by it;
+  legacy phases without the field keep their arrival position — do not "fix"
+  that fallback, a naive sort scrambles backfilled history.
 - A run whose writer appended a `stage: "begin"` but never a matching
-  `stage: "end"` folds to `running`, then `incomplete` past
-  `INCOMPLETE_AFTER_SECONDS` (6h), with its duration dropped. A script killed
-  after the reindex would otherwise fold to a tidy 15-minute success.
+  `stage: "end"` folds to `running`, then `incomplete` past a threshold that is
+  cadence-aware: the jobs endpoint derives `max(2 × schedule cadence, 2h)` per
+  collection, falling back to the flat `INCOMPLETE_AFTER_SECONDS` (6h) when no
+  schedule is known. The ledger itself never imports the schedule module — the
+  caller passes `incomplete_after`; keep that layering.
+- `POST /api/indexing/runs` bounds the request body (256 KiB, Content-Length
+  check plus a bounded streamed read for chunked bodies). `load_schedules()` is
+  cached on an mtime signature over the plists and routing files; it returns
+  the shared cached dict — treat it as read-only.
+- `POST /api/collections/{name}/reload` swaps in a rebuilt on-disk index
+  without a server restart (404 for unserved collections; a failed reload keeps
+  the previous searcher). The x-feed full rebuild uses it after building into a
+  temp collection name and two-rename-swapping into place — the collection dir
+  is no longer deleted in place, and the running server picks up the new index
+  immediately.
 - **`skipped` is not `succeeded`.** A reindex skipped because the API answered
   409 exits 0, and huginn writes no record at all on that path (`try_begin_update`
   returns False before the opening partial), so recording the phase as
