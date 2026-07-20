@@ -141,6 +141,9 @@ def load_schedules(pattern=LAUNCH_AGENTS_GLOB, routing_globs=ROUTING_GLOBS):
     Returns an empty mapping rather than raising if the LaunchAgents directory is
     unreadable or every plist is malformed. The result is cached and only re-read
     when a plist or routing file changes (see ``_mtime_signature``).
+
+    Callers receive the cached dict itself, not a copy — treat it as read-only;
+    mutating it (or a nested schedule) corrupts the cache for every later caller.
     """
     cache_key = (pattern, tuple(routing_globs))
     signature = _mtime_signature((pattern, *routing_globs))
