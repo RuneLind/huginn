@@ -7,7 +7,8 @@ from main.utils.frontmatter import parse_tags, read_frontmatter, strip_frontmatt
 
 # Frontmatter fields to preserve as document metadata (key in frontmatter -> key in metadata)
 _FRONTMATTER_METADATA_FIELDS = {"wip", "title", "breadcrumb", "space", "page_id", "session_id", "project", "gitBranch", "tags", "category", "date", "url",
-                                "issue_key", "status", "issue_type", "epic_link", "epic_summary", "labels"}
+                                "issue_key", "status", "issue_type", "epic_link", "epic_summary", "labels",
+                                "relevance_score", "combined_score", "engagement_score", "author_score"}
 
 
 class FilesDocumentConverter:

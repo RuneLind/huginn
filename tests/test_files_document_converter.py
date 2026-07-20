@@ -353,6 +353,30 @@ class TestFrontmatterMetadata:
         results = converter.convert(doc)
         assert results[0]["metadata"]["title"] == "My Quoted Title"
 
+    def test_x_feed_score_fields_pass_through(self, converter, make_doc):
+        """X-feed scoring fields land in both doc-level and per-chunk metadata.
+
+        Frontmatter values arrive as strings (like tags/date); the muninn side
+        reads metadata.combined_score. Verify the whole score family survives
+        the converter unchanged."""
+        doc = make_doc(
+            content_texts=[
+                "---\ntitle: X Post\nrelevance_score: 0.12\ncombined_score: 0.34\n"
+                "engagement_score: 5.6\nauthor_score: 0.78\n---\nTweet body content."
+            ]
+        )
+        results = converter.convert(doc)
+        meta = results[0]["metadata"]
+        assert meta["relevance_score"] == "0.12"
+        assert meta["combined_score"] == "0.34"
+        assert meta["engagement_score"] == "5.6"
+        assert meta["author_score"] == "0.78"
+        # Chunk metadata (chunk_meta.update(fm_metadata)) carries them too
+        for chunk in results[0]["chunks"]:
+            cm = chunk.get("metadata", {})
+            assert cm.get("relevance_score") == "0.12"
+            assert cm.get("combined_score") == "0.34"
+
 
 class TestSessionChunking:
     """Tests for session-aware chunking (dispatched when session_id is in frontmatter)."""
