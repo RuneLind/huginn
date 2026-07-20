@@ -3,7 +3,7 @@ import json
 import logging
 import os
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from statistics import median
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
@@ -287,16 +287,126 @@ def collection_update_status(name: str, store: KnowledgeStore = Depends(get_stor
     return store.get_update_status(name)
 
 
-def _elapsed_seconds(started_at: str | None) -> int | None:
-    if not started_at:
+def _parse_iso(value: str | None) -> datetime | None:
+    """Aware datetime from an ISO string, or None. Naive values are taken as UTC.
+
+    Accepts both timestamp dialects this endpoint meets: the ledger's fixed-width
+    ``...Z`` form and the in-memory update state's ``+00:00`` isoformat.
+    """
+    if not value:
         return None
     try:
-        start = datetime.fromisoformat(started_at)
+        parsed = datetime.fromisoformat(value)
     except ValueError:
         return None
-    if start.tzinfo is None:
-        start = start.replace(tzinfo=timezone.utc)
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
+
+def _elapsed_seconds(started_at: str | None) -> int | None:
+    start = _parse_iso(started_at)
+    if start is None:
+        return None
     return max(0, int((datetime.now(timezone.utc) - start).total_seconds()))
+
+
+# The folded ledger record is writer-defined: any key any writer ever appended
+# survives folding, and POST /api/indexing/runs accepts extra keys by design.
+# ``lastRun`` is the endpoint's contract with consumers (the muninn dashboard),
+# so it exposes this FIXED projection — every key always present, None when the
+# run doesn't carry it — instead of the raw record. Internal bookkeeping
+# (``source``, ``stage``, ``unclosedSources``, ``sourceLog``, arbitrary extras)
+# stays out; a writer adding a field makes a deliberate decision to publish it
+# by adding it here, covered by the response-shape test.
+LAST_RUN_FIELDS = (
+    "runId", "startedAt", "finishedAt", "durationSeconds", "status", "variant",
+    "job", "trigger", "documentCount", "chunkCount", "phases", "error",
+)
+
+# Fixed window for medianDurationSeconds, decoupled from the ``history`` query
+# param — two dashboard widgets asking for different history depths must not
+# disagree about what a collection's "median" is.
+MEDIAN_WINDOW_RUNS = 50
+
+
+def _project_run(run: dict | None) -> dict | None:
+    if run is None:
+        return None
+    return {field: run.get(field) for field in LAST_RUN_FIELDS}
+
+
+def _next_run_at(schedule, last_run: dict | None, now: datetime | None = None) -> str | None:
+    """Next scheduled fire as a UTC ``...Z`` timestamp, or None when unknowable.
+
+    launchd calendar entries are machine-local wall-clock while every timestamp
+    this endpoint emits is UTC; computing "next run" server-side is what spares
+    consumers mixing the two (a 2h error in Oslo summer). Wall-clock arithmetic
+    is done in naive local time and converted at the end, so the answer matches
+    what launchd will actually do on this machine. launchd weekday numbering:
+    0 and 7 are both Sunday. ``interval`` schedules fire relative to load time,
+    which this process cannot see — approximated as lastRun.finishedAt + seconds,
+    None when there is no finished run.
+    """
+    if not isinstance(schedule, dict):
+        return None
+    now = now or datetime.now(timezone.utc)
+    local = now.astimezone().replace(tzinfo=None)
+    kind = schedule.get("kind")
+    if kind == "hourly" and isinstance(schedule.get("minute"), int):
+        candidate = local.replace(minute=schedule["minute"], second=0, microsecond=0)
+        if candidate <= local:
+            candidate += timedelta(hours=1)
+    elif kind == "calendar" and isinstance(schedule.get("hour"), int):
+        minute = schedule.get("minute") if isinstance(schedule.get("minute"), int) else 0
+        candidate = local.replace(hour=schedule["hour"], minute=minute,
+                                  second=0, microsecond=0)
+        if candidate <= local:
+            candidate += timedelta(days=1)
+        weekday = schedule.get("weekday")
+        if isinstance(weekday, int):
+            target = (weekday % 7 + 6) % 7  # launchd Sunday=0/7 -> Python Monday=0
+            while candidate.weekday() != target:
+                candidate += timedelta(days=1)
+    elif kind == "interval" and isinstance(schedule.get("seconds"), int):
+        finished = _parse_iso((last_run or {}).get("finishedAt"))
+        if finished is None:
+            return None
+        return (finished + timedelta(seconds=schedule["seconds"])) \
+            .astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    else:
+        return None
+    return candidate.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _current_running(state: dict | None, last_run: dict | None) -> dict | None:
+    """The single "is anything running right now" channel for a collection.
+
+    Merges the two sources that can each see work the other cannot: the
+    in-memory update state (a reindex THIS process is executing) and the folded
+    ledger (a script-side run — fetch/tag phases, or any run on a collection
+    this server does not serve). ``source`` says which side(s) reported:
+    ``reindex`` / ``script`` / ``both``. When both report, ``startedAt`` is the
+    earlier of the two — the script wraps the reindex, so its start is the
+    whole-run start and the elapsed the dashboard should show.
+    """
+    sources = []
+    started = []
+    if state and state.get("status") == "running":
+        sources.append("reindex")
+        started.append(_parse_iso(state.get("startedAt")))
+    if last_run and last_run.get("status") == "running":
+        sources.append("script")
+        started.append(_parse_iso(last_run.get("startedAt")))
+    if not sources:
+        return None
+    known = [s for s in started if s is not None]
+    started_at = min(known).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") \
+        if known else None
+    return {
+        "status": "running",
+        "source": "both" if len(sources) == 2 else sources[0],
+        "startedAt": started_at,
+        "elapsedSeconds": _elapsed_seconds(started_at),
+    }
 
 
 def _median_by_variant(runs: list[dict]) -> dict:
@@ -415,6 +525,16 @@ def indexing_jobs(
     / Notion backfill); iterating only ledger files would advertise collections
     huginn cannot answer searches for. Rows the server does not serve are marked
     ``loaded: false`` instead of being dropped.
+
+    Response contract (what the muninn dashboard couples to):
+    - ``lastRun`` is the fixed ``LAST_RUN_FIELDS`` projection, never the raw
+      folded record; ``history`` entries are the smaller 5-field projection.
+    - ``current`` is the ONE running channel, merging the in-memory reindex
+      state and ledger-side script runs (``source``: reindex/script/both).
+    - ``nextRunAt`` is UTC; the raw ``schedule`` dict keeps launchd's
+      machine-local wall-clock fields and is tagged ``timezone: "local"``.
+    - ``medianDurationSeconds`` is computed over a fixed window
+      (``MEDIAN_WINDOW_RUNS``), independent of the ``history`` param.
     """
     ledger = IndexingRunLedger()
     try:
@@ -435,28 +555,27 @@ def indexing_jobs(
         schedule_entry = schedules.get(name) or {}
         incomplete_after = _incomplete_after_for_schedule(schedule_entry.get("schedule"))
         try:
-            runs = ledger.recent(name, limit=max(history, 50),
+            runs = ledger.recent(name, limit=max(history, MEDIAN_WINDOW_RUNS),
                                  incomplete_after=incomplete_after)
         except Exception:
             logger.warning("Could not read run ledger for %s", name, exc_info=True)
             runs = []
 
         state = store.get_update_status(name) if name in loaded else None
-        current = None
-        if state and state.get("status") == "running":
-            current = {
-                "status": "running",
-                "startedAt": state.get("startedAt"),
-                "elapsedSeconds": _elapsed_seconds(state.get("startedAt")),
-            }
+        last_run = runs[-1] if runs else None
+        schedule = schedule_entry.get("schedule")
 
         jobs.append({
             "collection": name,
             "loaded": name in loaded,
             "job": schedule_entry.get("job"),
-            "schedule": schedule_entry.get("schedule"),
-            "current": current,
-            "lastRun": runs[-1] if runs else None,
+            # Copy, both to tag it and because load_schedules returns its shared
+            # cached dict — mutating that would corrupt the cache for every
+            # later caller.
+            "schedule": {**schedule, "timezone": "local"} if schedule else None,
+            "nextRunAt": _next_run_at(schedule, last_run),
+            "current": _current_running(state, last_run),
+            "lastRun": _project_run(last_run),
             "history": [
                 {
                     "runId": run.get("runId"),
@@ -467,6 +586,6 @@ def indexing_jobs(
                 }
                 for run in runs[-history:]
             ] if history else [],
-            "medianDurationSeconds": _median_by_variant(runs),
+            "medianDurationSeconds": _median_by_variant(runs[-MEDIAN_WINDOW_RUNS:]),
         })
     return {"jobs": jobs}

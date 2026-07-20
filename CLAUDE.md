@@ -96,9 +96,17 @@ job last ran, how long it took, and whether it failed. Backed by JSONL files at
 - Read it over HTTP: `GET /api/indexing/jobs` — per collection returns `current`
   (live status + elapsed), `lastRun`, `history`, `medianDurationSeconds` split by
   variant, `schedule` (from the installed `~/Library/LaunchAgents/com.huginn.*.plist`),
-  and `loaded`. Rows are the union of ledger files and served collections; a
-  collection this server does not serve appears with `loaded: false` rather than
-  being hidden.
+  `nextRunAt`, and `loaded`. Rows are the union of ledger files and served
+  collections; a collection this server does not serve appears with
+  `loaded: false` rather than being hidden. The response is a pinned contract
+  (the muninn dashboard couples to it): `lastRun` is the fixed `LAST_RUN_FIELDS`
+  projection, never the raw folded record; `current` is the single running
+  channel merging in-memory reindex state and ledger-side script runs
+  (`source`: `reindex`/`script`/`both` — API-triggered reindexes report `both`
+  because `try_begin_update` writes the ledger's opening partial); `nextRunAt`
+  is UTC while the raw `schedule` dict stays launchd machine-local wall-clock,
+  tagged `timezone: "local"`; the median window is fixed (`MEDIAN_WINDOW_RUNS`),
+  independent of the `history` param.
 - **Schedule routing:** `main/runtime/indexing_schedule.py` maps job → collections
   by script basename. That table is **empty in this public repo by design** —
   most of the scheduled collection names were never public and one is

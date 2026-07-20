@@ -1002,7 +1002,92 @@ class TestIndexingJobsEndpoint:
         store.try_begin_update("c")
         row = self._client(store).get("/api/indexing/jobs").json()["jobs"][0]
         assert row["current"]["status"] == "running"
+        # try_begin_update also appends the ledger's opening partial, so an
+        # API-triggered reindex is genuinely visible on both channels.
+        assert row["current"]["source"] == "both"
         assert row["current"]["elapsedSeconds"] >= 0
+
+    def test_current_reports_a_script_side_run(self, monkeypatch, tmp_path):
+        """A script-phase run in flight (fetch/tag before the reindex triggers, or
+        any run on an unserved collection) must surface through `current` too —
+        not force every consumer to also inspect lastRun.status."""
+        from datetime import datetime, timezone
+        ledger = self._patch(monkeypatch, tmp_path)
+        started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        ledger.append({"collection": "jira-issues", "runId": "s1",
+                       "source": "script", "stage": "begin", "startedAt": started})
+        body = self._client(self._store(names=("c",))).get("/api/indexing/jobs").json()
+        row = {j["collection"]: j for j in body["jobs"]}["jira-issues"]
+        assert row["current"] == {
+            "status": "running", "source": "script",
+            "startedAt": started, "elapsedSeconds": row["current"]["elapsedSeconds"],
+        }
+        assert row["current"]["elapsedSeconds"] >= 0
+
+    def test_current_merges_both_channels_on_the_earlier_start(
+            self, monkeypatch, tmp_path):
+        """During a wrapped reindex both channels report running. The script
+        wraps the reindex, so its earlier start is the whole-run start."""
+        from datetime import datetime, timedelta, timezone
+        ledger = self._patch(monkeypatch, tmp_path)
+        script_start = (datetime.now(timezone.utc) - timedelta(minutes=10)) \
+            .strftime("%Y-%m-%dT%H:%M:%SZ")
+        ledger.append({"collection": "c", "runId": "s1",
+                       "source": "script", "stage": "begin", "startedAt": script_start})
+        store = self._store()
+        store.try_begin_update("c", run_id="s1")
+        row = self._client(store).get("/api/indexing/jobs").json()["jobs"][0]
+        assert row["current"]["source"] == "both"
+        assert row["current"]["startedAt"] == script_start
+        assert row["current"]["elapsedSeconds"] >= 590
+
+    def test_last_run_is_a_fixed_projection(self, monkeypatch, tmp_path):
+        """The folded record carries whatever keys any writer appended (the open
+        POST accepts extras by design). lastRun is the contract, so it exposes
+        exactly LAST_RUN_FIELDS — always all of them, and nothing else."""
+        from main.routes.collections import LAST_RUN_FIELDS
+        ledger = self._patch(monkeypatch, tmp_path)
+        ledger.append({"collection": "c", "runId": "r1",
+                       "startedAt": "2026-07-18T09:00:00Z",
+                       "finishedAt": "2026-07-18T09:01:00Z", "status": "succeeded",
+                       "source": "script", "padding": "x" * 100,
+                       "sourceLog": "/tmp/x.log"})
+        row = self._client(self._store()).get("/api/indexing/jobs").json()["jobs"][0]
+        assert set(row["lastRun"]) == set(LAST_RUN_FIELDS)
+        assert row["lastRun"]["runId"] == "r1"
+        assert row["lastRun"]["durationSeconds"] == 60
+
+    def test_median_is_independent_of_the_history_param(self, monkeypatch, tmp_path):
+        """?history=N must change how much history is returned, never what the
+        median claims — the median window is fixed at MEDIAN_WINDOW_RUNS."""
+        ledger = self._patch(monkeypatch, tmp_path)
+        for i in range(10):
+            ledger.append({"collection": "c", "runId": f"old{i}",
+                           "durationSeconds": 1000, "status": "succeeded"})
+        for i in range(50):
+            ledger.append({"collection": "c", "runId": f"new{i}",
+                           "durationSeconds": 10, "status": "succeeded"})
+        client = self._client(self._store())
+        deep = client.get("/api/indexing/jobs?history=500").json()["jobs"][0]
+        shallow = client.get("/api/indexing/jobs?history=5").json()["jobs"][0]
+        assert deep["medianDurationSeconds"] == {"incremental": 10}
+        assert shallow["medianDurationSeconds"] == {"incremental": 10}
+        assert len(deep["history"]) == 60
+        assert len(shallow["history"]) == 5
+
+    def test_schedule_is_tagged_local_without_mutating_the_cache(
+            self, monkeypatch, tmp_path):
+        """launchd hours are machine-local wall-clock beside UTC timestamps — the
+        response says so. And load_schedules returns its shared cached dict, so
+        the tag must go on a copy, never the cached entry."""
+        cached_schedule = {"kind": "calendar", "hour": 9, "minute": 15}
+        self._patch(monkeypatch, tmp_path, schedules={
+            "c": {"job": "com.huginn.c-index", "schedule": cached_schedule},
+        })
+        row = self._client(self._store()).get("/api/indexing/jobs").json()["jobs"][0]
+        assert row["schedule"]["timezone"] == "local"
+        assert row["nextRunAt"] is not None
+        assert "timezone" not in cached_schedule
 
     def test_current_is_null_when_idle(self, monkeypatch, tmp_path):
         self._patch(monkeypatch, tmp_path)
@@ -1041,6 +1126,60 @@ class TestIndexingJobsEndpoint:
             assert resp.status_code == 200
         finally:
             os.chmod(ledger.path_for("c"), 0o644)
+
+
+class TestNextRunAt:
+    """Server-side "next fire" so consumers never mix launchd's machine-local
+    wall-clock schedule fields with the endpoint's UTC timestamps."""
+
+    def _fn(self):
+        from main.routes.collections import _next_run_at
+        return _next_run_at
+
+    def _local(self, iso_z):
+        from datetime import datetime, timezone
+        return datetime.strptime(iso_z, "%Y-%m-%dT%H:%M:%SZ") \
+            .replace(tzinfo=timezone.utc).astimezone()
+
+    def test_hourly_fires_at_the_next_minute_mark_within_an_hour(self):
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        result = self._fn()({"kind": "hourly", "minute": 35}, None, now=now)
+        local = self._local(result)
+        assert (local.minute, local.second) == (35, 0)
+        assert timedelta(0) < local - now.astimezone() <= timedelta(hours=1)
+
+    def test_calendar_fires_at_the_local_wall_clock_time(self):
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        result = self._fn()({"kind": "calendar", "hour": 9, "minute": 15}, None, now=now)
+        local = self._local(result)
+        assert (local.hour, local.minute) == (9, 15)
+        assert timedelta(0) < local - now.astimezone() <= timedelta(days=1)
+
+    def test_weekday_calendar_lands_on_that_weekday(self):
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        # launchd weekday 0 = Sunday = Python weekday 6.
+        result = self._fn()(
+            {"kind": "calendar", "hour": 6, "minute": 0, "weekday": 0}, None, now=now)
+        local = self._local(result)
+        assert local.weekday() == 6
+        assert (local.hour, local.minute) == (6, 0)
+        assert timedelta(0) < local - now.astimezone() <= timedelta(days=7)
+
+    def test_interval_derives_from_the_last_finish(self):
+        result = self._fn()({"kind": "interval", "seconds": 600},
+                            {"finishedAt": "2026-07-20T10:00:00Z"})
+        assert result == "2026-07-20T10:10:00Z"
+
+    def test_interval_without_a_finished_run_is_none(self):
+        assert self._fn()({"kind": "interval", "seconds": 600}, None) is None
+
+    def test_absent_or_malformed_schedule_is_none(self):
+        assert self._fn()(None, None) is None
+        assert self._fn()({"kind": "hourly", "minute": None}, None) is None
+        assert self._fn()({"kind": "calendar", "hour": None}, None) is None
 
 
 class TestIncompleteAfterForSchedule:
