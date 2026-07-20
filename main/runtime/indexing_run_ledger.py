@@ -58,7 +58,14 @@ _COLLECTION_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 VALID_TRIGGERS = ("scheduled", "manual", "cli", "unknown")
 VALID_VARIANTS = ("incremental", "rebuild")
-VALID_STATUSES = ("succeeded", "degraded", "failed", "unknown")
+VALID_STATUSES = ("succeeded", "degraded", "failed", "unknown", "running",
+                  "incomplete", "skipped")
+
+# A run whose opening record never got a matching closing record from the same
+# writer is `running` until this age, then `incomplete`. Well clear of the
+# slowest observed job (mimir, ~76 min) and of POLL_TIMEOUT (3600s), and well
+# inside the daily cadence, so a genuinely in-flight run is never mislabelled.
+INCOMPLETE_AFTER_SECONDS = 6 * 3600
 
 
 class InvalidCollectionName(ValueError):
@@ -101,22 +108,36 @@ def rollup_status(phases):
     """Run-level status from phase statuses.
 
     ``failed`` if any phase marked ``fatal`` failed, ``degraded`` if any
-    non-fatal phase failed (or any phase is itself degraded), else ``succeeded``.
+    non-fatal phase failed (or any phase is itself degraded or unknown),
+    ``skipped`` if every phase was skipped, else ``succeeded``.
+
+    ``skipped`` is deliberately NOT a degradation. A reindex skipped on 409
+    means another process is already doing that exact work — expected several
+    times a day for an hourly job — and alarming on it would train the reader to
+    ignore `degraded`. It just must not read as `succeeded`, which would assert
+    an index freshness the run did not deliver.
     """
     if not phases:
         return "unknown"
     degraded = False
+    skipped = 0
     for phase in phases:
         status = phase.get("status")
         if status == "failed":
             if phase.get("fatal"):
                 return "failed"
             degraded = True
-        elif status == "degraded":
+        elif status in ("degraded", "unknown"):
             degraded = True
-        elif status == "unknown":
+        elif status == "skipped":
+            skipped += 1
+        elif status != "succeeded":
+            # A phase with no status, or one this version does not know, is not
+            # evidence of success. Say so rather than rounding it up.
             degraded = True
-    return "degraded" if degraded else "succeeded"
+    if degraded:
+        return "degraded"
+    return "skipped" if skipped == len(phases) else "succeeded"
 
 
 class IndexingRunLedger:
@@ -367,7 +388,7 @@ def _duration(started_at, finished_at):
     return max(0, int((finish - start).total_seconds()))
 
 
-def fold_records(records):
+def fold_records(records, now=None):
     """Fold records sharing a ``runId`` into one run each, oldest group first.
 
     Scalar precedence when two partials collide: job/trigger/variant come from the
@@ -376,6 +397,7 @@ def fold_records(records):
     manifest), errors are concatenated, and status is always recomputed from the
     folded phase list rather than taken from either side.
     """
+    now = now or datetime.now(timezone.utc)
     order = []
     groups = {}
     for index, record in enumerate(records):
@@ -386,7 +408,39 @@ def fold_records(records):
             groups[run_id] = []
             order.append(run_id)
         groups[run_id].append(record)
-    return [_fold_group(run_id, groups[run_id]) for run_id in order]
+    return [_mark_unclosed(_fold_group(run_id, groups[run_id]), groups[run_id], now)
+            for run_id in order]
+
+
+def _mark_unclosed(folded, records, now):
+    """Downgrade a run whose writer opened it but never closed it.
+
+    Each writer that appends an opening partial (``stage: "begin"``) is expected
+    to append a matching ``stage: "end"``. If the script is killed after the
+    reindex finished but before ``run_end``, the group still holds huginn's
+    complete reindex record — and folding it naively would report a tidy
+    15-minute success for a job that actually blocked for 76 and then died. So
+    the missing closer wins over the surviving partial, and the duration is
+    dropped rather than published as if it were the whole run.
+    """
+    begun = {r.get("source") for r in records if r.get("stage") == "begin"}
+    # Compaction rewrites folded runs, which drops the per-record stage markers.
+    # Carrying the unclosed set on the folded record keeps this re-derivable, so
+    # a run compacted while still open is re-evaluated on later reads (and
+    # properly closed by a late-arriving `end`) rather than frozen as `running`.
+    for record in records:
+        begun.update(record.get("unclosedSources") or [])
+    ended = {r.get("source") for r in records if r.get("stage") == "end"}
+    unclosed = sorted(s for s in begun - ended if s)
+    if not unclosed:
+        return folded
+    folded["unclosedSources"] = unclosed
+    started = _parse_ts(folded.get("startedAt"))
+    age = (now - started).total_seconds() if started else None
+    folded["status"] = "running" if age is not None and age < INCOMPLETE_AFTER_SECONDS \
+        else "incomplete"
+    folded["durationSeconds"] = None
+    return folded
 
 
 def _fold_group(run_id, records):
@@ -398,7 +452,7 @@ def _fold_group(run_id, records):
     folded = {"runId": run_id, "collection": records[0].get("collection")}
 
     # Script-side wins: it is the process that knows the job label and trigger.
-    for field in ("job", "trigger", "variant"):
+    for field in ("job", "trigger"):
         value = None
         for record in records:
             candidate = record.get(field)
@@ -409,6 +463,14 @@ def _fold_group(run_id, records):
                 break
         folded[field] = value
     folded.setdefault("trigger", None)
+
+    # `variant` is script-side too, but its OPENING record only carries a guess.
+    # x-feed cannot know whether it is doing an incremental update or a full
+    # rebuild until cleanup has run and reported what it deleted, so the closing
+    # record is the reclassified one and must outrank the partial that opened
+    # the run — otherwise every rebuild medians in with the incrementals it is
+    # an order of magnitude slower than.
+    folded["variant"] = _pick_variant(records)
 
     # huginn-side wins: only huginn reads the collection manifest.
     for field in ("documentCount", "chunkCount"):
@@ -428,11 +490,7 @@ def _fold_group(run_id, records):
     folded["finishedAt"] = _iso(max(finishes)) if finishes else None
     folded["durationSeconds"] = _duration(folded["startedAt"], folded["finishedAt"])
 
-    phases = []
-    for record in records:
-        for phase in record.get("phases") or []:
-            if isinstance(phase, dict):
-                phases.append(phase)
+    phases = _merge_phases(records)
     folded["phases"] = phases
     folded["status"] = rollup_status(phases) if phases else _worst_status(records)
 
@@ -442,6 +500,84 @@ def _fold_group(run_id, records):
     if any(r.get("backfilled") for r in records):
         folded["backfilled"] = True
     return folded
+
+
+def _pick_variant(records):
+    """Best `variant` in the group: a script's closing word beats its opening
+    guess, and either beats huginn's (which only ever infers)."""
+    def rank(record):
+        if record.get("source") != "script":
+            return 0
+        return 1 if record.get("stage") == "begin" else 2
+
+    best, best_rank = None, -1
+    for record in records:
+        value = record.get("variant")
+        if value is None:
+            continue
+        if rank(record) >= best_rank:
+            best, best_rank = value, rank(record)
+    return best
+
+
+def _merge_phases(records):
+    """Union the phase lists, but only ONE phase per name.
+
+    Both sides legitimately report a `reindex` phase for the same work: huginn
+    times the rebuild, the script times trigger-plus-poll around it. Appending
+    both leaves a phase list whose durations sum to more than the run itself (a
+    real 26s run folded to 13s + 16s of "reindex"). huginn's copy wins where it
+    exists — it measures the rebuild rather than the wait for it — and the
+    script's survives on the API-down path where huginn never wrote a record.
+    """
+    merged = {}
+    order = []
+    for record in records:
+        from_huginn = record.get("source") != "script"
+        for phase in record.get("phases") or []:
+            if not isinstance(phase, dict):
+                continue
+            name = phase.get("name")
+            if name is None:
+                order.append(len(merged))
+                merged[len(merged)] = (phase, from_huginn)
+                continue
+            if name not in merged:
+                order.append(name)
+                merged[name] = (phase, from_huginn)
+                continue
+            existing, existing_from_huginn = merged[name]
+            prefer_new = from_huginn and not existing_from_huginn
+            winner, loser = (phase, existing) if prefer_new else (existing, phase)
+            # Duration and detail come from the winner, but the STATUS is the
+            # worse of the two. huginn reporting a clean rebuild must not erase
+            # the script's report that its own wait around that rebuild failed —
+            # in a ledger built to surface failures, a disagreement resolves
+            # pessimistically.
+            winner = dict(winner)
+            winner["status"] = _worse_phase_status(existing.get("status"),
+                                                   phase.get("status"))
+            # Preferring huginn's copy must not COST information. The CLI
+            # adapter writes a reindex phase carrying no duration, so on the
+            # API-down path a blind preference dropped the script's measured
+            # duration and left the phase timeless inside a timed run.
+            for field in ("durationSeconds", "detail"):
+                if winner.get(field) is None and loser.get(field) is not None:
+                    winner[field] = loser[field]
+            merged[name] = (winner, existing_from_huginn or from_huginn)
+    return [merged[key][0] for key in order]
+
+
+# Worst first. `skipped` sits just above `succeeded`: it did less work, so it
+# wins a disagreement against a copy claiming success, but it is not a fault.
+_PHASE_STATUS_ORDER = ("failed", "degraded", "unknown", "skipped", "succeeded")
+
+
+def _worse_phase_status(*statuses):
+    for candidate in _PHASE_STATUS_ORDER:
+        if candidate in statuses:
+            return candidate
+    return next((s for s in statuses if s), None)
 
 
 def _worst_status(records):
@@ -464,7 +600,9 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     appender = sub.add_parser("append", help="Append a JSON run record")
     appender.add_argument("--file", default="-", help="JSON file, or '-' for stdin")
-    appender.add_argument("--runs-dir", default=DEFAULT_RUNS_DIR)
+    # Default None, not DEFAULT_RUNS_DIR: an explicit value would shadow
+    # HUGINN_RUNS_DIR, and this CLI is how the shell fallback writes.
+    appender.add_argument("--runs-dir", default=None)
     args = parser.parse_args(argv)
 
     payload = sys.stdin.read() if args.file == "-" else open(args.file, encoding="utf-8").read()

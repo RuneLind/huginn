@@ -185,13 +185,36 @@ class KnowledgeStore:
                 "finishedAt": None,
                 "error": None,
             }
-            self._update_correlation[collection_name] = {
+            correlation = {
                 "runId": run_id or mint_run_id(collection_name, started_at),
                 "job": job,
                 "trigger": trigger or "manual",
                 "variant": variant or "incremental",
             }
-            return True
+            self._update_correlation[collection_name] = correlation
+
+        # Opening partial, written outside the lock (it is file I/O, and this
+        # lock is the one the search hot path takes). Without it a server
+        # restarted mid-reindex leaves no trace of the run at all: __finish_update
+        # never runs, so nothing is ever appended.
+        self.__record_open(collection_name, started_at, correlation)
+        return True
+
+    def __record_open(self, collection_name, started_at, correlation):
+        try:
+            IndexingRunLedger().append({
+                "runId": correlation["runId"],
+                "collection": collection_name,
+                "job": correlation.get("job"),
+                "trigger": correlation.get("trigger"),
+                "variant": correlation.get("variant"),
+                "startedAt": _to_ledger_ts(started_at),
+                "source": "huginn",
+                "stage": "begin",
+            })
+        except Exception:
+            logger.warning("Could not write opening ledger record for %s",
+                           collection_name, exc_info=True)
 
     def mark_update_succeeded(self, collection_name):
         self.__finish_update(collection_name, "succeeded", None)
@@ -242,6 +265,7 @@ class KnowledgeStore:
                 "phases": [phase],
                 "error": error,
                 "source": "huginn",
+                "stage": "end",
             }
             if status == "succeeded":
                 counts = self.__manifest_counts(collection_name)

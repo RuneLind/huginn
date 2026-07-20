@@ -99,10 +99,64 @@ job last ran, how long it took, and whether it failed. Backed by JSONL files at
   and `loaded`. Rows are the union of ledger files and served collections; a
   collection this server does not serve appears with `loaded: false` rather than
   being hidden.
+- **Schedule routing:** `main/runtime/indexing_schedule.py` maps job → collections
+  by script basename. That table is **empty in this public repo by design** —
+  most of the scheduled collection names were never public and one is
+  customer-adjacent, which `CLAUDE.local.md` bans outright. The names live in
+  each private sub-repo's `scripts/schedule_routing.json`, discovered under
+  `huginn-*/scripts/`, mirroring the `graph_routing.json` precedent. No routing
+  file ⇒ `schedule: null`, the designed degradation. A plist whose
+  `StartCalendarInterval` is 24 entries at one minute reports
+  `{kind: "hourly"}` rather than the first entry's wall-clock time.
 - Writers: `KnowledgeStore.__finish_update` (the API path) and
   `collection_update_cmd_adapter.py` (the CLI fallback). Both emit a `reindex`
-  phase. Shell scripts can append their own phases via
-  `python -m main.runtime.indexing_run_ledger append --file -`.
+  phase. `try_begin_update` also appends an *opening* partial, so a server
+  restarted mid-reindex leaves a trace instead of nothing.
+- **Script phases:** all seven shell jobs report their own phases via
+  `scripts/lib/indexing_run.sh` — `run_begin` / `run_variant` / `phase_begin` /
+  `phase_end` / `run_end`. This is what makes the non-reindex work visible: the
+  fetch-then-index jobs fold to a whole-job duration several times their
+  reindex (one measured 110s against 19s), and the hourly feed job's
+  fetch/score phases were previously outside any record at all. Each converted
+  step is classified fatal or non-fatal explicitly — the scripts genuinely
+  differ, and wrapping them mechanically would silently change which failures
+  are fatal.
+  `run_variant` reclassifies a run already in flight, for the hourly feed job:
+  it only learns whether it is an incremental update or a full rebuild after cleanup
+  reports what it deleted, and the two differ by an order of magnitude. The
+  closing record outranks the opening partial's guess.
+  `run_end` POSTs to `POST /api/indexing/runs`, falling back to
+  `python -m main.runtime.indexing_run_ledger append --file -` when the API is
+  down. Never `>>` the JSONL from shell: macOS has no `flock(1)`, so a redirect
+  cannot take the `LOCK_EX` every other writer holds.
+  Three rules the helper exists to enforce, all of which otherwise abort an
+  unattended job under `set -euo pipefail` — trading "no observability" for
+  "no indexing", which is worse. `tests/test_indexing_run_helper.py` asserts all
+  three, so read that before editing the helper:
+  1. Every exported helper returns 0, and every call site adds `|| true`.
+  2. `RUN_ID` is defaulted in the stub block; call sites use `${RUN_ID:-}`.
+  3. `indexing_run.sh` **ends with an explicit `return 0`** — `.` exits with the
+     status of the sourced file's last command, and neither the `&&`/`||` nor
+     the `if/else` sourcing form fixes that.
+  Everything the helper exports is **observational**, which is what makes the
+  no-op stub guard sound. `poll_update_status` stays duplicated in each script
+  on purpose: it is functional, so stubbing it to `:` would make a script treat
+  every reindex as instantly complete.
+- A run whose writer appended a `stage: "begin"` but never a matching
+  `stage: "end"` folds to `running`, then `incomplete` past
+  `INCOMPLETE_AFTER_SECONDS` (6h), with its duration dropped. A script killed
+  after the reindex would otherwise fold to a tidy 15-minute success.
+- **`skipped` is not `succeeded`.** A reindex skipped because the API answered
+  409 exits 0, and huginn writes no record at all on that path (`try_begin_update`
+  returns False before the opening partial), so recording the phase as
+  `succeeded` would assert an index freshness the run never delivered — every
+  hour, for the hourly job where 409 is the likeliest outcome. Call sites pass
+  the literal `skipped` to `phase_end`. It is deliberately NOT a degradation
+  (another process is doing that exact work; alarming would train the reader to
+  ignore `degraded`): neutral beside real work, `skipped` when every phase was,
+  loses to any genuine failure, and excluded from `medianDurationSeconds`.
+  A phase with no status at all degrades the run — absence of an outcome is not
+  evidence of a good one.
 - **Correlation:** `POST /api/collections/{name}/update` takes an optional body
   `{runId, job, trigger}`, and the CLI adapter takes `--run-id/--job/--trigger`.
   Records sharing a `runId` are folded at read time, which is how a wrapping

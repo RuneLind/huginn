@@ -8,7 +8,11 @@ from statistics import median
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 
-from main.runtime.indexing_run_ledger import VALID_TRIGGERS, IndexingRunLedger
+from main.runtime.indexing_run_ledger import (
+    VALID_TRIGGERS,
+    IndexingRunLedger,
+    InvalidCollectionName,
+)
 from main.runtime.indexing_schedule import load_schedules
 from main.runtime.knowledge_store import KnowledgeStore, get_store, run_collection_update
 
@@ -264,10 +268,46 @@ def _median_by_variant(runs: list[dict]) -> dict:
     buckets: dict[str, list] = {}
     for run in runs:
         duration = run.get("durationSeconds")
-        if duration is None or run.get("status") == "failed":
+        # Only runs that actually completed carry a meaningful duration; a
+        # failed, incomplete or in-flight run would drag the median toward
+        # whatever fraction of the job happened to be recorded.
+        if duration is None or run.get("status") not in ("succeeded", "degraded"):
             continue
         buckets.setdefault(run.get("variant") or "incremental", []).append(duration)
     return {variant: int(median(values)) for variant, values in buckets.items() if values}
+
+
+@router.post("/api/indexing/runs")
+async def append_indexing_run(request: Request):
+    """Append a script-reported run record to the ledger.
+
+    The shell helper posts here so the tagging phase huginn cannot observe lands
+    in the same run as the reindex it can. Both sides only ever APPEND their own
+    partial sharing a ``runId``; folding happens at read time, which is what
+    makes arrival order irrelevant — for mimir huginn's record lands first, but on
+    the 409 and API-down paths the script's does.
+
+    Deliberately not gated on ``store.has_collection``: the CLI-fallback and
+    rebuild paths report runs for collections this process may not serve, and
+    dropping those is exactly the blind spot the ledger exists to remove.
+    """
+    try:
+        record = json.loads(await request.body())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Body must be JSON")
+    if not isinstance(record, dict):
+        raise HTTPException(status_code=400, detail="Body must be a JSON object")
+
+    try:
+        written = IndexingRunLedger().append(record)
+    except InvalidCollectionName as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except OSError as e:
+        logger.warning("Could not append indexing run record", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Could not write ledger: {e}")
+
+    return {"status": "recorded", "runId": written["runId"],
+            "collection": written["collection"]}
 
 
 @router.get("/api/indexing/jobs")
