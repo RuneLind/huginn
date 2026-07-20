@@ -22,19 +22,44 @@ Environment:
                             large. URL is built from KNOWLEDGE_API_URL so the pointer is
                             self-contained — orchestrator does not need to know Huginn's
                             location separately.
+
+This entry file stays the runnable stdio entry point (user MCP configs reference
+it by path). The config/feature detection lives in ``mcp_adapter.config`` and the
+markdown rendering in ``mcp_adapter.formatting``; both are re-exported here so
+``import knowledge_api_mcp_adapter as adapter`` exposes the full symbol surface
+(and ``patch.object`` targets) the test suite depends on.
 """
 import json
 import logging
-import os
 import sys
-from pathlib import Path
 from typing import Literal
 
 import httpx
 from mcp.server.fastmcp import FastMCP
 
-from main.core.trace_store import any_trace_enabled
-from main.graph.graph_search_augmenter import GraphSearchAugmenter
+from mcp_adapter import formatting
+from mcp_adapter.config import (
+    ALLOWED_COLLECTIONS,
+    API_URL,
+    AVAILABLE_TAGS_DOC,
+    KNOWLEDGE_DESCRIPTION,
+    TRACE_DEFAULT,
+    _SEARCH_DOC,
+    _build_search_description,
+    _detect_feature,
+    _has_graph,
+    _has_notion,
+    _has_sessions,
+    _has_tags,
+)
+from mcp_adapter.formatting import (
+    _format_date,
+    _format_relevance,
+    _format_relevance_band,
+    _format_retry_hints,
+    _INTERNAL_METADATA_KEYS,
+    _is_wip,
+)
 
 # Redirect logging to stderr (stdout is reserved for MCP JSON-RPC)
 logging.basicConfig(
@@ -44,159 +69,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-API_URL = os.environ.get("KNOWLEDGE_API_URL", "http://localhost:8321").rstrip("/")
-ALLOWED_COLLECTIONS = [
-    c.strip() for c in os.environ.get("KNOWLEDGE_COLLECTIONS", "").split(",") if c.strip()
-] or None  # None means all collections
-
-KNOWLEDGE_DESCRIPTION = os.environ.get("KNOWLEDGE_DESCRIPTION", "")
-
-# Only enable when an orchestrator (e.g. Muninn) is wired to strip the trace
-# block (or pointer URL) before the LLM sees it — otherwise the full trace
-# lands in model context. See docs/search-tracing-plan.md.
-TRACE_DEFAULT = any_trace_enabled()
-
-def _detect_feature(allowed_collections: list[str] | None, keyword: str) -> bool:
-    """Check if a feature keyword matches any allowed collection name (or all if None)."""
-    return not allowed_collections or any(keyword in c for c in allowed_collections)
-
-
-# Feature detection from collection names and local files
-_has_notion = _detect_feature(ALLOWED_COLLECTIONS, "notion")
-_has_sessions = _detect_feature(ALLOWED_COLLECTIONS, "session")
-# Graph is enabled if at least one graph path env var is set (non-empty) and the file exists
-_knowledge_graph_path = os.environ.get("KNOWLEDGE_GRAPH_PATH", "")
-_jira_graph_path = os.environ.get("JIRA_GRAPH_PATH", "")
-_has_graph = (
-    (_knowledge_graph_path and Path(_knowledge_graph_path).exists())
-    or (_jira_graph_path and Path(_jira_graph_path).exists())
-)
-
-
-def _load_available_tags() -> str:
-    """Load tag taxonomies from scripts/tagging/*_taxonomy.json and format for tool description.
-
-    Only includes taxonomies whose name matches an allowed collection (if KNOWLEDGE_COLLECTIONS is set).
-    Matching is fuzzy: taxonomy 'notion' matches collection 'my-notion-v9', 'my-project' matches 'my-confluence'.
-    """
-    import json
-
-    taxonomy_dir = Path(__file__).parent / "scripts" / "tagging"
-    if not taxonomy_dir.exists():
-        return ""
-
-    parts = []
-    for f in sorted(taxonomy_dir.glob("*_taxonomy.json")):
-        try:
-            data = json.loads(f.read_text())
-            taxonomy_name = f.stem.replace("_taxonomy", "")
-            # Skip if ALLOWED_COLLECTIONS is set and no collection matches this taxonomy
-            if ALLOWED_COLLECTIONS:
-                if not any(taxonomy_name in coll for coll in ALLOWED_COLLECTIONS):
-                    continue
-            all_tags = []
-            for tags in data.get("tags", {}).values():
-                all_tags.extend(tags)
-            if all_tags:
-                parts.append(f"{taxonomy_name}: {', '.join(all_tags)}")
-        except Exception:
-            continue
-    if not parts:
-        return ""
-    return "\n\nAvailable tags per collection:\n" + "\n".join(parts)
-
-
-AVAILABLE_TAGS_DOC = _load_available_tags()
-_has_tags = bool(AVAILABLE_TAGS_DOC)
-
-
-def _build_search_description(
-    description: str | None = None,
-    has_sessions: bool | None = None,
-    has_graph: bool | None = None,
-    has_tags: bool | None = None,
-    tags_doc: str | None = None,
-) -> str:
-    """Assemble search tool description based on available features.
-
-    Parameters accept overrides for testing; defaults to module-level globals.
-    """
-    if description is None:
-        description = KNOWLEDGE_DESCRIPTION
-    if has_sessions is None:
-        has_sessions = _has_sessions
-    if has_graph is None:
-        has_graph = _has_graph
-    if tags_doc is None:
-        tags_doc = AVAILABLE_TAGS_DOC
-    if has_tags is None:
-        has_tags = bool(tags_doc)
-
-    parts = ["Search indexed document collections using vector search."]
-
-    if description:
-        parts.append(f"\nThis knowledge base contains: {description}")
-
-    parts.append(
-        "\n\nUse brief=True for an initial overview (returns titles, URLs, and short snippets)."
-        "\nThen use get_document(collection, doc_id) to fetch full content for specific results."
-        "\n\nEach result includes collection and doc_id fields for use with get_document()."
-        "\nEach document contains a 'url' field — always include it when citing information."
-    )
-
-    if has_sessions:
-        parts.append(
-            "\n\nOptional project and git_branch params filter results by metadata "
-            "(useful for claude-sessions collection)."
-        )
-
-    if has_tags:
-        parts.append(
-            "\nOptional tags param filters by document tags (comma-separated, matches any)."
-        )
-
-    if has_graph:
-        parts.append(
-            '\n\nGraph-enhanced: queries mentioning BUCs (LA_BUC_01), SEDs (A003), '
-            'articles (artikkel 13), or Jira issue keys (PROJECT-1234) automatically get '
-            'entity detection, query expansion, and graph context annotations. Relational queries '
-            '("hvilke SEDer inneholder LA_BUC_02?", "hvilke issues tilhører PROJECT-6079?") '
-            'may return a direct graph_answer before the search results.'
-        )
-
-    if tags_doc:
-        parts.append(tags_doc)
-
-    return "".join(parts)
-
-
-_SEARCH_DOC = _build_search_description()
-
 mcp = FastMCP("knowledge", instructions=KNOWLEDGE_DESCRIPTION or None)
-
-
-def _format_relevance(score):
-    """Format relevance score as percentage string."""
-    if score is None:
-        return ""
-    return f"{score * 100:.1f}% relevant"
-
-
-def _format_date(date_str):
-    """Extract YYYY-MM-DD from an ISO datetime string."""
-    if not date_str:
-        return ""
-    return date_str[:10]
-
-
-def _is_wip(result):
-    """Check if a search result is flagged as work-in-progress."""
-    meta = result.get("metadata") or {}
-    return meta.get("wip") == "true"
-
-
-# Metadata keys that are internal and should not be shown in MCP output
-_INTERNAL_METADATA_KEYS = {"page_id", "space", "breadcrumb", "title", "wip"}
 
 
 def _api_get(path: str, params: dict | None = None, timeout: float = 30.0) -> httpx.Response:
@@ -204,48 +77,27 @@ def _api_get(path: str, params: dict | None = None, timeout: float = 30.0) -> ht
     return httpx.get(f"{API_URL}{path}", params=params, timeout=timeout)
 
 
-def _format_relevance_band(r: dict) -> str:
-    """Format a result's relevance + confidence band, e.g. ' (82.0% relevant · high)'."""
-    rel = r.get("relevance")
-    if rel is None:
-        return ""
-    band = r.get("confidenceBand")
-    return f" ({_format_relevance(rel)}{' · ' + band if band else ''})"
+def _append_trace_marker(text: str, data: dict) -> str:
+    if not TRACE_DEFAULT:
+        return text
+    trace_id = data.get("traceId")
+    if trace_id:
+        return text + f"\n\nhuginn-trace-url: {API_URL}/api/trace/{trace_id}\n"
+    if data.get("trace") is not None:
+        return text + f"\n\n```huginn-trace\n{json.dumps(data['trace'], ensure_ascii=False)}\n```"
+    return text
 
 
-def _format_retry_hints(data: dict) -> str:
-    """Render retryHints / noConfidentResults into a compact suggestion line, or ''.
-
-    On a successful rescue, emit a one-line marker naming the original + rescue
-    query instead of the weak-match footer — gives the model an explicit "these
-    came from a fallback" signal without re-listing hints it already tried.
-    When rescue fired but the result is still weak, keep the footer so muninn's
-    Path C defence-in-depth still has signal."""
-    corrective = data.get("corrective") or {}
-    if corrective.get("verdict") == "rescued":
-        queries_tried = corrective.get("queriesTried") or []
-        if len(queries_tried) >= 2:
-            original, rescue_q = queries_tried[0], queries_tried[-1]
-            strategy = corrective.get("rescueStrategy")
-            strategy_suffix = f" [{strategy}]" if strategy else ""
-            return (
-                f'\n\n*Rescued via broader query "{rescue_q}"{strategy_suffix} — '
-                f'original query "{original}" found no confident match.*'
-            )
-        return ""
-    hints = data.get("retryHints") or {}
-    bits = []
-    related = hints.get("relatedTerms")
-    if related:
-        bits.append("related terms: " + ", ".join(related))
-    if hints.get("narrowerQuery"):
-        bits.append(f'narrower query: "{hints["narrowerQuery"]}"')
-    if hints.get("broaderQuery"):
-        bits.append(f'broader query: "{hints["broaderQuery"]}"')
-    if not bits and not data.get("noConfidentResults"):
-        return ""
-    prefix = "No confident match" if data.get("noConfidentResults") else "Weak match"
-    return f"\n\n*{prefix} — try: {' · '.join(bits)}*" if bits else f"\n\n*{prefix}.*"
+def _format_graph_error(e: Exception, node_id: str) -> str:
+    if isinstance(e, httpx.ConnectError):
+        return f"Knowledge API server is not running at {API_URL}."
+    if isinstance(e, httpx.HTTPStatusError):
+        if e.response.status_code == 404:
+            return f"Node '{node_id}' not found in graph."
+        if e.response.status_code == 503:
+            return "Knowledge graph not loaded on the server."
+        return f"API returned {e.response.status_code}: {e.response.text}"
+    return f"Error calling Knowledge API: {e}"
 
 
 def _search_knowledge_impl(
@@ -312,68 +164,8 @@ def _search_knowledge_impl(
         text = f"No results found for '{query}'{low}." + _format_retry_hints(data)
         return _append_trace_marker(text, data)
 
-    parts = []
-    if data.get("graph_answer"):
-        parts.append(f"**Graph:**\n{data['graph_answer']}\n")
-    if data.get("lowConfidence"):
-        parts.append("*Low confidence results — query may not match indexed content well.*\n")
-
-    if brief:
-        for i, r in enumerate(results, 1):
-            heading = f" > {r['heading']}" if r.get("heading") else ""
-            relevance = _format_relevance_band(r)
-            date = f" | {_format_date(r['modifiedTime'])}" if r.get("modifiedTime") else ""
-            breadcrumb = f"\n   {r['breadcrumb']}" if r.get("breadcrumb") else ""
-            wip = " **[UNDER ARBEID]**" if _is_wip(r) else ""
-            graph_ctx = f"\n   *{' | '.join(r[GraphSearchAugmenter.GRAPH_CONTEXT_KEY])}*" if r.get(GraphSearchAugmenter.GRAPH_CONTEXT_KEY) else ""
-            meta = r.get("metadata") or {}
-            visible_meta = {k: v for k, v in meta.items() if k not in _INTERNAL_METADATA_KEYS and v}
-            meta_line = f"\n   *{' | '.join(f'{k}: {v}' for k, v in visible_meta.items())}*" if visible_meta else ""
-            parts.append(
-                f"{i}. **{r['title']}**{heading}{wip}{relevance}{date}\n"
-                f"   {r.get('url', '')}{breadcrumb}\n"
-                f"   {r.get('snippet', '')}{graph_ctx}{meta_line}\n"
-                f"   collection: `{r['collection']}` doc_id: `{r['id']}`"
-            )
-    else:
-        for r in results:
-            relevance = _format_relevance_band(r)
-            date = f" | updated: {_format_date(r['modifiedTime'])}" if r.get("modifiedTime") else ""
-            wip = " **[UNDER ARBEID]**" if _is_wip(r) else ""
-            header = f"## {r['title']}{wip}{relevance}{date}"
-            if r.get("url"):
-                header += f"\n{r['url']}"
-            if r.get("breadcrumb"):
-                header += f"\n{r['breadcrumb']}"
-            header += f"\ncollection: `{r['collection']}` doc_id: `{r['id']}`"
-            if r.get(GraphSearchAugmenter.GRAPH_CONTEXT_KEY):
-                header += f"\n*{' | '.join(r[GraphSearchAugmenter.GRAPH_CONTEXT_KEY])}*"
-            chunks = r.get("matchedChunks", [])
-            chunk_lines = []
-            for chunk in chunks:
-                if chunk.get("heading"):
-                    chunk_lines.append(f"**{chunk['heading']}**")
-                chunk_lines.append(chunk.get("content", ""))
-                if chunk.get("metadata"):
-                    visible_meta = {k: v for k, v in chunk["metadata"].items() if k not in _INTERNAL_METADATA_KEYS}
-                    if visible_meta:
-                        meta_str = " | ".join(f"{k}: {v}" for k, v in visible_meta.items())
-                        chunk_lines.append(f"*{meta_str}*")
-            parts.append(header + "\n\n" + "\n\n".join(chunk_lines))
-
-    text = "\n\n".join(parts) + _format_retry_hints(data)
+    text = formatting.render_results(data, brief) + _format_retry_hints(data)
     return _append_trace_marker(text, data)
-
-
-def _append_trace_marker(text: str, data: dict) -> str:
-    if not TRACE_DEFAULT:
-        return text
-    trace_id = data.get("traceId")
-    if trace_id:
-        return text + f"\n\nhuginn-trace-url: {API_URL}/api/trace/{trace_id}\n"
-    if data.get("trace") is not None:
-        return text + f"\n\n```huginn-trace\n{json.dumps(data['trace'], ensure_ascii=False)}\n```"
-    return text
 
 
 def get_document(collection: str, doc_id: str) -> str:
@@ -394,22 +186,7 @@ def get_document(collection: str, doc_id: str) -> str:
         return f"API returned {e.response.status_code}: {e.response.text}"
     except Exception as e:
         return f"Error calling Knowledge API: {e}"
-
-    title = doc.get("title", doc_id)
-    url = doc.get("url", "")
-    text = doc.get("text", "")
-    metadata = doc.get("metadata") or {}
-    is_wip = metadata.get("wip") == "true"
-
-    header = f"# {title}"
-    if is_wip:
-        header += "\n**[UNDER ARBEID]** Dette dokumentet er merket som under arbeid i Confluence."
-    if url:
-        header += f"\n{url}"
-    visible_meta = {k: v for k, v in metadata.items() if k not in _INTERNAL_METADATA_KEYS and v}
-    if visible_meta:
-        header += "\n" + " | ".join(f"**{k}:** {v}" for k, v in visible_meta.items())
-    return f"{header}\n\n{text}"
+    return formatting.render_document(doc, doc_id)
 
 
 def get_notion_page(notion_id: str, source: str = "auto") -> str:
@@ -430,16 +207,7 @@ def get_notion_page(notion_id: str, source: str = "auto") -> str:
         return f"API returned {e.response.status_code}: {e.response.text}"
     except Exception as e:
         return f"Error calling Knowledge API: {e}"
-
-    title = page.get("title", "Untitled")
-    url = page.get("url", "")
-    content = page.get("content", "")
-    source_label = f" (source: {page.get('source', 'live')})" if page.get("source") else ""
-
-    header = f"# {title}{source_label}"
-    if url:
-        header += f"\n{url}"
-    return f"{header}\n\n{content}"
+    return formatting.render_notion_page(page)
 
 
 def list_collections() -> str:
@@ -460,27 +228,7 @@ def list_collections() -> str:
         collections = [c for c in collections if c["name"] in ALLOWED_COLLECTIONS]
     if not collections:
         return "No collections loaded."
-
-    lines = ["**Loaded collections:**\n"]
-    for c in collections:
-        lines.append(
-            f"- **{c['name']}**: {c.get('document_count', '?')} documents, "
-            f"{c.get('embedding_count', '?')} embeddings"
-            f" (updated: {c.get('updatedTime', 'unknown')})"
-        )
-    return "\n".join(lines)
-
-
-def _format_graph_error(e: Exception, node_id: str) -> str:
-    if isinstance(e, httpx.ConnectError):
-        return f"Knowledge API server is not running at {API_URL}."
-    if isinstance(e, httpx.HTTPStatusError):
-        if e.response.status_code == 404:
-            return f"Node '{node_id}' not found in graph."
-        if e.response.status_code == 503:
-            return "Knowledge graph not loaded on the server."
-        return f"API returned {e.response.status_code}: {e.response.text}"
-    return f"Error calling Knowledge API: {e}"
+    return formatting.render_collections(collections)
 
 
 def get_graph_node(node_id: str, edge_types: str | None = None) -> str:
@@ -501,25 +249,7 @@ def get_graph_node(node_id: str, edge_types: str | None = None) -> str:
         data = resp.json()
     except Exception as e:
         return _format_graph_error(e, node_id)
-
-    parts = [f"**{data['label']}** ({data['type']})"]
-
-    props = data.get("properties", {})
-    if props:
-        prop_lines = [f"  {k}: {v}" for k, v in props.items()]
-        parts.append("Properties:\n" + "\n".join(prop_lines))
-
-    outgoing = data.get("outgoing", [])
-    if outgoing:
-        edge_lines = [f"  --{e['type']}--> {e['target_label']}" for e in outgoing]
-        parts.append(f"Outgoing ({len(outgoing)}):\n" + "\n".join(edge_lines))
-
-    incoming = data.get("incoming", [])
-    if incoming:
-        edge_lines = [f"  <--{e['type']}-- {e['source_label']}" for e in incoming]
-        parts.append(f"Incoming ({len(incoming)}):\n" + "\n".join(edge_lines))
-
-    return "\n\n".join(parts)
+    return formatting.render_graph_node(data)
 
 
 def get_graph_subtree(
@@ -551,39 +281,7 @@ def get_graph_subtree(
         data = resp.json()
     except Exception as e:
         return _format_graph_error(e, node_id)
-
-    stats = data.get("stats", {})
-    parts = [
-        f"**Subtree from {data['root']}** (depth={stats.get('max_depth')}, direction={stats.get('direction')})",
-        f"Nodes: {stats.get('node_count')} ({stats.get('by_node_type', {})})",
-        f"Edges: {stats.get('edge_count')} ({stats.get('by_edge_type', {})})",
-    ]
-
-    nodes_by_id = {n["id"]: n for n in data.get("nodes", [])}
-    node_lines = []
-    from_excluded_ids = []
-    for n in data.get("nodes", []):
-        if n["id"] == data["root"]:
-            continue
-        marker = " [stub: from_excluded]" if n.get("properties", {}).get("from_excluded") else ""
-        node_lines.append(f"  {n['id']}: {n['label']}{marker}")
-        if marker:
-            from_excluded_ids.append(n["id"])
-    if node_lines:
-        header = "Nodes"
-        if from_excluded_ids:
-            header += f" ({len(from_excluded_ids)} stub-subtasks enriched from .excluded/)"
-        parts.append(f"{header}:\n" + "\n".join(node_lines))
-
-    edge_lines = []
-    for e in data.get("edges", []):
-        src_label = nodes_by_id.get(e["source"], {}).get("label", e["source"])
-        tgt_label = nodes_by_id.get(e["target"], {}).get("label", e["target"])
-        edge_lines.append(f"  {src_label} --{e['type']}--> {tgt_label}")
-    if edge_lines:
-        parts.append("Edges:\n" + "\n".join(edge_lines))
-
-    return "\n\n".join(parts)
+    return formatting.render_graph_subtree(data)
 
 
 def list_tags(collection: str | None = None) -> str:
@@ -610,20 +308,15 @@ def list_tags(collection: str | None = None) -> str:
 
     if not data:
         return "No tag data available."
-
-    parts = []
-    for coll_name, info in data.items():
-        tags = info.get("tags", {})
-        if not tags:
-            parts.append(f"**{coll_name}**: no tags")
-            continue
-        parts.append(f"**{coll_name}** ({info.get('unique_tags', 0)} tags):")
-        for tag, count in tags.items():
-            parts.append(f"  {tag}: {count} docs")
-    return "\n".join(parts)
+    return formatting.render_tags(data)
 
 
 # --- Signature variants for search_knowledge (controls which params the agent sees) ---
+#
+# The *signature* of the registered function is what the MCP framework
+# introspects to build the tool's parameter schema, so these variants are how
+# the schema varies by feature detection. Do not collapse them: the per-variant
+# signatures + dispatch identity are pinned by tests.
 
 
 def _search_with_sessions_and_tags(
