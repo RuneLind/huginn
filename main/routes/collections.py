@@ -238,6 +238,26 @@ async def update_collection(
     return {"status": "update_started", "collection": name}
 
 
+@router.post("/api/collections/{name}/reload")
+def reload_collection(name: str, store: KnowledgeStore = Depends(get_store)):
+    """Swap a served collection's in-memory searcher for the one on disk.
+
+    A rebuild done out-of-band (the x-feed watch job builds a fresh index under a
+    temp name and renames it into place) leaves this process serving its stale
+    in-memory searcher until someone reloads it. This endpoint does exactly that
+    reload without any rebuild of its own.
+
+    Gated on ``has_collection``: ``reload_collection`` unconditionally inserts into
+    ``self.searchers``, so an ungated route would let a caller load an arbitrary new
+    collection this server was never configured to serve. Unknown collection ⇒ 404.
+    """
+    if not store.has_collection(name):
+        raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
+
+    store.reload_collection(name)
+    return {"reloaded": name}
+
+
 @router.get("/api/collections/{name}/update-status")
 def collection_update_status(name: str, store: KnowledgeStore = Depends(get_store)):
     """Report the outcome of the most recent (or in-flight) update for a collection.
