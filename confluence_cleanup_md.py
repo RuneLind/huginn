@@ -77,38 +77,27 @@ def match_title_noise_pattern(title, noise_patterns):
     return None
 
 
+# Per-source line policy: drop boilerplate headings and reference-only lines.
+CONFLUENCE_LINE_FILTERS = [
+    BOILERPLATE_HEADINGS.match,
+    lambda line: any(p.match(line) for p in REFERENCE_PATTERNS),
+]
+
+
 def classify_body(body_text, min_content_length, min_word_count=0):
-    """Classify body content. Returns reason string or None if content is fine."""
-    stripped = body_text.strip()
+    """Classify body content. Returns reason string or None if content is fine.
 
-    if not stripped:
-        return "empty_stub"
-
-    # Filter out boilerplate headings and reference-only lines
-    meaningful_lines = []
-    for line in stripped.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if BOILERPLATE_HEADINGS.match(line):
-            continue
-        if any(p.match(line) for p in REFERENCE_PATTERNS):
-            continue
-        meaningful_lines.append(line)
-
-    if not meaningful_lines:
-        return "reference_only"
-
-    actual_text = " ".join(meaningful_lines)
-    if len(actual_text) < min_content_length:
-        return "minimal_content"
-
-    if min_word_count > 0:
-        word_count = len(actual_text.split())
-        if word_count < min_word_count:
-            return "low_word_count"
-
-    return None
+    Confluence policy: strip boilerplate headings and reference-only lines; a
+    page with nothing but those is ``reference_only``. The strip/threshold
+    machinery lives in ``md_cleanup.classify_body``.
+    """
+    return md_cleanup.classify_body(
+        body_text,
+        min_content_length,
+        CONFLUENCE_LINE_FILTERS,
+        min_word_count=min_word_count,
+        filtered_empty_reason="reference_only",
+    )
 
 
 SANITIZE_LINE_PATTERNS = [

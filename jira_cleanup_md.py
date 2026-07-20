@@ -130,43 +130,32 @@ def compute_exclusion(metadata, body, age_cutoff, noise_patterns,
     return (None, None)
 
 
+# Per-source line policy: drop the issue-title heading (# KEY: title), the epic
+# reference line, and section headings.
+JIRA_ISSUE_TITLE_HEADING = re.compile(r'^#\s+\S+-\d+:')
+JIRA_SECTION_HEADING = re.compile(r'^#{1,6}\s+')
+JIRA_LINE_FILTERS = [
+    JIRA_ISSUE_TITLE_HEADING.match,
+    lambda line: line.startswith("**Epic:**"),
+    JIRA_SECTION_HEADING.match,
+]
+
+
 def classify_body(body_text, min_content_length, min_word_count=0):
-    """Classify body content. Returns reason string or None if content is fine."""
-    stripped = body_text.strip()
+    """Classify body content. Returns reason string or None if content is fine.
 
-    if not stripped:
-        return "empty_stub"
-
-    # Strip markdown headings and formatting for content analysis
-    meaningful_lines = []
-    for line in stripped.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        # Skip the issue title heading (# KEY: title)
-        if re.match(r'^#\s+\S+-\d+:', line):
-            continue
-        # Skip Epic reference line
-        if line.startswith("**Epic:**"):
-            continue
-        # Skip section headings
-        if re.match(r'^#{1,6}\s+', line):
-            continue
-        meaningful_lines.append(line)
-
-    if not meaningful_lines:
-        return "empty_stub"
-
-    actual_text = " ".join(meaningful_lines)
-    if len(actual_text) < min_content_length:
-        return "minimal_content"
-
-    if min_word_count > 0:
-        word_count = len(actual_text.split())
-        if word_count < min_word_count:
-            return "low_word_count"
-
-    return None
+    Jira policy: strip the issue-title heading, the epic pointer, and section
+    headings; an issue with nothing but those reports ``empty_stub`` — a
+    deliberate divergence from confluence/notion, which call the same
+    all-filtered shape ``reference_only``. Preserved via ``filtered_empty_reason``.
+    """
+    return md_cleanup.classify_body(
+        body_text,
+        min_content_length,
+        JIRA_LINE_FILTERS,
+        min_word_count=min_word_count,
+        filtered_empty_reason="empty_stub",
+    )
 
 
 def main():
