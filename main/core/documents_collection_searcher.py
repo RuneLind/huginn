@@ -1,12 +1,10 @@
 import hashlib
 import json
 import logging
-import re
 import time
 
-import numpy as np
-
 from main.core import search_response_formatter as _formatter
+from main.core.search_policy import SearchPolicy
 from main.core.search_trace import NULL_TRACE
 from main.utils.filename import title_from_doc_path
 from main.utils.performance import delta_ms
@@ -72,6 +70,7 @@ class DocumentCollectionSearcher:
         self.indexer = indexer
         self.persister = persister
         self.reranker = reranker
+        self._policy = SearchPolicy()
         self._doc_cache = {}
         # Load the index→document mapping once and pair it with the in-memory
         # index for this searcher's lifetime. A background update rewrites the
@@ -153,7 +152,9 @@ class DocumentCollectionSearcher:
             t_rerank = t_index
             logger.info(f"Search '{self.collection_name}' (no rerank): index={delta_ms(t0, t_index)}ms")
 
-        scores, indexes = self._apply_title_boost(title_boost_query, scores, indexes, coll_trace)
+        scores, indexes = self._policy.apply_title_boost(
+            title_boost_query, scores, indexes, self._mapping, coll_trace
+        )
         t_boost = time.monotonic()
 
         if coll_trace.enabled:
@@ -172,10 +173,10 @@ class DocumentCollectionSearcher:
 
         results_before_filter = len(results)
         if use_reranker and results:
-            response = self._apply_confidence_filtering(response)
+            response = self._policy.apply_confidence_filtering(response)
         if coll_trace.enabled:
             filtered = response["results"]
-            best = self._best_chunk_score(filtered[0]) if filtered else None
+            best = self._policy.best_chunk_score(filtered[0]) if filtered else None
             coll_trace.set_confidence(
                 low_confidence=response.get("lowConfidence", False),
                 best_score=best,
@@ -227,78 +228,6 @@ class DocumentCollectionSearcher:
                     document_id=entry["documentId"],
                     doc_title=title_from_doc_path(entry.get("documentPath", "")),
                 )
-
-    def _apply_confidence_filtering(self, response):
-        results = response["results"]
-
-        # Filter out documents where all matched chunks are noise
-        filtered = [
-            doc for doc in results
-            if self._best_chunk_score(doc) <= self.NOISE_THRESHOLD
-        ]
-        response["results"] = filtered
-
-        # Flag response as low confidence if best remaining result is weak
-        if not filtered or self._best_chunk_score(filtered[0]) > self.LOW_CONFIDENCE_THRESHOLD:
-            response["lowConfidence"] = True
-
-        return response
-
-    @staticmethod
-    def _best_chunk_score(doc):
-        return min(chunk["score"] for chunk in doc["matchedChunks"])
-
-    def _apply_title_boost(self, query, scores, indexes, coll_trace=None):
-        """Boost scores for documents whose title matches query terms.
-
-        Boost magnitude scales with the score spread so it works across
-        different score types (cross-encoder, hybrid RRF, FAISS L2).
-        """
-        mapping = self._mapping
-        query_tokens = set(re.findall(r'\w+', query.lower()))
-        if not query_tokens or len(scores[0]) < 2:
-            return scores, indexes
-
-        # Scale boost to score range (scores sorted ascending, lower = better)
-        score_range = float(scores[0][-1] - scores[0][0])
-        if score_range < 1e-6:
-            score_range = max(abs(float(scores[0][0])) * 0.1, 0.01)
-        boost_per_term = -score_range * 0.5
-        boost_cap = -score_range * 1.5
-
-        # Calculate and apply boosts in a single pass
-        doc_boosts = {}
-        boosted_scores = scores[0].copy()
-        any_boost = False
-
-        for i, chunk_id in enumerate(indexes[0]):
-            entry = mapping.get(str(int(chunk_id)))
-            if not entry:
-                continue
-            doc_id = entry["documentId"]
-            if doc_id not in doc_boosts:
-                title = title_from_doc_path(entry.get("documentPath", "")).replace("-", " ").replace("_", " ")
-                title_tokens = set(re.findall(r'\w+', title.lower()))
-                overlap = len(query_tokens & title_tokens)
-                doc_boosts[doc_id] = max(boost_per_term * overlap, boost_cap) if overlap > 0 else 0.0
-            if doc_boosts[doc_id] != 0.0:
-                boosted_scores[i] += doc_boosts[doc_id]
-                any_boost = True
-
-        if coll_trace is not None and coll_trace.enabled:
-            for doc_id, delta in doc_boosts.items():
-                if delta != 0.0:
-                    coll_trace.record_title_boost(doc_id, delta)
-
-        if not any_boost:
-            return scores, indexes
-
-        # Re-sort by boosted score (lower = better)
-        order = np.argsort(boosted_scores)
-        return (
-            np.array([boosted_scores[order]], dtype=scores.dtype),
-            np.array([indexes[0][order]], dtype=indexes.dtype),
-        )
 
     def _should_skip_reranker(self, query):
         """Skip reranker for English queries (cross-lingual score collapse)."""
