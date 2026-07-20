@@ -4,6 +4,7 @@ Centralizes the env-var + auto-glob convention used by both the HTTP API server
 and the multi-collection MCP adapter so they pick up the same set of graphs
 without re-implementing the resolution.
 """
+import glob
 import json
 import logging
 import os
@@ -16,11 +17,25 @@ logger = logging.getLogger(__name__)
 
 
 _ENV_PATH_VARS = ("KNOWLEDGE_GRAPH_PATH", "JIRA_GRAPH_PATH", "LLM_GRAPH_PATH")
-_AUTO_GLOB_DIRS = (
-    "./huginn-jarvis/scripts/knowledge_graph",
-    "./huginn-nav/scripts/knowledge_graph",
-    "./scripts/knowledge_graph",
-)
+# Private sub-repos each ship a scripts/knowledge_graph dir; the local repo has
+# its own. No private sub-repo name lives in this public repo — they are
+# globbed, mirroring indexing_schedule.py's huginn-* routing discovery.
+_PRIVATE_SUBREPO_GLOB = "huginn-*/scripts/knowledge_graph"
+_LOCAL_GRAPH_DIR = "./scripts/knowledge_graph"
+
+
+def _discover_auto_glob_dirs():
+    """Sub-repo graph dirs (sorted) followed by the local scripts dir.
+
+    ``sorted()`` is load-bearing: raw glob order is filesystem-dependent, and
+    ``resolve_graph_output_path`` picks the *first* dir marked ``"default": true``
+    and returns on the *first* dir listing a collection — so routing precedence
+    would otherwise be nondeterministic across machines.
+    """
+    return tuple(sorted(glob.glob(_PRIVATE_SUBREPO_GLOB))) + (_LOCAL_GRAPH_DIR,)
+
+
+_AUTO_GLOB_DIRS = _discover_auto_glob_dirs()
 _AUTO_GLOB_PATTERN = "*_llm_graph.json"
 _ROUTING_CONFIG_NAME = "graph_routing.json"
 
