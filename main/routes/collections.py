@@ -254,7 +254,18 @@ def reload_collection(name: str, store: KnowledgeStore = Depends(get_store)):
     if not store.has_collection(name):
         raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
 
-    store.reload_collection(name)
+    # reload_collection builds the new searcher before swapping it in, so a
+    # failure here (a missing/broken on-disk dir at reload time) leaves the old
+    # in-memory searcher untouched and still serving. Surface a clean 500 saying
+    # so, instead of a bare traceback.
+    try:
+        store.reload_collection(name)
+    except Exception as e:
+        logger.warning("Could not reload collection %s", name, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not reload collection '{name}': {e}; previous index still serving",
+        )
     return {"reloaded": name}
 
 

@@ -760,6 +760,19 @@ class TestCollectionReload:
         resp = self._client(self._store()).post("/api/collections/nope/reload")
         assert resp.status_code == 404
 
+    def test_reload_failure_returns_clean_500(self, monkeypatch):
+        store = self._store()
+
+        def boom(name):
+            raise RuntimeError("on-disk index gone")
+
+        monkeypatch.setattr(store, "reload_collection", boom)
+        resp = self._client(store).post("/api/collections/c/reload")
+        assert resp.status_code == 500
+        detail = resp.json()["detail"]
+        assert "c" in detail
+        assert "previous index still serving" in detail
+
 
 class TestUpdateCorrelation:
     """The optional {runId, job, trigger} body on POST /update.
