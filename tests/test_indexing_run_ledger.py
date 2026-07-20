@@ -733,3 +733,142 @@ class TestSkippedRollup:
         runs = [{"durationSeconds": 10, "status": "succeeded", "variant": "incremental"},
                 {"durationSeconds": 2, "status": "skipped", "variant": "incremental"}]
         assert _median_by_variant(runs) == {"incremental": 10}
+
+
+class TestAnonymousRunIdCollision:
+    """An anonymous record (no runId) enters only via raw/legacy JSONL — append()
+    mints one — so these write raw lines to the ledger file directly, then fold /
+    compact. The bug: compaction persisted the fold's positional ``__anon_{index}``
+    runId, so a later anonymous record landing at that same enumerate index folded
+    into an unrelated stored run. The fix strips the synthetic id at compaction."""
+
+    def _write_raw_anon(self, path, count):
+        with open(path, "w", encoding="utf-8") as handle:
+            for i in range(count):
+                handle.write(json.dumps({
+                    "collection": "c",
+                    # Distinct content so these are genuinely distinct runs; still
+                    # no runId, so the fold assigns each a positional __anon_N.
+                    "startedAt": f"2026-07-18T09:{i % 60:02d}:{i // 60 % 60:02d}Z",
+                    "status": "succeeded",
+                }) + "\n")
+
+    def test_compaction_does_not_persist_a_positional_anon_id(self, tmp_path):
+        from main.runtime.indexing_run_ledger import COMPACT_LINE_THRESHOLD
+        ledger = IndexingRunLedger(runs_dir=str(tmp_path))
+        path = ledger.path_for("c")
+        # Enough distinct anonymous raw lines to trip compaction on read.
+        self._write_raw_anon(path, COMPACT_LINE_THRESHOLD + 5)
+        ledger.recent("c", limit=None)  # folds and compacts the file in place
+
+        with open(path, encoding="utf-8") as handle:
+            persisted = [json.loads(line) for line in handle if line.strip()]
+        assert persisted, "compaction wrote nothing"
+        # No positional synthetic id may reach disk, or a later anonymous record at
+        # the same enumerate index would fold into one of these stored runs.
+        assert all(not str(r.get("runId", "")).startswith("__anon_")
+                   for r in persisted)
+
+    def test_distinct_anonymous_records_survive_a_compaction_roundtrip(self, tmp_path):
+        from main.runtime.indexing_run_ledger import COMPACT_LINE_THRESHOLD, MAX_RUNS_PER_COLLECTION
+        ledger = IndexingRunLedger(runs_dir=str(tmp_path))
+        path = ledger.path_for("c")
+        self._write_raw_anon(path, COMPACT_LINE_THRESHOLD + 5)
+        # First read compacts to the cap; a second read must still see that many
+        # SEPARATE runs, not a smaller number collapsed by id collision.
+        ledger.recent("c", limit=None)
+        assert len(ledger.recent("c", limit=None)) == MAX_RUNS_PER_COLLECTION
+
+
+class TestRecordSizeGuard:
+    """`_truncate_details` drops oversized phase detail rather than dropping the
+    record; the run stays visible, the bloated payload does not."""
+
+    def test_truncate_details_drops_big_detail_and_flags_only_that_phase(self):
+        big = {"blob": "x" * 5000}
+        record = {"collection": "c", "runId": "c-1", "phases": [
+            {"name": "reindex", "status": "succeeded", "detail": big},
+            {"name": "tag", "status": "succeeded", "detail": {"small": 1}},
+        ]}
+        out = IndexingRunLedger._truncate_details(record)
+        reindex = next(p for p in out["phases"] if p["name"] == "reindex")
+        tag = next(p for p in out["phases"] if p["name"] == "tag")
+        assert reindex["detail"] is None
+        assert reindex["detailTruncated"] is True
+        # A small detail is left intact and unflagged.
+        assert tag["detail"] == {"small": 1}
+        assert "detailTruncated" not in tag
+
+    def test_append_truncates_an_oversized_record_but_still_writes_it(self, tmp_path):
+        from main.runtime.indexing_run_ledger import MAX_RECORD_BYTES
+        ledger = IndexingRunLedger(runs_dir=str(tmp_path))
+        huge = "y" * (MAX_RECORD_BYTES + 10_000)
+        ledger.append({
+            "collection": "c", "runId": "c-huge",
+            "startedAt": "2026-07-18T09:00:00Z", "finishedAt": "2026-07-18T09:05:00Z",
+            "phases": [{"name": "reindex", "status": "succeeded", "fatal": True,
+                        "detail": {"blob": huge}}],
+        })
+        # The oversized line is written and re-readable, with the detail dropped.
+        path = ledger.path_for("c")
+        with open(path, encoding="utf-8") as handle:
+            lines = [line for line in handle if line.strip()]
+        assert len(lines) == 1
+        assert len(lines[0].encode("utf-8")) <= MAX_RECORD_BYTES
+        run = ledger.recent("c", limit=5)[0]
+        phase = run["phases"][0]
+        assert phase["detail"] is None
+        assert phase.get("detailTruncated") is True
+
+
+def _run_helper(script, runs_dir, api_url="http://127.0.0.1:59999"):
+    """Run a snippet with the real helper sourced, a dead API, and a scratch
+    ledger — so `_ir_emit` takes its module-fallback write path."""
+    helper = os.path.join(REPO_ROOT, "scripts", "lib", "indexing_run.sh")
+    prelude = (
+        "set -euo pipefail\n"
+        f"PROJECT_DIR={REPO_ROOT!r}\n"
+        f"API_URL={api_url!r}\n"
+        f". {helper!r}\n"
+    )
+    env = dict(os.environ, HUGINN_RUNS_DIR=str(runs_dir))
+    return subprocess.run(["bash", "-c", prelude + script], env=env,
+                          capture_output=True, text=True)
+
+
+class TestShellHeredocPayloadContract:
+    def test_shell_emitted_payload_validates_through_normalize(self, tmp_path):
+        """`_ir_emit` assembles records by hand in a python heredoc. A field rename
+        there (e.g. `collection` → `collectionName`) would surface ONLY in
+        production: the module rejects the record and it silently never lands. Run
+        the real helper against a dead API and re-validate every line it wrote
+        through `_normalize`, so such a rename fails here instead."""
+        result = _run_helper(
+            'run_begin c com.huginn.test scheduled || true\n'
+            'phase_begin fetch 0; rc=0; true || rc=$?; phase_end "$rc" || true\n'
+            'run_end "" || true\n',
+            tmp_path,
+        )
+        assert result.returncode == 0, result.stderr
+        path = os.path.join(str(tmp_path), "c.jsonl")
+        with open(path, encoding="utf-8") as handle:
+            raw = [json.loads(line) for line in handle if line.strip()]
+        assert raw, f"shell wrote no record; stderr={result.stderr}"
+        ledger = IndexingRunLedger(runs_dir=str(tmp_path))
+        for record in raw:
+            normalized = ledger._normalize(record)
+            assert normalized["collection"] == "c"
+            assert normalized["runId"] == record["runId"]
+            assert normalized["source"] == "script"
+        closing = next(r for r in raw if r.get("stage") == "end")
+        assert [p["name"] for p in closing["phases"]] == ["fetch"]
+
+
+def test_ledger_never_imports_the_schedule_module():
+    """Layering invariant: the ledger takes `incomplete_after` from its caller and
+    must never learn the launchd cadence itself, or the CLI path (no store, no
+    launchd) breaks. Pinned against the source, not sys.modules — other tests
+    legitimately import the schedule module."""
+    import main.runtime.indexing_run_ledger as ledger_mod
+    with open(ledger_mod.__file__, encoding="utf-8") as handle:
+        assert "indexing_schedule" not in handle.read()

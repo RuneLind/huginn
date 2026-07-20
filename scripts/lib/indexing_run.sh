@@ -263,10 +263,31 @@ sys.stdout.write(json.dumps(record, ensure_ascii=False))
         200|201|204) return 0 ;;
     esac
 
-    # API down or rejecting: same JSON, same writer, through the module.
-    printf '%s' "$payload" \
-        | (cd "${PROJECT_DIR:-.}" && uv run python -m main.runtime.indexing_run_ledger append --file -) \
-        >/dev/null 2>&1 || true
+    # API down or rejecting: same JSON, same writer, through the module. The
+    # module import resolves `main` from the process cwd, so the fallback MUST run
+    # from PROJECT_DIR — under launchd cwd is `/`, where a `cd "${PROJECT_DIR:-.}"`
+    # default of `.` would run the appender from `/`, find no `main` package, and
+    # lose the record with no trace. If PROJECT_DIR is unset there is nowhere valid
+    # to run it, so say so on stderr (launchd captures it) rather than write
+    # nowhere silently.
+    if [ -z "${PROJECT_DIR:-}" ]; then
+        printf 'indexing_run: PROJECT_DIR unset; cannot persist run record for %s\n' \
+            "${_IR_COLLECTION:-?}" >&2
+        return 0
+    fi
+    # Prefer the checkout's venv (the server's own interpreter, always present in
+    # a real deployment); fall back to `uv run` where it is absent. stderr, never
+    # /dev/null: a lost fallback write is the exact blind spot this path closes,
+    # so a failure to append must leave a line launchd can surface.
+    if [ -x "${PROJECT_DIR}/.venv/bin/python" ]; then
+        printf '%s' "$payload" \
+            | (cd "$PROJECT_DIR" && ./.venv/bin/python -m main.runtime.indexing_run_ledger append --file -) >&2 \
+            || printf 'indexing_run: ledger append failed for %s\n' "${_IR_COLLECTION:-?}" >&2
+    else
+        printf '%s' "$payload" \
+            | (cd "$PROJECT_DIR" && uv run python -m main.runtime.indexing_run_ledger append --file -) >&2 \
+            || printf 'indexing_run: ledger append failed for %s\n' "${_IR_COLLECTION:-?}" >&2
+    fi
     return 0
 }
 

@@ -2,6 +2,8 @@ import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from main.runtime.knowledge_store import KnowledgeStore, run_collection_update
 
 
@@ -123,6 +125,50 @@ class TestUpdateState:
         store = KnowledgeStore()
         assert store.try_begin_update("a") is True
         assert store.try_begin_update("b") is True
+
+    def test_409_path_appends_no_ledger_record(self, tmp_path, monkeypatch):
+        """A concurrent update is refused (409) BEFORE the opening partial is
+        written, so it must add nothing to the ledger. Recording it as a run
+        would assert index work that never happened — every hour, for the hourly
+        job where 409 is the likeliest outcome. Guards ``__record_open`` staying
+        below the running-check in ``try_begin_update``."""
+        monkeypatch.setenv("HUGINN_RUNS_DIR", str(tmp_path))
+        from main.runtime.indexing_run_ledger import IndexingRunLedger
+
+        def line_count():
+            path = IndexingRunLedger(runs_dir=str(tmp_path)).path_for("c")
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    return sum(1 for line in handle if line.strip())
+            except FileNotFoundError:
+                return 0
+
+        store = KnowledgeStore()
+        assert store.try_begin_update("c") is True  # writes the opening partial
+        before = line_count()
+        assert before == 1
+        assert store.try_begin_update("c") is False  # 409: writes nothing
+        assert line_count() == before
+
+
+class TestReloadCollectionResilience:
+    def test_reload_failure_keeps_the_old_searcher_serving(self, monkeypatch):
+        """A failed on-disk reload must leave the previous in-memory searcher in
+        place. The route test monkeypatches ``reload_collection`` itself; this
+        pins the store method — ``_build_searcher`` runs BEFORE the swap, so its
+        failure never touches ``self.searchers``."""
+        store = KnowledgeStore()
+        old = object()
+        store.searchers["c"] = old
+        store._build_aux_indexes = False
+
+        def boom(name):
+            raise RuntimeError("on-disk index gone")
+
+        monkeypatch.setattr(store, "_build_searcher", boom)
+        with pytest.raises(RuntimeError):
+            store.reload_collection("c")
+        assert store.searchers["c"] is old
 
 
 class TestRunCollectionUpdate:

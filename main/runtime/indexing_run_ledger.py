@@ -56,6 +56,12 @@ MAX_RECORD_BYTES = 64 * 1024
 
 _COLLECTION_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
+# Prefix of the per-read synthetic runId minted for a record that arrived with
+# none. It is positional (the enumerate index), so it MUST NOT be persisted:
+# compaction strips it (`_strip_synthetic_run_id`) so a later anonymous record at
+# the same index cannot fold into an unrelated stored run.
+_ANON_PREFIX = "__anon_"
+
 VALID_TRIGGERS = ("scheduled", "manual", "cli", "unknown")
 VALID_VARIANTS = ("incremental", "rebuild")
 VALID_STATUSES = ("succeeded", "degraded", "failed", "unknown", "running",
@@ -63,7 +69,7 @@ VALID_STATUSES = ("succeeded", "degraded", "failed", "unknown", "running",
 
 # A run whose opening record never got a matching closing record from the same
 # writer is `running` until this age, then `incomplete`. Well clear of the
-# slowest observed job (mimir, ~76 min) and of POLL_TIMEOUT (3600s), and well
+# slowest observed job (~76 min) and of POLL_TIMEOUT (3600s), and well
 # inside the daily cadence, so a genuinely in-flight run is never mislabelled.
 INCOMPLETE_AFTER_SECONDS = 6 * 3600
 
@@ -76,7 +82,7 @@ def validate_collection(collection):
     """Validate a collection name BEFORE it is used to build any path.
 
     With PR 2 this value arrives in a POST body, so a name like
-    ``../../collections/mimir/manifest`` must be rejected outright rather than
+    ``../../collections/wiki/manifest`` must be rejected outright rather than
     sanitised — same posture as the realpath check in ``main/routes/collections.py``
     for user-supplied document paths.
     """
@@ -89,6 +95,25 @@ def validate_collection(collection):
 
 def now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def to_iso_z(value):
+    """Fixed-width ISO-8601 UTC (``YYYY-MM-DDTHH:MM:SSZ``) from a datetime, an ISO
+    string, or a falsy value (``None``).
+
+    The single timestamp formatter shared by every *Python* writer of the ledger:
+    the API path (``knowledge_store``) and the backfill both route through here so
+    their records carry the identical fixed-width form the fold sorts on. The
+    shell writer cannot share this code — ``test_indexing_run_helper`` pins its
+    ``_ir_iso`` output to the same shape instead. A string that does not parse is
+    returned unchanged, matching the ``_to_ledger_ts`` this replaced.
+    """
+    if not value:
+        return None
+    moment = value if isinstance(value, datetime) else _parse_ts(value)
+    if moment is None:
+        return value
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def mint_run_id(collection, started_at=None):
@@ -235,7 +260,7 @@ class IndexingRunLedger:
         record["status"] = status
 
         if record.get("durationSeconds") is None:
-            record["durationSeconds"] = _duration(
+            record["durationSeconds"] = duration_seconds(
                 record.get("startedAt"), record.get("finishedAt")
             )
 
@@ -325,6 +350,23 @@ class IndexingRunLedger:
 
     # ----------------------------------------------------------- compaction
 
+    @staticmethod
+    def _strip_synthetic_run_id(run):
+        """Drop a per-read positional ``__anon_N`` runId before persisting a run.
+
+        The fold mints ``__anon_{index}`` for a record with no runId so identical
+        anonymous records stay distinct within one read. Persisting that index
+        would let a later anonymous record enumerating to the same index fold into
+        this stored run — the anonymous-id collision. Stripping it here means the
+        rewritten file holds no synthetic ids, so every anonymous record is freshly
+        (and independently) re-enumerated on the next read.
+        """
+        run_id = run.get("runId")
+        if isinstance(run_id, str) and re.fullmatch(rf"{_ANON_PREFIX}\d+", run_id):
+            run = dict(run)
+            run.pop("runId", None)
+        return run
+
     def _before_replace_hook(self):
         """Test seam: raised-from here simulates a crash between temp write and
         replace, which must leave the previous ledger fully intact."""
@@ -338,7 +380,8 @@ class IndexingRunLedger:
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as handle:
                     for run in runs:
-                        handle.write(json.dumps(run, ensure_ascii=False) + "\n")
+                        handle.write(json.dumps(self._strip_synthetic_run_id(run),
+                                                ensure_ascii=False) + "\n")
                     handle.flush()
                     os.fsync(handle.fileno())
                 self._before_replace_hook()
@@ -390,7 +433,12 @@ def _fsync_dir(directory):
         os.close(dir_fd)
 
 
-def _duration(started_at, finished_at):
+def duration_seconds(started_at, finished_at):
+    """Whole seconds between two ISO timestamps, or None if either is unparseable.
+
+    Shared by the ledger fold, the API writer (``knowledge_store``) and the
+    backfill, so all three agree on the (clamped, integer) duration convention.
+    """
     start, finish = _parse_ts(started_at), _parse_ts(finished_at)
     if start is None or finish is None:
         return None
@@ -415,7 +463,13 @@ def fold_records(records, now=None, incomplete_after=None):
     for index, record in enumerate(records):
         if not isinstance(record, dict):
             continue
-        run_id = record.get("runId") or f"__anon_{index}"
+        # Positional grouping for records with no runId: two identical anonymous
+        # records are legitimately two runs, so they must NOT collapse together
+        # (test_records_without_a_run_id_stay_separate). The synthetic id is
+        # per-read only — `_compact` strips it before persisting so it never
+        # reaches disk, where a later anonymous record at the same enumerate index
+        # would otherwise fold into it. See `_strip_synthetic_run_id`.
+        run_id = record.get("runId") or f"{_ANON_PREFIX}{index}"
         if run_id not in groups:
             groups[run_id] = []
             order.append(run_id)
@@ -511,7 +565,7 @@ def _fold_group(run_id, records):
     finishes = [t for t in (_parse_ts(r.get("finishedAt")) for r in records) if t]
     folded["startedAt"] = _iso(min(starts)) if starts else None
     folded["finishedAt"] = _iso(max(finishes)) if finishes else None
-    folded["durationSeconds"] = _duration(folded["startedAt"], folded["finishedAt"])
+    folded["durationSeconds"] = duration_seconds(folded["startedAt"], folded["finishedAt"])
 
     phases = _sort_phases_by_started_at(_merge_phases(records))
     folded["phases"] = phases
@@ -641,7 +695,7 @@ def _worst_status(records):
 
 
 def _iso(moment):
-    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return to_iso_z(moment)
 
 
 def main(argv=None):

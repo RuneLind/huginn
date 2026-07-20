@@ -440,8 +440,8 @@ async def append_indexing_run(request: Request):
     The shell helper posts here so the tagging phase huginn cannot observe lands
     in the same run as the reindex it can. Both sides only ever APPEND their own
     partial sharing a ``runId``; folding happens at read time, which is what
-    makes arrival order irrelevant — for mimir huginn's record lands first, but on
-    the 409 and API-down paths the script's does.
+    makes arrival order irrelevant — for an API-triggered reindex huginn's record
+    lands first, but on the 409 and API-down paths the script's does.
 
     Deliberately not gated on ``store.has_collection``: the CLI-fallback and
     rebuild paths report runs for collections this process may not serve, and
@@ -484,7 +484,7 @@ async def append_indexing_run(request: Request):
 
 
 # Floor for the cadence-derived incomplete threshold. Comfortably above the
-# slowest observed job (mimir, ~76 min) and POLL_TIMEOUT (3600s), so a genuinely
+# slowest observed job (~76 min) and POLL_TIMEOUT (3600s), so a genuinely
 # in-flight run is never mislabelled `incomplete` even on a short cadence.
 _INCOMPLETE_FLOOR_SECONDS = 2 * 3600
 

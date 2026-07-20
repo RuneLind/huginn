@@ -13,19 +13,19 @@ Design notes worth keeping:
   families, so this keys on MARKER TEXT rather than on the log filename family.
   That also handles the three ``daily_update_2026-05-12_*.log`` files that
   survived from two months before the retention window: every prune pattern is
-  family-scoped (``-name 'daily_mimir_*.log'`` and friends) and none of them
+  family-scoped (``-name 'daily_wiki_*.log'`` and friends) and none of them
   matches that filename shape. Keying on marker text picks them up as the Notion
   runs they are, with no filename special-case.
 * Three families (Jira, Confluence, Notion) carry no collection name in the
   marker and have no installed plist, so they need the explicit map below.
-* The jarvis-wiki marker covers two collections and is split into two records.
-* Unterminated runs are real (anthropic has 22 starts vs 21 finishes). They are
+* The wiki marker covers two collections and is split into two records.
+* Unterminated runs are real (one family has 22 starts vs 21 finishes). They are
   recorded with status "unknown", no finishedAt and no duration, rather than
   guessed at or dropped.
 * trigger is "unknown", never "scheduled": the logs contain obvious manual runs
-  (mimir has 18:12, 21:38 and 22:20 starts alongside the scheduled 09:15), and
-  labelling those as scheduled would corrupt the schedule-drift signal the
-  dashboard exists to show.
+  (one collection has 18:12, 21:38 and 22:20 starts alongside the scheduled
+  09:15), and labelling those as scheduled would corrupt the schedule-drift
+  signal the dashboard exists to show.
 * x-feed is excluded: it appends to one 322MB ``logs/x_feed_update.log`` with no
   per-run files and no start/finish markers, so its runs are not delimited.
 """
@@ -39,7 +39,11 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from main.runtime.indexing_run_ledger import IndexingRunLedger  # noqa: E402
+from main.runtime.indexing_run_ledger import (  # noqa: E402
+    IndexingRunLedger,
+    duration_seconds,
+    to_iso_z,
+)
 
 TIMESTAMP_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]")
 
@@ -48,6 +52,10 @@ FINISH_RE = re.compile(r"===\s*(?P<label>.+?)\s+update finished")
 FAILED_RE = re.compile(r"===\s*FAILED:")
 
 # Marker labels that name no collection and have no installed plist to consult.
+# These three collection names are deliberately spelled out: all three appear in
+# this repo's public CLAUDE.md "Common collections" table, so they carry no
+# private information (unlike the scheduled names the schedule module keeps out
+# of the public repo).
 LABEL_COLLECTIONS = {
     "Daily Jira": ["jira-issues"],
     "Daily Confluence": ["melosys-confluence-v3"],
@@ -60,7 +68,7 @@ LABEL_COLLECTIONS = {
 def _collections_for(label, args):
     """Collections a start marker refers to.
 
-    ``args`` is the parenthesised part: ``collection=mimir`` or
+    ``args`` is the parenthesised part: ``collection=wiki`` or
     ``collections=wiki wiki-life``. The plural form is split into one record per
     collection.
     """
@@ -78,10 +86,6 @@ def _parse_time(line):
         return None
     naive = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
     return naive.replace(tzinfo=timezone.utc)
-
-
-def _iso(moment):
-    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def parse_log(path):
@@ -127,19 +131,17 @@ def parse_log(path):
 
 
 def _record(collection, started_at, finished_at, status, source_path):
-    duration = (
-        max(0, int((finished_at - started_at).total_seconds()))
-        if finished_at else None
-    )
+    started_iso = to_iso_z(started_at)
+    finished_iso = to_iso_z(finished_at)
     return {
-        "runId": f"backfill-{collection}-{_iso(started_at)}",
+        "runId": f"backfill-{collection}-{started_iso}",
         "collection": collection,
         "job": None,
         "trigger": "unknown",
         "variant": "incremental",
-        "startedAt": _iso(started_at),
-        "finishedAt": _iso(finished_at) if finished_at else None,
-        "durationSeconds": duration,
+        "startedAt": started_iso,
+        "finishedAt": finished_iso,
+        "durationSeconds": duration_seconds(started_iso, finished_iso),
         "status": status,
         "phases": [],
         "documentCount": None,
