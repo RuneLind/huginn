@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from main.graph.graph_loader import (
+    _discover_auto_glob_dirs,
     check_graph_staleness,
     discover_graph_paths,
     resolve_graph_output_path,
@@ -74,6 +75,28 @@ class TestDiscoverGraphPaths:
         with caplog.at_level(logging.WARNING, logger="main.graph.graph_loader"):
             assert discover_graph_paths() == []
         assert caplog.records == []
+
+
+class TestDiscoverAutoGlobDirs:
+    def test_globs_all_huginn_subrepos_sorted_then_local(self, tmp_path, monkeypatch):
+        # A hypothetical third huginn-* sub-repo must be discovered alongside the
+        # existing two, with no sub-repo name hardcoded. Results are sorted so
+        # routing precedence (first "default" / first listing wins) is
+        # deterministic regardless of filesystem glob order.
+        for name in ("huginn-nav", "huginn-jarvis", "huginn-newthing"):
+            (tmp_path / name / "scripts" / "knowledge_graph").mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        dirs = _discover_auto_glob_dirs()
+        assert dirs == (
+            "huginn-jarvis/scripts/knowledge_graph",
+            "huginn-nav/scripts/knowledge_graph",
+            "huginn-newthing/scripts/knowledge_graph",
+            "./scripts/knowledge_graph",
+        )
+
+    def test_no_subrepos_yields_only_local_dir(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        assert _discover_auto_glob_dirs() == ("./scripts/knowledge_graph",)
 
 
 class TestResolveGraphOutputPath:
