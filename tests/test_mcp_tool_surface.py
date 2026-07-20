@@ -2,14 +2,22 @@
 
 PR E splits ``knowledge_api_mcp_adapter.py`` into a package. The split must be
 byte-compatible on the MCP tool surface: every tool name, description, and
-parameter schema must be identical to the pre-split (origin/main) module. This
-test registers the tools from *both* the current module and the origin/main
+parameter schema must be identical to the pre-split single-file module. This
+test registers the tools from *both* the current module and the pre-split
 version of the file (loaded in isolation from git) under an identical
 environment, then asserts the exposed tool set is identical.
 
-If ``git show origin/main:knowledge_api_mcp_adapter.py`` is unavailable (e.g. a
-shallow checkout in CI), the origin comparison is skipped and the test only
-asserts the current surface is internally well-formed.
+The baseline is pinned to the immutable pre-split blob at commit ``6d09a45``
+(the last commit before this PR touched the file) rather than ``origin/main``.
+Once this PR merges, ``origin/main`` *becomes* the split entry file, so a
+``git show origin/main:...`` baseline would compare the split against itself —
+a tautology that proves nothing. The pinned blob keeps the test meaningful
+forever: it is the real pre-split surface, and it has no ``mcp_adapter`` package
+imports, so exec'ing it in isolation cannot pick up the split working tree.
+
+If ``git show 6d09a45:knowledge_api_mcp_adapter.py`` is unavailable (e.g. a
+shallow checkout in CI without that history), the comparison is skipped and the
+test only asserts the current surface is internally well-formed.
 
 Run standalone for a human-readable diff:  python tests/test_mcp_tool_surface.py
 """
@@ -75,11 +83,19 @@ def _current_surface() -> dict:
         _reload_adapter()
 
 
-def _origin_surface() -> dict | None:
-    """Load origin/main's single-file adapter in isolation and register its tools."""
+# Immutable pre-split snapshot of the single-file adapter — the last commit
+# before this PR split it into the mcp_adapter package. Pinned (not origin/main)
+# so the baseline stays the true pre-split surface after this PR merges; that
+# blob has no mcp_adapter imports, so exec'ing it can't resolve against the split
+# working tree.
+PRESPLIT_COMMIT = "6d09a45"
+
+
+def _presplit_surface() -> dict | None:
+    """Load the pre-split single-file adapter in isolation and register its tools."""
     try:
         src = subprocess.check_output(
-            ["git", "show", "origin/main:knowledge_api_mcp_adapter.py"],
+            ["git", "show", f"{PRESPLIT_COMMIT}:knowledge_api_mcp_adapter.py"],
             cwd=REPO_ROOT,
             stderr=subprocess.DEVNULL,
         ).decode()
@@ -87,16 +103,16 @@ def _origin_surface() -> dict | None:
         return None
 
     with _patched_env():
-        mod = types.ModuleType("_origin_mcp_adapter")
+        mod = types.ModuleType("_presplit_mcp_adapter")
         mod.__file__ = str(REPO_ROOT / "knowledge_api_mcp_adapter.py")
-        # The origin module does `if __name__ == "__main__"` — give it a
+        # The pre-split module does `if __name__ == "__main__"` — give it a
         # non-main name so it does not start the stdio server.
-        sys.modules["_origin_mcp_adapter"] = mod
+        sys.modules["_presplit_mcp_adapter"] = mod
         try:
             exec(compile(src, mod.__file__, "exec"), mod.__dict__)
             return _tool_surface(mod.mcp)
         finally:
-            sys.modules.pop("_origin_mcp_adapter", None)
+            sys.modules.pop("_presplit_mcp_adapter", None)
 
 
 class _patched_env:
@@ -129,14 +145,14 @@ def test_current_surface_registers_expected_tools():
     assert set(surface) == EXPECTED_TOOLS
 
 
-def test_surface_matches_origin_main():
-    origin = _origin_surface()
+def test_surface_matches_presplit_baseline():
+    origin = _presplit_surface()
     if origin is None:
-        pytest.skip("origin/main:knowledge_api_mcp_adapter.py not available")
+        pytest.skip(f"{PRESPLIT_COMMIT}:knowledge_api_mcp_adapter.py not available")
     current = _current_surface()
     assert set(current) == set(origin), (
         f"tool names differ: only-current={set(current) - set(origin)} "
-        f"only-origin={set(origin) - set(current)}"
+        f"only-presplit={set(origin) - set(current)}"
     )
     for name in origin:
         assert current[name]["description"] == origin[name]["description"], f"description differs for {name}"
@@ -144,10 +160,10 @@ def test_surface_matches_origin_main():
 
 
 if __name__ == "__main__":
-    origin = _origin_surface()
+    origin = _presplit_surface()
     current = _current_surface()
     if origin is None:
-        print("origin/main version unavailable — printing current surface only")
+        print("pre-split version unavailable — printing current surface only")
         print(json.dumps(current, indent=2, sort_keys=True))
         raise SystemExit(0)
     names_diff = set(current) ^ set(origin)
