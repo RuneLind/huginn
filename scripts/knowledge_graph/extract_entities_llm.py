@@ -18,7 +18,6 @@ import re
 import sys
 import time
 import urllib.request
-import urllib.error
 from collections import defaultdict
 from pathlib import Path
 
@@ -28,9 +27,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from main.graph.graph_loader import get_collection_manifest, resolve_graph_output_path
+from main.utils.ollama_cli import call_ollama as call_ollama_chat
 
-
-OLLAMA_URL = "http://localhost:11434/api/chat"
 
 SYSTEM_PROMPT = """You are an entity and relationship extraction system.
 Extract the most important entities and relationships from the given text.
@@ -70,40 +68,41 @@ Title: {title}
 
 
 def call_ollama(model: str, text: str, title: str, timeout: int = 300) -> dict | None:
-    """Call Ollama to extract entities from a document."""
+    """Call Ollama to extract entities from a document.
+
+    Wraps the shared ``call_ollama`` transport (imported as ``call_ollama_chat``)
+    and restores this caller's swallow-and-continue contract: a transport/JSON
+    failure or a response ``error`` field (both of which the shared helper
+    raises as ``RuntimeError``) return ``None`` instead of propagating, and the
+    raw string content is fence-stripped and ``json.loads``-parsed to a dict.
+    ``temperature=0`` is pinned here (the shared default is 0.2) so entity
+    extraction stays deterministic; ``num_predict`` rides in via ``options``.
+    """
     user_content = USER_PROMPT_TEMPLATE.format(title=title, text=text[:3000])
 
-    payload = json.dumps({
-        "model": model,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
-        "stream": False,
-        "think": False,
-        "format": "json",
-        "options": {"temperature": 0, "num_predict": 3000},
-    }).encode()
-
-    req = urllib.request.Request(
-        OLLAMA_URL,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-    )
-
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            result = json.loads(resp.read())
-            content = result.get("message", {}).get("content", "")
-            if not content:
-                return None
-            # Strip markdown code fences if present
-            content = content.strip()
-            if content.startswith("```"):
-                content = re.sub(r'^```(?:json)?\s*', '', content)
-                content = re.sub(r'\s*```$', '', content)
-            return json.loads(content)
-    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as e:
+        content = call_ollama_chat(
+            user_content,
+            model=model,
+            timeout=timeout,
+            temperature=0,
+            system=SYSTEM_PROMPT,
+            options={"num_predict": 3000},
+        )
+    except RuntimeError as e:
+        print(f"  Error: {e}")
+        return None
+
+    if not content:
+        return None
+    # Strip markdown code fences if present
+    content = content.strip()
+    if content.startswith("```"):
+        content = re.sub(r'^```(?:json)?\s*', '', content)
+        content = re.sub(r'\s*```$', '', content)
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as e:
         print(f"  Error: {e}")
         return None
 

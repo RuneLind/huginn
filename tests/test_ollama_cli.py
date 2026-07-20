@@ -50,6 +50,73 @@ class TestCallOllama:
         assert data["messages"] == [{"role": "user", "content": "prompt-text"}]
         assert captured["timeout"] == 90
 
+    def test_system_prepends_system_message(self):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["data"] = json.loads(req.data)
+            return _resp({"message": {"content": "ok"}})
+
+        with patch("main.utils.ollama_cli.urllib.request.urlopen", side_effect=fake_urlopen):
+            call_ollama("user-text", model="m", system="sys-text")
+
+        assert captured["data"]["messages"] == [
+            {"role": "system", "content": "sys-text"},
+            {"role": "user", "content": "user-text"},
+        ]
+
+    def test_no_system_omits_system_message(self):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["data"] = json.loads(req.data)
+            return _resp({"message": {"content": "ok"}})
+
+        with patch("main.utils.ollama_cli.urllib.request.urlopen", side_effect=fake_urlopen):
+            call_ollama("user-text", model="m")
+
+        assert captured["data"]["messages"] == [{"role": "user", "content": "user-text"}]
+
+    def test_options_shallow_merge_over_temperature(self):
+        """options composes with temperature: base {temperature} with the
+        caller's options merged on top (so an explicit temperature in options
+        wins and extra keys like num_predict ride alongside)."""
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["data"] = json.loads(req.data)
+            return _resp({"message": {"content": "ok"}})
+
+        with patch("main.utils.ollama_cli.urllib.request.urlopen", side_effect=fake_urlopen):
+            call_ollama("hi", model="m", temperature=0.2,
+                        options={"temperature": 0, "num_predict": 3000})
+
+        assert captured["data"]["options"] == {"temperature": 0, "num_predict": 3000}
+
+    def test_options_none_keeps_temperature_only(self):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["data"] = json.loads(req.data)
+            return _resp({"message": {"content": "ok"}})
+
+        with patch("main.utils.ollama_cli.urllib.request.urlopen", side_effect=fake_urlopen):
+            call_ollama("hi", model="m", temperature=0.7)
+
+        assert captured["data"]["options"] == {"temperature": 0.7}
+
+    def test_options_adds_key_without_dropping_temperature(self):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["data"] = json.loads(req.data)
+            return _resp({"message": {"content": "ok"}})
+
+        with patch("main.utils.ollama_cli.urllib.request.urlopen", side_effect=fake_urlopen):
+            call_ollama("hi", model="m", temperature=0.2, options={"num_predict": 4000})
+
+        assert captured["data"]["options"] == {"temperature": 0.2, "num_predict": 4000}
+
     def test_default_model(self):
         def fake_urlopen(req, timeout=None):
             assert json.loads(req.data)["model"] == DEFAULT_MODEL

@@ -1,16 +1,11 @@
-import json
 import logging
-import urllib.error
-import urllib.request
 
 from main.core.contextual_prefix.parsing import parse_prefix_array
 from main.core.contextual_prefix.prompts import PREFIX_SYSTEM_PROMPT, render_user_prompt
+from main.utils.ollama_cli import OLLAMA_URL, call_ollama
 
 
 logger = logging.getLogger(__name__)
-
-
-OLLAMA_URL = "http://localhost:11434/api/chat"
 
 
 class OllamaBackend:
@@ -64,33 +59,22 @@ class OllamaBackend:
 
     def _generate_batch(self, document_text: str, batch_chunks: list[str]) -> list[str]:
         user_content = render_user_prompt(document_text, batch_chunks)
-        payload = json.dumps({
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": PREFIX_SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
-            "stream": False,
-            "think": False,
-            "format": "json",
-            "options": {
-                "temperature": self.temperature,
-                "num_predict": self.num_predict,
-            },
-        }).encode("utf-8")
-
-        req = urllib.request.Request(
-            self.host,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
 
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                result = json.loads(resp.read())
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
+            content = call_ollama(
+                user_content,
+                model=self.model,
+                timeout=self.timeout,
+                host=self.host,
+                temperature=self.temperature,
+                system=PREFIX_SYSTEM_PROMPT,
+                options={"num_predict": self.num_predict},
+            )
+        except RuntimeError as e:
+            # call_ollama raises on transport/JSON failure and on a response
+            # ``error`` field; swallow both and degrade this batch to no
+            # prefixes rather than aborting the whole document's prefixing.
             logger.warning("Ollama request failed (%s); returning empty prefixes for batch", e)
             return []
 
-        content = (result.get("message") or {}).get("content", "").strip()
-        return parse_prefix_array(content, expected_count=len(batch_chunks))
+        return parse_prefix_array(content.strip(), expected_count=len(batch_chunks))

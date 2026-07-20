@@ -5,10 +5,18 @@ message content. Mirrors ``call_claude``'s shape (keyword-only ``model`` /
 ``timeout``, ``RuntimeError`` on failure) so the tagging scripts can swap
 backends with a one-line change.
 
-Extracted from ``main.core.contextual_prefix.backends.ollama_backend`` (the
-HTTP-chat core) so a JSON-array-returning caller — tagging, prefixing — shares
-one transport. ``format:"json"`` + ``think:false`` keep a reasoning-capable
-local model (e.g. qwen3) terse and machine-parseable.
+This is the single ``/api/chat`` transport shared by every local-model caller
+under ``main/`` and ``scripts/`` — the contextual-prefix ``OllamaBackend`` and
+the knowledge-graph entity extractor both route through it. Optional ``system``
+prepends a system message; optional ``options`` composes with ``temperature``
+(base ``{"temperature": temperature}`` shallow-merged under the caller's dict,
+so ``num_predict`` or a ``temperature`` override rides alongside without
+dropping the default). ``format:"json"`` + ``think:false`` keep a
+reasoning-capable local model (e.g. qwen3) terse and machine-parseable.
+
+Callers that need to swallow failure instead of propagating must wrap this in
+their own try/except: it raises ``RuntimeError`` on transport/JSON failure AND
+on a response ``error`` field, and returns a raw string (no parsing).
 """
 import json
 import urllib.error
@@ -20,19 +28,36 @@ DEFAULT_MODEL = "qwen3.6:35b-a3b-nvfp4"
 
 
 def call_ollama(prompt: str, *, model: str = DEFAULT_MODEL, timeout: int = 120,
-                host: str = OLLAMA_URL, temperature: float = 0.2) -> str:
+                host: str = OLLAMA_URL, temperature: float = 0.2,
+                system: str | None = None, options: dict | None = None) -> str:
     """Run a single-message Ollama chat and return the assistant message content.
 
-    Raises ``RuntimeError`` on a request/transport error or malformed response,
-    matching ``call_claude`` so callers can treat both backends uniformly.
+    ``system`` prepends a system message before the user prompt. ``options``
+    is shallow-merged over the base ``{"temperature": temperature}`` — so
+    ``options={"temperature": 0, "num_predict": 3000}`` overrides the default
+    temperature and adds ``num_predict``, while ``temperature`` alone still
+    applies when ``options`` is omitted.
+
+    Raises ``RuntimeError`` on a request/transport error, malformed response,
+    or a response ``error`` field, matching ``call_claude`` so callers can
+    treat both backends uniformly.
     """
+    messages = []
+    if system is not None:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    merged_options = {"temperature": temperature}
+    if options:
+        merged_options.update(options)
+
     payload = json.dumps({
         "model": model,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": messages,
         "stream": False,
         "think": False,
         "format": "json",
-        "options": {"temperature": temperature},
+        "options": merged_options,
     }).encode("utf-8")
 
     req = urllib.request.Request(

@@ -320,6 +320,84 @@ def test_ollama_backend_aborts_doc_if_any_batch_returns_wrong_count(monkeypatch)
     assert prefixes == []  # aborted — don't try to pair mismatched prefixes
 
 
+# ---------- OllamaBackend._generate_batch routes through the shared transport ----------
+
+def _ollama_resp(payload: dict):
+    class _FakeResp:
+        def __init__(self, body): self._body = body
+        def read(self): return self._body
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    return _FakeResp(json.dumps(payload).encode("utf-8"))
+
+
+def test_ollama_backend_batch_payload_shape(monkeypatch):
+    """The batch request routes through the shared call_ollama transport and
+    carries system prompt, num_predict, temperature, think:false, format:json,
+    and the backend timeout — the same payload as before consolidation."""
+    from main.core.contextual_prefix.backends.ollama_backend import OllamaBackend
+    from main.core.contextual_prefix.prompts import PREFIX_SYSTEM_PROMPT
+    import main.utils.ollama_cli as ollama_cli
+
+    backend = OllamaBackend(model="test-model", timeout=600, num_predict=4000,
+                            temperature=0.2, host="http://h:11434/api/chat")
+
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["data"] = json.loads(req.data)
+        captured["timeout"] = timeout
+        captured["url"] = req.full_url
+        return _ollama_resp({"message": {"content": '["p0", "p1"]'}})
+
+    monkeypatch.setattr(ollama_cli.urllib.request, "urlopen", fake_urlopen)
+
+    out = backend._generate_batch("doc text", ["c0", "c1"])
+    assert out == ["p0", "p1"]
+
+    data = captured["data"]
+    assert data["model"] == "test-model"
+    assert data["stream"] is False
+    assert data["think"] is False
+    assert data["format"] == "json"
+    assert data["options"] == {"temperature": 0.2, "num_predict": 4000}
+    assert data["messages"][0] == {"role": "system", "content": PREFIX_SYSTEM_PROMPT}
+    assert data["messages"][1]["role"] == "user"
+    assert captured["timeout"] == 600
+    assert captured["url"] == "http://h:11434/api/chat"
+
+
+def test_ollama_backend_batch_transport_error_returns_empty(monkeypatch):
+    """A transport error (call_ollama raises RuntimeError) must be swallowed
+    and degrade the batch to [] — never propagate and abort the document."""
+    import urllib.error
+    from main.core.contextual_prefix.backends.ollama_backend import OllamaBackend
+    import main.utils.ollama_cli as ollama_cli
+
+    backend = OllamaBackend(model="test-model")
+
+    def boom(req, timeout=None):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(ollama_cli.urllib.request, "urlopen", boom)
+    assert backend._generate_batch("doc", ["c0", "c1"]) == []
+
+
+def test_ollama_backend_batch_response_error_field_returns_empty(monkeypatch):
+    """A response ``error`` field — which the shared transport raises on but
+    the old inline code never inspected — is caught by the wrapper as []."""
+    from main.core.contextual_prefix.backends.ollama_backend import OllamaBackend
+    import main.utils.ollama_cli as ollama_cli
+
+    backend = OllamaBackend(model="test-model")
+
+    def fake_urlopen(req, timeout=None):
+        return _ollama_resp({"error": "model not found"})
+
+    monkeypatch.setattr(ollama_cli.urllib.request, "urlopen", fake_urlopen)
+    assert backend._generate_batch("doc", ["c0", "c1"]) == []
+
+
 def test_parallel_prefixing_handles_concurrent_calls_safely():
     """ChunkPrefixer.prefix_document must be safe to call from many threads at once."""
     import threading
