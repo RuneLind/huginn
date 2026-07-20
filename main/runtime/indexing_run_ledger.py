@@ -362,7 +362,7 @@ class IndexingRunLedger:
         (and independently) re-enumerated on the next read.
         """
         run_id = run.get("runId")
-        if isinstance(run_id, str) and run_id.startswith(_ANON_PREFIX):
+        if isinstance(run_id, str) and re.fullmatch(rf"{_ANON_PREFIX}\d+", run_id):
             run = dict(run)
             run.pop("runId", None)
         return run
