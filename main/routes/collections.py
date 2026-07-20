@@ -99,21 +99,21 @@ def _resolve_doc_date(doc: dict) -> str | None:
     return metadata.get("date") or doc.get("modifiedTime")
 
 
-def _read_doc_date(store: KnowledgeStore, doc_path: str) -> str | None:
-    """Read a single document JSON and return its added date, or None on error.
+def _read_doc_dates(store: KnowledgeStore, doc_path: str) -> tuple[str | None, str | None]:
+    """Read a single document JSON and return ``(date, modifiedTime)``, or Nones on error.
 
-    A missing/unreadable file or malformed JSON yields None (logged), so one bad
+    A missing/unreadable file or malformed JSON yields Nones (logged), so one bad
     document doesn't fail the whole listing — but genuinely unexpected errors are
     left to propagate rather than silently swallowed.
     """
     if not doc_path:
-        return None
+        return None, None
     try:
         doc = json.loads(store.disk_persister.read_text_file(doc_path))
     except (OSError, ValueError) as e:
         logger.warning("Could not read date for document %s: %s", doc_path, e)
-        return None
-    return _resolve_doc_date(doc)
+        return None, None
+    return _resolve_doc_date(doc), doc.get("modifiedTime")
 
 
 @router.get("/api/collection/{name}/documents")
@@ -129,8 +129,10 @@ def list_collection_documents(
 
     When ``include_dates`` is set, each entry also carries a ``date`` field
     (frontmatter date, falling back to file mtime) so callers can sort/group by
-    recency. This reads every document file, so it is opt-in to keep the default
-    listing (used by hot paths like duplicate checks) cheap.
+    recency, plus a ``modifiedTime`` field (full-precision ingest timestamp,
+    when the document has one) so callers can break intra-day ties. This reads
+    every document file, so it is opt-in to keep the default listing (used by
+    hot paths like duplicate checks) cheap.
     """
     if not store.has_collection(name):
         raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
@@ -153,7 +155,10 @@ def list_collection_documents(
         seen_ids.add(doc_id)
         doc = {"id": doc_id, "url": doc_url}
         if include_dates:
-            doc["date"] = _read_doc_date(store, entry.get("documentPath", ""))
+            date, modified_time = _read_doc_dates(store, entry.get("documentPath", ""))
+            doc["date"] = date
+            if modified_time:
+                doc["modifiedTime"] = modified_time
         documents.append(doc)
 
     return {"documents": documents}

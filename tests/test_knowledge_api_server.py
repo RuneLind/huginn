@@ -646,6 +646,10 @@ class TestCollectionDocumentDates:
         assert by_id["health/B.md"]["date"] == "2026-02-15T10:00:00"  # fallback to mtime
         assert by_id["tech/C.md"]["date"] is None                  # missing file → None
         assert by_id["tech/D.md"]["date"] is None                  # malformed JSON → None
+        # Full-precision timestamp rides along for intra-day tie-breaking.
+        assert by_id["career/A.md"]["modifiedTime"] == "2026-03-23T21:40:36"
+        assert by_id["health/B.md"]["modifiedTime"] == "2026-02-15T10:00:00"
+        assert "modifiedTime" not in by_id["tech/C.md"]            # unreadable → omitted
 
     def test_unknown_collection_404(self):
         client = self._client(self._store())
