@@ -269,10 +269,19 @@ class IndexingRunLedger:
 
     # ----------------------------------------------------------------- read
 
-    def recent(self, collection, limit=50):
-        """Folded runs for a collection, oldest→newest, at most ``limit``."""
+    def recent(self, collection, limit=50, incomplete_after=None):
+        """Folded runs for a collection, oldest→newest, at most ``limit``.
+
+        ``incomplete_after`` (seconds) sets the age past which an unclosed run
+        folds to ``incomplete`` instead of ``running``. Defaults to the flat
+        module constant; the jobs endpoint passes a per-collection value derived
+        from the launchd cadence so a dead hourly run stops reading as
+        ``running`` across six later runs. The ledger never learns the cadence
+        itself — that would invert the layering and break the CLI path, which is
+        constructible with no store or launchd knowledge.
+        """
         validate_collection(collection)
-        runs = self._read_folded(collection)
+        runs = self._read_folded(collection, incomplete_after)
         if limit is not None and limit >= 0:
             runs = runs[-limit:]
         return runs
@@ -280,9 +289,9 @@ class IndexingRunLedger:
     def all_recent(self, limit_per_collection=50):
         return {c: self.recent(c, limit_per_collection) for c in self.collections()}
 
-    def _read_folded(self, collection):
+    def _read_folded(self, collection, incomplete_after=None):
         raw, line_count = self._read_raw(collection)
-        runs = fold_records(raw)
+        runs = fold_records(raw, incomplete_after=incomplete_after)
         if line_count > COMPACT_LINE_THRESHOLD or len(runs) > MAX_RUNS_PER_COLLECTION:
             runs = runs[-MAX_RUNS_PER_COLLECTION:]
             try:
@@ -388,7 +397,7 @@ def _duration(started_at, finished_at):
     return max(0, int((finish - start).total_seconds()))
 
 
-def fold_records(records, now=None):
+def fold_records(records, now=None, incomplete_after=None):
     """Fold records sharing a ``runId`` into one run each, oldest group first.
 
     Scalar precedence when two partials collide: job/trigger/variant come from the
@@ -396,6 +405,9 @@ def fold_records(records, now=None):
     documentCount/chunkCount from huginn's record (only huginn reads the
     manifest), errors are concatenated, and status is always recomputed from the
     folded phase list rather than taken from either side.
+
+    ``incomplete_after`` (seconds) threads through to ``_mark_unclosed``; None
+    keeps the flat ``INCOMPLETE_AFTER_SECONDS`` default.
     """
     now = now or datetime.now(timezone.utc)
     order = []
@@ -408,11 +420,12 @@ def fold_records(records, now=None):
             groups[run_id] = []
             order.append(run_id)
         groups[run_id].append(record)
-    return [_mark_unclosed(_fold_group(run_id, groups[run_id]), groups[run_id], now)
+    return [_mark_unclosed(_fold_group(run_id, groups[run_id]), groups[run_id],
+                           now, incomplete_after)
             for run_id in order]
 
 
-def _mark_unclosed(folded, records, now):
+def _mark_unclosed(folded, records, now, incomplete_after=None):
     """Downgrade a run whose writer opened it but never closed it.
 
     Each writer that appends an opening partial (``stage: "begin"``) is expected
@@ -435,9 +448,10 @@ def _mark_unclosed(folded, records, now):
     if not unclosed:
         return folded
     folded["unclosedSources"] = unclosed
+    threshold = incomplete_after if incomplete_after is not None else INCOMPLETE_AFTER_SECONDS
     started = _parse_ts(folded.get("startedAt"))
     age = (now - started).total_seconds() if started else None
-    folded["status"] = "running" if age is not None and age < INCOMPLETE_AFTER_SECONDS \
+    folded["status"] = "running" if age is not None and age < threshold \
         else "incomplete"
     folded["durationSeconds"] = None
     return folded
@@ -447,6 +461,15 @@ def _fold_group(run_id, records):
     if len(records) == 1:
         folded = dict(records[0])
         folded["runId"] = run_id
+        # Re-derive status from the phases, matching the multi-record path — a
+        # stored `running`/`incomplete` (both now accepted values) would otherwise
+        # read as permanently running. Only when phases are actually present:
+        # backfilled records carry a status with no phases, and rolling those up
+        # would turn a known `succeeded` into `unknown`. No phase sort here — a
+        # single writer emits phases chronologically, so there is nothing to
+        # reorder (the multi-record path sorts only because it unions two writers).
+        if folded.get("phases"):
+            folded["status"] = rollup_status(folded["phases"])
         return folded
 
     folded = {"runId": run_id, "collection": records[0].get("collection")}

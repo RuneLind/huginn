@@ -9,6 +9,8 @@ from statistics import median
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 
 from main.runtime.indexing_run_ledger import (
+    INCOMPLETE_AFTER_SECONDS,
+    MAX_RECORD_BYTES,
     VALID_TRIGGERS,
     IndexingRunLedger,
     InvalidCollectionName,
@@ -277,6 +279,14 @@ def _median_by_variant(runs: list[dict]) -> dict:
     return {variant: int(median(values)) for variant, values in buckets.items() if values}
 
 
+# Ceiling on the unauthenticated POST /api/indexing/runs body. MAX_RECORD_BYTES
+# (64 KiB) is what a record is truncated TO at write time, but a body may arrive
+# larger — pre-truncation phase detail payloads — so allow headroom over it while
+# still bounding the read: json.loads(await request.body()) would otherwise buffer
+# an arbitrarily large body into memory, an OOM vector on an open endpoint.
+MAX_REQUEST_BODY_BYTES = 4 * MAX_RECORD_BYTES
+
+
 @router.post("/api/indexing/runs")
 async def append_indexing_run(request: Request):
     """Append a script-reported run record to the ledger.
@@ -291,8 +301,25 @@ async def append_indexing_run(request: Request):
     rebuild paths report runs for collections this process may not serve, and
     dropping those is exactly the blind spot the ledger exists to remove.
     """
+    # Content-Length catches the common (buffered) case cheaply — the shell client
+    # posts via `curl --data-binary @-`, which sets it — but a chunked body carries
+    # none, so the streamed read below is the real guard.
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > MAX_REQUEST_BODY_BYTES:
+                raise HTTPException(status_code=413, detail="Request body too large")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid Content-Length")
+
+    body = b""
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > MAX_REQUEST_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="Request body too large")
+
     try:
-        record = json.loads(await request.body())
+        record = json.loads(body)
     except ValueError:
         raise HTTPException(status_code=400, detail="Body must be JSON")
     if not isinstance(record, dict):
@@ -308,6 +335,35 @@ async def append_indexing_run(request: Request):
 
     return {"status": "recorded", "runId": written["runId"],
             "collection": written["collection"]}
+
+
+# Floor for the cadence-derived incomplete threshold. Comfortably above the
+# slowest observed job (mimir, ~76 min) and POLL_TIMEOUT (3600s), so a genuinely
+# in-flight run is never mislabelled `incomplete` even on a short cadence.
+_INCOMPLETE_FLOOR_SECONDS = 2 * 3600
+
+
+def _incomplete_after_for_schedule(schedule):
+    """Seconds past which an unclosed run of this cadence folds to ``incomplete``.
+
+    ``max(2 × cadence, floor)`` from the launchd schedule, so a dead hourly run
+    stops reading as ``running`` for six subsequent runs the way a flat 6h let it.
+    Cadence mapping: hourly → 3600; interval → its seconds; a calendar entry →
+    daily (86400), or weekly (604800) when it pins a Weekday. An unknown or absent
+    schedule keeps the flat ``INCOMPLETE_AFTER_SECONDS`` — the ledger's own default.
+    """
+    if not isinstance(schedule, dict):
+        return INCOMPLETE_AFTER_SECONDS
+    kind = schedule.get("kind")
+    if kind == "hourly":
+        cadence = 3600
+    elif kind == "interval" and isinstance(schedule.get("seconds"), int):
+        cadence = schedule["seconds"]
+    elif kind == "calendar":
+        cadence = 604800 if schedule.get("weekday") is not None else 86400
+    else:
+        return INCOMPLETE_AFTER_SECONDS
+    return max(2 * cadence, _INCOMPLETE_FLOOR_SECONDS)
 
 
 @router.get("/api/indexing/jobs")
@@ -340,8 +396,11 @@ def indexing_jobs(
 
     jobs = []
     for name in sorted(ledger_collections | loaded):
+        schedule_entry = schedules.get(name) or {}
+        incomplete_after = _incomplete_after_for_schedule(schedule_entry.get("schedule"))
         try:
-            runs = ledger.recent(name, limit=max(history, 50))
+            runs = ledger.recent(name, limit=max(history, 50),
+                                 incomplete_after=incomplete_after)
         except Exception:
             logger.warning("Could not read run ledger for %s", name, exc_info=True)
             runs = []
@@ -355,7 +414,6 @@ def indexing_jobs(
                 "elapsedSeconds": _elapsed_seconds(state.get("startedAt")),
             }
 
-        schedule_entry = schedules.get(name) or {}
         jobs.append({
             "collection": name,
             "loaded": name in loaded,
