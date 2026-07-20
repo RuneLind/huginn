@@ -525,6 +525,108 @@ class TestPhaseMerging:
         assert folded["status"] == "failed"
 
 
+class TestPhaseOrdering:
+    """The fold unions phases in record-arrival order, and huginn's `reindex`
+    record is appended when the rebuild STARTS while the script's closing record
+    (carrying its earlier `fetch`) lands later — so without a per-phase
+    `startedAt` the fold renders `reindex` before the `fetch` that preceded it.
+    `startedAt` gives a real order; legacy phases that predate it must not move."""
+
+    def test_new_phases_sort_by_started_at_not_arrival(self):
+        # Records arrive reindex-first, but fetch started earlier in wall time.
+        script = {
+            "collection": "c", "runId": "shared", "source": "script",
+            "startedAt": "2026-07-19T07:15:00Z", "finishedAt": "2026-07-19T07:16:00Z",
+            "phases": [
+                {"name": "fetch", "status": "succeeded", "durationSeconds": 5,
+                 "startedAt": "2026-07-19T07:15:00Z"},
+                {"name": "reindex", "status": "succeeded", "durationSeconds": 16,
+                 "startedAt": "2026-07-19T07:15:10Z", "fatal": True},
+            ],
+        }
+        huginn = {
+            "collection": "c", "runId": "shared", "source": "huginn",
+            "startedAt": "2026-07-19T07:15:10Z", "finishedAt": "2026-07-19T07:15:26Z",
+            "phases": [{"name": "reindex", "status": "succeeded",
+                        "durationSeconds": 13, "startedAt": "2026-07-19T07:15:10Z",
+                        "fatal": True}],
+        }
+        # huginn arrives FIRST, so its reindex would otherwise pin to position 0.
+        folded = fold_records([huginn, script])[0]
+        assert [p["name"] for p in folded["phases"]] == ["fetch", "reindex"]
+
+    def test_legacy_phases_without_started_at_keep_arrival_order(self):
+        """Every phase written before this field existed has no startedAt, and
+        those read correctly by arrival accident today. A naive sort keying on a
+        default would drag them all to the front and reorder history — so a run
+        with no timestamped phase at all must come back byte-for-byte in order."""
+        script = {
+            "collection": "c", "runId": "old", "source": "script",
+            "startedAt": "2026-07-01T09:00:00Z", "finishedAt": "2026-07-01T09:05:00Z",
+            "phases": [
+                {"name": "cleanup", "status": "succeeded", "durationSeconds": 2},
+                {"name": "fetch", "status": "succeeded", "durationSeconds": 3},
+                {"name": "reindex", "status": "succeeded", "durationSeconds": 4,
+                 "fatal": True},
+            ],
+        }
+        folded = fold_records([script])[0]
+        assert [p["name"] for p in folded["phases"]] == ["cleanup", "fetch", "reindex"]
+
+    def test_mixed_old_and_new_phases_only_the_timestamped_ones_move(self):
+        """A folded run straddling the change: the merged phase list has some
+        phases carrying startedAt and some not. Only the timestamped phases sort —
+        into the positions they already hold — and the field-less ones stay pinned
+        to their arrival index. (Two records so the merge path, which is what
+        sorts, actually runs — a single writer emits its phases chronologically.)"""
+        huginn = {
+            "collection": "c", "runId": "mixed", "source": "huginn",
+            "startedAt": "2026-07-19T07:05:00Z", "finishedAt": "2026-07-19T07:05:04Z",
+            "phases": [{"name": "reindex", "status": "succeeded", "durationSeconds": 4,
+                        "startedAt": "2026-07-19T07:05:00Z", "fatal": True}],
+        }
+        script = {
+            "collection": "c", "runId": "mixed", "source": "script",
+            "startedAt": "2026-07-19T07:00:00Z", "finishedAt": "2026-07-19T07:10:00Z",
+            "phases": [
+                {"name": "legacy", "status": "succeeded", "durationSeconds": 1},
+                {"name": "fetch", "status": "succeeded", "durationSeconds": 3,
+                 "startedAt": "2026-07-19T07:00:00Z"},
+            ],
+        }
+        # Arrival order of merged phases: reindex(07:05), legacy(none), fetch(07:00).
+        folded = fold_records([huginn, script])[0]
+        # fetch (07:00) and reindex (07:05) swap into their two timestamped slots
+        # (indices 0 and 2); `legacy` holds index 1 untouched.
+        assert [p["name"] for p in folded["phases"]] == ["fetch", "legacy", "reindex"]
+
+    def test_api_down_fold_inherits_and_sorts_the_scripts_started_at(self):
+        """The x-feed API-down path: the CLI adapter writes a huginn-source
+        `reindex` phase with NO startedAt, and the wrapping script writes `fetch`
+        + `reindex` with startedAt. huginn's copy wins the reindex merge but must
+        inherit the script's startedAt — otherwise the merged phase has nothing to
+        sort on and pins to arrival order, landing `reindex` before `fetch`."""
+        script = {
+            "collection": "c", "runId": "apidown", "source": "script",
+            "startedAt": "2026-07-19T07:15:00Z", "finishedAt": "2026-07-19T07:16:00Z",
+            "phases": [
+                {"name": "fetch", "status": "succeeded", "durationSeconds": 5,
+                 "startedAt": "2026-07-19T07:15:00Z"},
+                {"name": "reindex", "status": "succeeded", "durationSeconds": 16,
+                 "startedAt": "2026-07-19T07:15:10Z", "fatal": True},
+            ],
+        }
+        cli_huginn = {  # CLI-adapter-style: huginn source, reindex, no startedAt
+            "collection": "c", "runId": "apidown", "source": "huginn",
+            "startedAt": "2026-07-19T07:15:10Z", "finishedAt": "2026-07-19T07:15:26Z",
+            "phases": [{"name": "reindex", "status": "succeeded", "fatal": True}],
+        }
+        folded = fold_records([cli_huginn, script])[0]
+        reindex = next(p for p in folded["phases"] if p["name"] == "reindex")
+        assert reindex["startedAt"] == "2026-07-19T07:15:10Z"
+        assert [p["name"] for p in folded["phases"]] == ["fetch", "reindex"]
+
+
 class TestSkippedRollup:
     """`skipped` distinguishes "did not run" from "ran fine". A reindex skipped
     on 409 exits 0, and rolling that up as `succeeded` asserts a freshness the

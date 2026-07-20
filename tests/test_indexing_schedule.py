@@ -99,3 +99,71 @@ class TestScheduleShape:
 
     def test_an_unscheduled_plist_has_no_schedule(self):
         assert _schedule_from_plist({"RunAtLoad": True}) is None
+
+
+class TestScheduleCache:
+    """load_schedules is called per request and polled every 15s, sharing a
+    process with search. It caches on an mtime SIGNATURE — a stat per file, far
+    cheaper than open-and-parse — so it re-reads the instant a plist or routing
+    file changes and never on a staleness timer."""
+
+    def _setup(self, tmp_path):
+        plist = tmp_path / "com.huginn.x.plist"
+        _write_plist(str(plist), "com.huginn.x", "daily_x_update.sh",
+                     {"StartCalendarInterval": {"Hour": 9, "Minute": 0}})
+        routing = tmp_path / "huginn-x" / "scripts" / "schedule_routing.json"
+        _write_routing(str(routing), {"daily_x_update.sh": ["x"]})
+        pattern = str(tmp_path / "com.huginn.*.plist")
+        routing_globs = (str(tmp_path / "huginn-*" / "scripts" / "schedule_routing.json"),)
+        return pattern, routing_globs, plist, routing
+
+    def test_a_repeat_call_with_no_change_is_a_cache_hit(self, tmp_path):
+        pattern, routing_globs, _, _ = self._setup(tmp_path)
+        first = load_schedules(pattern=pattern, routing_globs=routing_globs)
+        second = load_schedules(pattern=pattern, routing_globs=routing_globs)
+        assert first == {"x": {"job": "com.huginn.x",
+                               "schedule": {"kind": "calendar", "hour": 9,
+                                            "minute": 0, "weekday": None}}}
+        # Same object identity ⇒ nothing was re-globbed or re-parsed.
+        assert second is first
+
+    def test_touching_a_plist_invalidates_the_cache(self, tmp_path):
+        pattern, routing_globs, plist, _ = self._setup(tmp_path)
+        first = load_schedules(pattern=pattern, routing_globs=routing_globs)
+        # Force a distinct mtime rather than rewriting (coarse-resolution clocks
+        # could land in the same second and hide the change).
+        stamp = os.stat(str(plist)).st_mtime_ns + 1_000_000_000
+        os.utime(str(plist), ns=(stamp, stamp))
+        second = load_schedules(pattern=pattern, routing_globs=routing_globs)
+        assert second is not first
+        assert second == first  # content unchanged, only re-read
+
+    def test_touching_a_routing_file_invalidates_the_cache(self, tmp_path):
+        pattern, routing_globs, _, routing = self._setup(tmp_path)
+        first = load_schedules(pattern=pattern, routing_globs=routing_globs)
+        _write_routing(str(routing), {"daily_x_update.sh": ["x", "x-extra"]})
+        second = load_schedules(pattern=pattern, routing_globs=routing_globs)
+        assert second is not first
+        # The second routing target now also has a schedule.
+        assert set(second) == {"x", "x-extra"}
+
+    def test_adding_a_plist_invalidates_the_cache(self, tmp_path):
+        pattern, routing_globs, _, _ = self._setup(tmp_path)
+        first = load_schedules(pattern=pattern, routing_globs=routing_globs)
+        # New job + routing entry: the matched SET changes, so the signature does.
+        _write_plist(str(tmp_path / "com.huginn.y.plist"), "com.huginn.y",
+                     "daily_y_update.sh", {"StartCalendarInterval": {"Hour": 10, "Minute": 0}})
+        _write_routing(str(tmp_path / "huginn-y" / "scripts" / "schedule_routing.json"),
+                       {"daily_y_update.sh": ["y"]})
+        second = load_schedules(pattern=pattern, routing_globs=routing_globs)
+        assert second is not first
+        assert set(second) == {"x", "y"}
+
+    def test_removing_a_plist_invalidates_the_cache(self, tmp_path):
+        pattern, routing_globs, plist, _ = self._setup(tmp_path)
+        first = load_schedules(pattern=pattern, routing_globs=routing_globs)
+        assert set(first) == {"x"}
+        os.remove(str(plist))
+        second = load_schedules(pattern=pattern, routing_globs=routing_globs)
+        assert second is not first
+        assert second == {}

@@ -247,6 +247,11 @@ class KnowledgeStore:
             phase = {
                 "name": "reindex",
                 "status": "succeeded" if status == "succeeded" else "failed",
+                # Stamp when the phase started so the fold can order phases by
+                # time rather than record-arrival — huginn's record lands before
+                # the wrapping script's closing record, which would otherwise
+                # render `reindex` ahead of the `fetch` that preceded it.
+                "startedAt": _to_ledger_ts(started_at),
                 "durationSeconds": _duration_seconds(started_at, finished_at),
                 # The reindex is the one phase whose failure means the run failed;
                 # script-side phases (tagging) only degrade it.

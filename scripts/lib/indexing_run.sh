@@ -39,6 +39,7 @@ _IR_ACTIVE=0
 _IR_PHASES_FILE=""
 _IR_PHASE_NAME=""
 _IR_PHASE_START=0
+_IR_PHASE_STARTED_AT=""
 _IR_PHASE_FATAL=0
 _IR_COLLECTION=""
 _IR_JOB=""
@@ -110,6 +111,10 @@ phase_begin() {
     _IR_PHASE_NAME="${1:-phase}"
     _IR_PHASE_FATAL="${2:-0}"
     _IR_PHASE_START="$(date +%s)" || _IR_PHASE_START=0
+    # ISO-8601 UTC alongside the epoch seconds: the epoch drives the duration
+    # maths, this drives the fold's phase ordering (phases carry only a duration
+    # otherwise, which cannot be sorted). Guarded so a date failure never aborts.
+    _IR_PHASE_STARTED_AT="$(_ir_iso)" || _IR_PHASE_STARTED_AT=""
     # Reset the call site's rc here as well as at the call site. Without the
     # reset, `rc` is assigned only on failure and never cleared — one failed
     # tagging phase would then mark every later phase (reindex included) failed,
@@ -151,6 +156,7 @@ phase_end() {
     IR_PHASE_STATUS="$status" \
     IR_PHASE_FATAL="$_IR_PHASE_FATAL" \
     IR_PHASE_DURATION="$duration" \
+    IR_PHASE_STARTED_AT="$_IR_PHASE_STARTED_AT" \
     IR_PHASE_DETAIL="$detail" \
     _ir_python -c '
 import json, os, sys
@@ -159,6 +165,9 @@ phase = {
     "status": os.environ["IR_PHASE_STATUS"],
     "durationSeconds": int(os.environ["IR_PHASE_DURATION"]),
 }
+started = os.environ.get("IR_PHASE_STARTED_AT") or ""
+if started:
+    phase["startedAt"] = started
 if os.environ.get("IR_PHASE_FATAL") == "1":
     phase["fatal"] = True
 raw = os.environ.get("IR_PHASE_DETAIL") or ""

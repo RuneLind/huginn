@@ -104,14 +104,57 @@ def _schedule_from_plist(data):
     return None
 
 
-def load_schedules(pattern=LAUNCH_AGENTS_GLOB):
-    """collection name -> {job, schedule}, best effort.
+# Cache keyed on an MTIME SIGNATURE, not a TTL. The GET /api/indexing/jobs
+# endpoint calls this per request and a dashboard polls it every 15s, sharing a
+# process with search; each uncached call globs two routing patterns and JSON-
+# parses every match on top of globbing LaunchAgents and plistlib-loading every
+# plist. A stat-per-file is far cheaper than open-and-parse, and unlike a TTL it
+# invalidates the instant a routing file or plist actually changes — so a freshly
+# installed plist shows up at once, with no staleness window to explain away.
+_SCHEDULE_CACHE = {}
+
+
+def _mtime_signature(patterns):
+    """Sorted ``(path, mtime_ns)`` over every file matching any pattern.
+
+    Changes when any matched file is touched, and — because the matched SET is
+    part of the tuple — when a file is added or removed. A file that vanishes
+    between glob and stat simply drops out, same as it would from the parse.
+    """
+    signature = []
+    for pattern in patterns:
+        try:
+            paths = glob.glob(pattern)
+        except OSError:
+            continue
+        for path in paths:
+            try:
+                signature.append((path, os.stat(path).st_mtime_ns))
+            except OSError:
+                continue
+    return tuple(sorted(signature))
+
+
+def load_schedules(pattern=LAUNCH_AGENTS_GLOB, routing_globs=ROUTING_GLOBS):
+    """collection name -> {job, schedule}, best effort, cached on an mtime signature.
 
     Returns an empty mapping rather than raising if the LaunchAgents directory is
-    unreadable or every plist is malformed.
+    unreadable or every plist is malformed. The result is cached and only re-read
+    when a plist or routing file changes (see ``_mtime_signature``).
     """
+    cache_key = (pattern, tuple(routing_globs))
+    signature = _mtime_signature((pattern, *routing_globs))
+    cached = _SCHEDULE_CACHE.get(cache_key)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    result = _load_schedules_uncached(pattern, routing_globs)
+    _SCHEDULE_CACHE[cache_key] = (signature, result)
+    return result
+
+
+def _load_schedules_uncached(pattern, routing_globs):
     schedules = {}
-    script_collections = load_script_collections()
+    script_collections = load_script_collections(globs=routing_globs)
     try:
         paths = sorted(glob.glob(pattern))
     except OSError:

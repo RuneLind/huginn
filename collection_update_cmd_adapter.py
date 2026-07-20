@@ -68,6 +68,10 @@ def _record(status, error, duration_source_start):
             "phases": [{
                 "name": "reindex",
                 "status": status,
+                # Stamp the phase start so the fold orders by time, not arrival.
+                # This is the API-down fallback the x-feed script hits, so omitting
+                # it leaves `reindex` mis-sorted before `fetch` on exactly that path.
+                "startedAt": duration_source_start,
                 "fatal": True,
             }],
             "documentCount": manifest.get("numberOfDocuments"),
