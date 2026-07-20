@@ -1,5 +1,6 @@
 import json
 import os
+import types
 
 import pytest
 from fastapi.testclient import TestClient
@@ -721,6 +722,56 @@ class TestCollectionUpdateConcurrency:
     def test_update_status_unknown_collection_404(self):
         resp = self._client(self._store()).get("/api/collections/nope/update-status")
         assert resp.status_code == 404
+
+
+class TestCollectionReload:
+    """POST /api/collections/{name}/reload — swap the in-memory searcher for the
+    on-disk one after an out-of-band rebuild, without loading unserved collections."""
+
+    def _store(self):
+        from main.runtime.knowledge_store import KnowledgeStore
+        store = KnowledgeStore()
+        store.searchers["c"] = object()  # make has_collection("c") true
+        store._build_aux_indexes = False  # no disk-backed aux indexes in the test
+        return store
+
+    def _client(self, store) -> TestClient:
+        from main.runtime.knowledge_store import get_store
+        app.dependency_overrides[get_store] = lambda: store
+        return TestClient(app)
+
+    def teardown_method(self):
+        from main.runtime.knowledge_store import get_store
+        app.dependency_overrides.pop(get_store, None)
+
+    def test_reload_swaps_searcher(self, monkeypatch):
+        store = self._store()
+        sentinel = types.SimpleNamespace(indexer=types.SimpleNamespace(get_size=lambda: 7))
+        monkeypatch.setattr(store, "_build_searcher", lambda name: sentinel)
+        monkeypatch.setattr(store, "_load_knowledge_graph", lambda **k: None)
+        old = store.searchers["c"]
+        resp = self._client(store).post("/api/collections/c/reload")
+        assert resp.status_code == 200
+        assert resp.json() == {"reloaded": "c"}
+        assert store.searchers["c"] is sentinel
+        assert store.searchers["c"] is not old
+
+    def test_reload_unknown_collection_404(self):
+        resp = self._client(self._store()).post("/api/collections/nope/reload")
+        assert resp.status_code == 404
+
+    def test_reload_failure_returns_clean_500(self, monkeypatch):
+        store = self._store()
+
+        def boom(name):
+            raise RuntimeError("on-disk index gone")
+
+        monkeypatch.setattr(store, "reload_collection", boom)
+        resp = self._client(store).post("/api/collections/c/reload")
+        assert resp.status_code == 500
+        detail = resp.json()["detail"]
+        assert "c" in detail
+        assert "previous index still serving" in detail
 
 
 class TestUpdateCorrelation:
