@@ -7,7 +7,7 @@ the jobs endpoint must never fail because a plist is missing or malformed.
 The job → collection mapping is an explicit table keyed on the script BASENAME,
 not derived from the plist. Installed plists carry only ``/bin/bash <script>`` —
 no collection appears anywhere in them — and the scripts themselves declare their
-collections in three different shell syntaxes (``COLLECTION="mimir"``,
+collections in three different shell syntaxes (``COLLECTION="wiki"``,
 ``COLLECTIONS=("wiki" "wiki-life")``, ``COLLECTIONS="${COLLECTIONS:-jira-issues}"``).
 Parsing that is more fragile than a ten-line table. Basename-keyed because the
 script directories are private sub-repos and gitignored.

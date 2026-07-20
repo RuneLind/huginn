@@ -134,9 +134,13 @@ job last ran, how long it took, and whether it failed. Backed by JSONL files at
   reports what it deleted, and the two differ by an order of magnitude. The
   closing record outranks the opening partial's guess.
   `run_end` POSTs to `POST /api/indexing/runs`, falling back to
-  `python -m main.runtime.indexing_run_ledger append --file -` when the API is
-  down. Never `>>` the JSONL from shell: macOS has no `flock(1)`, so a redirect
-  cannot take the `LOCK_EX` every other writer holds.
+  `(cd "$PROJECT_DIR" && ./.venv/bin/python -m main.runtime.indexing_run_ledger
+  append --file -)` when the API is down — `uv run python -m ...` where the
+  checkout has no `.venv`. The fallback MUST run from `PROJECT_DIR` (the `-m`
+  import resolves `main` from cwd, and launchd runs jobs from `/`); if
+  `PROJECT_DIR` is unset it logs one line to **stderr** and writes nothing rather
+  than losing the record silently. Never `>>` the JSONL from shell: macOS has no
+  `flock(1)`, so a redirect cannot take the `LOCK_EX` every other writer holds.
   Three rules the helper exists to enforce, all of which otherwise abort an
   unattended job under `set -euo pipefail` — trading "no observability" for
   "no indexing", which is worse. `tests/test_indexing_run_helper.py` asserts all

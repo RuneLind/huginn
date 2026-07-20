@@ -17,33 +17,15 @@ from main.indexes.indexer_factory import (
     load_search_indexer,
 )
 from main.persisters.disk_persister import DiskPersister
-from main.runtime.indexing_run_ledger import IndexingRunLedger, mint_run_id
+from main.runtime.indexing_run_ledger import (
+    IndexingRunLedger,
+    duration_seconds as _duration_seconds,
+    mint_run_id,
+    to_iso_z as _to_ledger_ts,
+)
 from main.utils.frontmatter import parse_tags
 
 logger = logging.getLogger(__name__)
-
-
-def _to_ledger_ts(value):
-    """Normalize an internal isoformat timestamp to the ledger's ...Z form."""
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value).astimezone(timezone.utc).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        )
-    except ValueError:
-        return value
-
-
-def _duration_seconds(started_at, finished_at):
-    if not started_at or not finished_at:
-        return None
-    try:
-        start = datetime.fromisoformat(started_at)
-        finish = datetime.fromisoformat(finished_at)
-    except ValueError:
-        return None
-    return max(0, int((finish - start).total_seconds()))
 
 
 class KnowledgeStore:
