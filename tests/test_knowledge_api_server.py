@@ -591,7 +591,20 @@ class _FakeStore:
             raise FileNotFoundError(path)  # match the real persister's missing-file error
 
 
-class TestCollectionDocumentDates:
+class _CollectionDocumentsCase:
+    """Shared TestClient wiring for /api/collection/{name}/documents suites."""
+
+    def _client(self, store) -> TestClient:
+        from main.runtime.knowledge_store import get_store
+        app.dependency_overrides[get_store] = lambda: store
+        return TestClient(app)
+
+    def teardown_method(self):
+        from main.runtime.knowledge_store import get_store
+        app.dependency_overrides.pop(get_store, None)
+
+
+class TestCollectionDocumentDates(_CollectionDocumentsCase):
     """Opt-in date enrichment on /api/collection/{name}/documents."""
 
     def _store(self) -> _FakeStore:
@@ -623,15 +636,6 @@ class TestCollectionDocumentDates:
         }
         return _FakeStore(files, {"yt"})
 
-    def _client(self, store) -> TestClient:
-        from main.runtime.knowledge_store import get_store
-        app.dependency_overrides[get_store] = lambda: store
-        return TestClient(app)
-
-    def teardown_method(self):
-        from main.runtime.knowledge_store import get_store
-        app.dependency_overrides.pop(get_store, None)
-
     def test_default_listing_has_no_date(self):
         client = self._client(self._store())
         docs = client.get("/api/collection/yt/documents").json()["documents"]
@@ -656,7 +660,7 @@ class TestCollectionDocumentDates:
         assert client.get("/api/collection/nope/documents").status_code == 404
 
 
-class TestCollectionDocumentScores:
+class TestCollectionDocumentScores(_CollectionDocumentsCase):
     """Opt-in score enrichment on /api/collection/{name}/documents."""
 
     def _store(self) -> _FakeStore:
@@ -678,6 +682,12 @@ class TestCollectionDocumentScores:
             # Malformed JSON → no score keys, doc still lists.
             "6": {"documentId": "e.md", "documentUrl": "https://x.com/e",
                   "documentPath": "xf/documents/e.md.json"},
+            # Valid JSON that is NOT an object (a list) → must not blow up the listing.
+            "7": {"documentId": "f.md", "documentUrl": "https://x.com/f",
+                  "documentPath": "xf/documents/f.md.json"},
+            # Valid JSON that is a bare string → same.
+            "8": {"documentId": "g.md", "documentUrl": "https://x.com/g",
+                  "documentPath": "xf/documents/g.md.json"},
         }
         files = {
             "xf/indexes/index_document_mapping.json": json.dumps(mapping),
@@ -693,6 +703,8 @@ class TestCollectionDocumentScores:
                               "engagement_score": None}}
             ),
             "xf/documents/e.md.json": "{ not valid json",
+            "xf/documents/f.md.json": json.dumps([{"metadata": {"combined_score": "0.9"}}]),
+            "xf/documents/g.md.json": json.dumps("just a string"),
         }
         return _FakeStore(files, {"xf"})
 
@@ -708,7 +720,7 @@ class TestCollectionDocumentScores:
     def test_default_listing_has_no_scores(self):
         client = self._client(self._store())
         docs = client.get("/api/collection/xf/documents").json()["documents"]
-        assert len(docs) == 5  # a deduped
+        assert len(docs) == 7  # a deduped
         assert all("combined_score" not in d for d in docs)
 
     def test_include_scores_attaches_floats(self):
@@ -745,6 +757,25 @@ class TestCollectionDocumentScores:
         assert by_id["a.md"]["modifiedTime"] == "2026-07-24T21:40:36"
         assert by_id["a.md"]["combined_score"] == 0.604
         assert by_id["d.md"]["date"] is None
+
+    def test_non_dict_document_json_does_not_break_listing(self):
+        """A document file that parses to a list/string is treated as unreadable.
+
+        Without the isinstance guard the resolvers would call ``.get`` on a list
+        and 500 the *whole* listing, not just that one document.
+        """
+        client = self._client(self._store())
+        resp = client.get(
+            "/api/collection/xf/documents",
+            params={"include_dates": "1", "include_scores": "1"},
+        )
+        assert resp.status_code == 200
+        by_id = {d["id"]: d for d in resp.json()["documents"]}
+        for doc_id in ("f.md", "g.md"):
+            assert by_id[doc_id]["date"] is None, doc_id
+            assert "modifiedTime" not in by_id[doc_id], doc_id
+            assert not any(k in by_id[doc_id] for k in
+                           ("combined_score", "relevance_score", "engagement_score")), doc_id
 
 
 class TestResolveDocScores:

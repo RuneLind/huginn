@@ -196,9 +196,13 @@ def list_collection_documents(
         seen_ids.add(doc_id)
         doc = {"id": doc_id, "url": doc_url}
         if include_dates or include_scores:
-            raw = _read_doc(store, entry.get("documentPath", "")) or {}
+            parsed = _read_doc(store, entry.get("documentPath", ""))
+            # A document JSON that parses to a list/string is still "unreadable"
+            # for our purposes — the resolvers below call ``.get``, so anything
+            # that isn't a dict has to collapse to the empty-dict no-op.
+            raw = parsed if isinstance(parsed, dict) else {}
             if include_dates:
-                doc["date"] = _resolve_doc_date(raw) if raw else None
+                doc["date"] = _resolve_doc_date(raw)
                 modified_time = raw.get("modifiedTime")
                 if modified_time:
                     doc["modifiedTime"] = modified_time
