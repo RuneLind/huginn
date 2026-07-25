@@ -3,8 +3,7 @@ import json
 import logging
 import time
 
-from main.core import search_response_formatter as _formatter
-from main.core.search_policy import SearchPolicy
+from main.core import search_policy
 from main.core.search_trace import NULL_TRACE
 from main.utils.filename import title_from_doc_path
 from main.utils.performance import delta_ms
@@ -59,18 +58,11 @@ def deduplicate_document(doc_id, doc_url, text_provider, seen_urls, seen_text_ha
 
 
 class DocumentCollectionSearcher:
-    # Cross-encoder reranker score thresholds (negative scores, more negative =
-    # more relevant). Defined in search_response_formatter, which derives the
-    # relevance-space confidence bands from the same values.
-    LOW_CONFIDENCE_THRESHOLD = _formatter.LOW_CONFIDENCE_THRESHOLD
-    NOISE_THRESHOLD = _formatter.NOISE_THRESHOLD
-
     def __init__(self, collection_name, indexer, persister, reranker=None):
         self.collection_name = collection_name
         self.indexer = indexer
         self.persister = persister
         self.reranker = reranker
-        self._policy = SearchPolicy()
         self._doc_cache = {}
         # Load the index→document mapping once and pair it with the in-memory
         # index for this searcher's lifetime. A background update rewrites the
@@ -152,7 +144,7 @@ class DocumentCollectionSearcher:
             t_rerank = t_index
             logger.info(f"Search '{self.collection_name}' (no rerank): index={delta_ms(t0, t_index)}ms")
 
-        scores, indexes = self._policy.apply_title_boost(
+        scores, indexes = search_policy.apply_title_boost(
             title_boost_query, scores, indexes, self._mapping, coll_trace
         )
         t_boost = time.monotonic()
@@ -173,15 +165,15 @@ class DocumentCollectionSearcher:
 
         results_before_filter = len(results)
         if use_reranker and results:
-            response = self._policy.apply_confidence_filtering(response)
+            response = search_policy.apply_confidence_filtering(response)
         if coll_trace.enabled:
             filtered = response["results"]
-            best = self._policy.best_chunk_score(filtered[0]) if filtered else None
+            best = search_policy.best_chunk_score(filtered[0]) if filtered else None
             coll_trace.set_confidence(
                 low_confidence=response.get("lowConfidence", False),
                 best_score=best,
-                low_confidence_threshold=self.LOW_CONFIDENCE_THRESHOLD,
-                noise_threshold=self.NOISE_THRESHOLD,
+                low_confidence_threshold=search_policy.LOW_CONFIDENCE_THRESHOLD,
+                noise_threshold=search_policy.NOISE_THRESHOLD,
                 filtered_count=results_before_filter - len(filtered),
             )
 

@@ -13,11 +13,10 @@ from main.utils.frontmatter import parse_tags
 logger = logging.getLogger(__name__)
 
 
-# Raw cross-encoder score thresholds (lower = better). DocumentCollectionSearcher
-# imports these for its noise/low-confidence filtering; the relevance-space
-# confidence bands (derived below normalize_score) come from the same values,
-# so the searcher's filtering policy and the response bands stay in sync by
-# construction.
+# Raw cross-encoder score thresholds (lower = better). search_policy imports
+# these for its noise/low-confidence filtering; the relevance-space confidence
+# bands (derived below normalize_score) come from the same values, so the
+# filtering policy and the response bands stay in sync by construction.
 LOW_CONFIDENCE_THRESHOLD = -0.10   # Best result above this → flag response
 NOISE_THRESHOLD = -0.10            # Individual results above this → filter out
 HIGH_CONFIDENCE_RAW_SCORE = -0.23  # Comfortably past the noise floor

@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
+from main.core import search_policy
 from main.core import search_response_formatter as _formatter
-from main.core.search_policy import SearchPolicy
 
 
 def _doc(*scores):
@@ -11,55 +11,51 @@ def _doc(*scores):
 
 class TestThresholdSourcing:
     def test_thresholds_single_sourced_from_formatter(self):
-        policy = SearchPolicy()
-        assert policy.LOW_CONFIDENCE_THRESHOLD == _formatter.LOW_CONFIDENCE_THRESHOLD
-        assert policy.NOISE_THRESHOLD == _formatter.NOISE_THRESHOLD
+        assert search_policy.LOW_CONFIDENCE_THRESHOLD == _formatter.LOW_CONFIDENCE_THRESHOLD
+        assert search_policy.NOISE_THRESHOLD == _formatter.NOISE_THRESHOLD
 
 
 class TestBestChunkScore:
     def test_returns_minimum_score_across_matched_chunks(self):
         # scores are negative; more negative = more relevant → min is "best"
-        assert SearchPolicy.best_chunk_score(_doc(-0.5, -0.9, -0.3)) == -0.9
+        assert search_policy.best_chunk_score(_doc(-0.5, -0.9, -0.3)) == -0.9
 
     def test_single_chunk(self):
-        assert SearchPolicy.best_chunk_score(_doc(-0.2)) == -0.2
+        assert search_policy.best_chunk_score(_doc(-0.2)) == -0.2
 
 
 class TestApplyConfidenceFiltering:
-    def setup_method(self):
-        self.policy = SearchPolicy()
-
     def test_strong_results_not_filtered_no_flag(self):
         response = {"results": [_doc(-0.9), _doc(-0.5), _doc(-0.3)]}
-        out = self.policy.apply_confidence_filtering(response)
+        out = search_policy.apply_confidence_filtering(response)
         assert len(out["results"]) == 3
         assert "lowConfidence" not in out
 
     def test_noise_chunks_filtered_out(self):
         # Only the -0.5 doc survives NOISE_THRESHOLD (-0.10)
         response = {"results": [_doc(-0.5), _doc(-0.008), _doc(-0.002)]}
-        out = self.policy.apply_confidence_filtering(response)
+        out = search_policy.apply_confidence_filtering(response)
         assert len(out["results"]) == 1
         assert out["results"][0] is response["results"][0]
         assert "lowConfidence" not in out
 
     def test_results_just_above_noise_threshold_filtered(self):
         response = {"results": [_doc(-0.099), _doc(-0.05), _doc(-0.01)]}
-        out = self.policy.apply_confidence_filtering(response)
+        out = search_policy.apply_confidence_filtering(response)
         assert out["results"] == []
         assert out["lowConfidence"] is True
 
     def test_boundary_score_equal_to_noise_threshold_kept(self):
         # <= NOISE_THRESHOLD keeps a doc scored exactly at the threshold
-        response = {"results": [_doc(SearchPolicy.NOISE_THRESHOLD)]}
-        out = self.policy.apply_confidence_filtering(response)
+        response = {"results": [_doc(search_policy.NOISE_THRESHOLD)]}
+        out = search_policy.apply_confidence_filtering(response)
         assert len(out["results"]) == 1
         # best == LOW_CONFIDENCE_THRESHOLD, not strictly greater → no flag
         assert "lowConfidence" not in out
 
     def test_all_noise_empty_with_flag(self):
         response = {"results": [_doc(-0.005), _doc(-0.003)]}
-        out = self.policy.apply_confidence_filtering(response)
+        out = search_policy.apply_confidence_filtering(response)
         assert out["results"] == []
         assert out["lowConfidence"] is True
 
@@ -69,7 +65,7 @@ class TestApplyConfidenceFiltering:
         # -0.10 a surviving doc equals the threshold, so construct a case where a
         # doc is filtered and the survivor is exactly at the boundary.
         response = {"results": [_doc(-0.11)]}
-        out = self.policy.apply_confidence_filtering(response)
+        out = search_policy.apply_confidence_filtering(response)
         assert len(out["results"]) == 1
         assert "lowConfidence" not in out
 
@@ -83,13 +79,10 @@ def _mapping(entries):
 
 
 class TestApplyTitleBoost:
-    def setup_method(self):
-        self.policy = SearchPolicy()
-
     def test_empty_query_returns_unchanged(self):
         scores = np.array([[-0.5, -0.3]], dtype=np.float32)
         indexes = np.array([[0, 1]], dtype=np.int64)
-        out_s, out_i = self.policy.apply_title_boost("", scores, indexes, {})
+        out_s, out_i = search_policy.apply_title_boost("", scores, indexes, {})
         assert out_s is scores
         assert out_i is indexes
 
@@ -97,7 +90,7 @@ class TestApplyTitleBoost:
         # len(scores[0]) < 2 → early return
         scores = np.array([[-0.5]], dtype=np.float32)
         indexes = np.array([[0]], dtype=np.int64)
-        out_s, out_i = self.policy.apply_title_boost("term", scores, indexes, {})
+        out_s, out_i = search_policy.apply_title_boost("term", scores, indexes, {})
         assert out_s is scores
         assert out_i is indexes
 
@@ -106,7 +99,7 @@ class TestApplyTitleBoost:
                             (1, "B", "col/documents/beta.json")])
         scores = np.array([[-0.5, -0.3]], dtype=np.float32)
         indexes = np.array([[0, 1]], dtype=np.int64)
-        out_s, out_i = self.policy.apply_title_boost(
+        out_s, out_i = search_policy.apply_title_boost(
             "zzz nomatch", scores, indexes, mapping
         )
         # No overlap → any_boost False → original arrays returned
@@ -121,7 +114,7 @@ class TestApplyTitleBoost:
                             (1, "B", "col/documents/alpha-beta-gamma.json")])
         scores = np.array([[-0.5, -0.3]], dtype=np.float32)
         indexes = np.array([[0, 1]], dtype=np.int64)
-        out_s, out_i = self.policy.apply_title_boost(
+        out_s, out_i = search_policy.apply_title_boost(
             "alpha beta gamma", scores, indexes, mapping
         )
         # B (index 1) should now be first (lower/better score after boost)
@@ -143,7 +136,7 @@ class TestApplyTitleBoost:
             def record_title_boost(self, doc_id, delta):
                 recorded.append((doc_id, delta))
 
-        self.policy.apply_title_boost("gamma", scores, indexes, mapping, FakeTrace())
+        search_policy.apply_title_boost("gamma", scores, indexes, mapping, FakeTrace())
         assert len(recorded) == 1
         assert recorded[0][0] == "B"
         # Single-term overlap stays below the cap: delta is exactly one
@@ -159,7 +152,7 @@ class TestApplyTitleBoost:
                             (1, "B", "col/documents/multi-word_doc.json")])
         scores = np.array([[-0.5, -0.3]], dtype=np.float32)
         indexes = np.array([[0, 1]], dtype=np.int64)
-        out_s, out_i = self.policy.apply_title_boost(
+        out_s, out_i = search_policy.apply_title_boost(
             "multi word doc", scores, indexes, mapping
         )
         assert out_i[0][0] == 1
@@ -169,7 +162,7 @@ class TestApplyTitleBoost:
         mapping = _mapping([(0, "A", "col/documents/gamma.json")])
         scores = np.array([[-0.5, -0.3]], dtype=np.float32)
         indexes = np.array([[0, 1]], dtype=np.int64)
-        out_s, out_i = self.policy.apply_title_boost(
+        out_s, out_i = search_policy.apply_title_boost(
             "gamma", scores, indexes, mapping
         )
         # doc A (index 0) matched and already first → boosted but order stable
