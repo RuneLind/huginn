@@ -656,6 +656,120 @@ class TestCollectionDocumentDates:
         assert client.get("/api/collection/nope/documents").status_code == 404
 
 
+class TestCollectionDocumentScores:
+    """Opt-in score enrichment on /api/collection/{name}/documents."""
+
+    def _store(self) -> _FakeStore:
+        mapping = {
+            # Two chunks for the same doc → must dedupe to one entry.
+            "1": {"documentId": "a.md", "documentUrl": "https://x.com/a",
+                  "documentPath": "xf/documents/a.md.json"},
+            "2": {"documentId": "a.md", "documentUrl": "https://x.com/a",
+                  "documentPath": "xf/documents/a.md.json"},
+            # Only combined_score present.
+            "3": {"documentId": "b.md", "documentUrl": "https://x.com/b",
+                  "documentPath": "xf/documents/b.md.json"},
+            # Unparseable / non-finite scores → omitted, doc still lists.
+            "4": {"documentId": "c.md", "documentUrl": "https://x.com/c",
+                  "documentPath": "xf/documents/c.md.json"},
+            # Document file missing → no score keys, doc still lists.
+            "5": {"documentId": "d.md", "documentUrl": "https://x.com/d",
+                  "documentPath": "xf/documents/d.md.json"},
+            # Malformed JSON → no score keys, doc still lists.
+            "6": {"documentId": "e.md", "documentUrl": "https://x.com/e",
+                  "documentPath": "xf/documents/e.md.json"},
+        }
+        files = {
+            "xf/indexes/index_document_mapping.json": json.dumps(mapping),
+            # Frontmatter numerics arrive as STRINGS — the whole point of the coercion.
+            "xf/documents/a.md.json": json.dumps(
+                {"metadata": {"date": "2026-07-24", "combined_score": "0.604",
+                              "relevance_score": "0.993", "engagement_score": "18.8778"},
+                 "modifiedTime": "2026-07-24T21:40:36"}
+            ),
+            "xf/documents/b.md.json": json.dumps({"metadata": {"combined_score": 0.5}}),
+            "xf/documents/c.md.json": json.dumps(
+                {"metadata": {"combined_score": "not-a-number", "relevance_score": "NaN",
+                              "engagement_score": None}}
+            ),
+            "xf/documents/e.md.json": "{ not valid json",
+        }
+        return _FakeStore(files, {"xf"})
+
+    def _client(self, store) -> TestClient:
+        from main.runtime.knowledge_store import get_store
+        app.dependency_overrides[get_store] = lambda: store
+        return TestClient(app)
+
+    def teardown_method(self):
+        from main.runtime.knowledge_store import get_store
+        app.dependency_overrides.pop(get_store, None)
+
+    def test_default_listing_has_no_scores(self):
+        client = self._client(self._store())
+        docs = client.get("/api/collection/xf/documents").json()["documents"]
+        assert len(docs) == 5  # a deduped
+        assert all("combined_score" not in d for d in docs)
+
+    def test_include_scores_attaches_floats(self):
+        client = self._client(self._store())
+        docs = client.get("/api/collection/xf/documents", params={"include_scores": "1"}).json()["documents"]
+        by_id = {d["id"]: d for d in docs}
+        # String frontmatter is coerced to a real float, not passed through.
+        assert by_id["a.md"]["combined_score"] == 0.604
+        assert isinstance(by_id["a.md"]["combined_score"], float)
+        assert by_id["a.md"]["relevance_score"] == 0.993
+        assert by_id["a.md"]["engagement_score"] == 18.8778
+        # Already-numeric frontmatter passes through unharmed.
+        assert by_id["b.md"]["combined_score"] == 0.5
+        assert "relevance_score" not in by_id["b.md"]
+
+    def test_include_scores_omits_unparseable_and_missing(self):
+        client = self._client(self._store())
+        docs = client.get("/api/collection/xf/documents", params={"include_scores": "1"}).json()["documents"]
+        by_id = {d["id"]: d for d in docs}
+        for doc_id in ("c.md", "d.md", "e.md"):
+            assert not any(k in by_id[doc_id] for k in
+                           ("combined_score", "relevance_score", "engagement_score")), doc_id
+        # Dates are not attached unless asked for.
+        assert all("date" not in d for d in docs)
+
+    def test_both_flags_attach_dates_and_scores(self):
+        client = self._client(self._store())
+        docs = client.get(
+            "/api/collection/xf/documents",
+            params={"include_dates": "1", "include_scores": "1"},
+        ).json()["documents"]
+        by_id = {d["id"]: d for d in docs}
+        assert by_id["a.md"]["date"] == "2026-07-24"
+        assert by_id["a.md"]["modifiedTime"] == "2026-07-24T21:40:36"
+        assert by_id["a.md"]["combined_score"] == 0.604
+        assert by_id["d.md"]["date"] is None
+
+
+class TestResolveDocScores:
+    def test_coerces_string_frontmatter(self):
+        from main.routes.collections import _resolve_doc_scores
+        assert _resolve_doc_scores(
+            {"metadata": {"combined_score": "0.604", "relevance_score": "0.993",
+                          "engagement_score": "18.8778"}}
+        ) == {"combined_score": 0.604, "relevance_score": 0.993, "engagement_score": 18.8778}
+
+    def test_omits_absent_unparseable_and_nonfinite(self):
+        from main.routes.collections import _resolve_doc_scores
+        assert _resolve_doc_scores({"metadata": {"combined_score": "abc"}}) == {}
+        assert _resolve_doc_scores({"metadata": {"combined_score": "inf"}}) == {}
+        assert _resolve_doc_scores({"metadata": {"combined_score": "nan"}}) == {}
+        assert _resolve_doc_scores({"metadata": {"combined_score": None}}) == {}
+        assert _resolve_doc_scores({"metadata": {}}) == {}
+        assert _resolve_doc_scores({}) == {}
+
+    def test_ignores_booleans(self):
+        from main.routes.collections import _resolve_doc_scores
+        # bool is an int subclass — float(True) == 1.0 would be a silent lie.
+        assert _resolve_doc_scores({"metadata": {"combined_score": True}}) == {}
+
+
 class TestResolveDocDate:
     def test_prefers_frontmatter_date(self):
         from main.routes.collections import _resolve_doc_date

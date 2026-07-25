@@ -1,6 +1,7 @@
 """Collection-level routes — listing, tags, document lookup, manual update."""
 import json
 import logging
+import math
 import os
 
 from datetime import datetime, timedelta, timezone
@@ -99,21 +100,50 @@ def _resolve_doc_date(doc: dict) -> str | None:
     return metadata.get("date") or doc.get("modifiedTime")
 
 
-def _read_doc_dates(store: KnowledgeStore, doc_path: str) -> tuple[str | None, str | None]:
-    """Read a single document JSON and return ``(date, modifiedTime)``, or Nones on error.
+#: Ranking scores attached by ``include_scores``. ``combined_score`` is the one
+#: callers rank on; the two inputs ride along for debuggability.
+SCORE_FIELDS = ("combined_score", "relevance_score", "engagement_score")
 
-    A missing/unreadable file or malformed JSON yields Nones (logged), so one bad
+
+def _resolve_doc_scores(doc: dict) -> dict[str, float]:
+    """Coerce a document's frontmatter ranking scores to floats.
+
+    ``read_frontmatter`` serves numerics as STRINGS (e.g. ``"0.604"``), which sort
+    lexicographically if a caller uses them raw ("0.9" < "0.1234"). Coercing here
+    means every consumer gets a real number. A field that is absent, non-numeric,
+    or non-finite is *omitted* rather than emitted as a string or a NaN — callers
+    can then treat "key missing" as the single "no score" signal.
+    """
+    metadata = doc.get("metadata") or {}
+    scores: dict[str, float] = {}
+    for field in SCORE_FIELDS:
+        raw = metadata.get(field)
+        if raw is None or isinstance(raw, bool):
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(value):
+            continue
+        scores[field] = value
+    return scores
+
+
+def _read_doc(store: KnowledgeStore, doc_path: str) -> dict | None:
+    """Read and parse a single document JSON, or return ``None`` on error.
+
+    A missing/unreadable file or malformed JSON yields ``None`` (logged), so one bad
     document doesn't fail the whole listing — but genuinely unexpected errors are
     left to propagate rather than silently swallowed.
     """
     if not doc_path:
-        return None, None
+        return None
     try:
-        doc = json.loads(store.disk_persister.read_text_file(doc_path))
+        return json.loads(store.disk_persister.read_text_file(doc_path))
     except (OSError, ValueError) as e:
-        logger.warning("Could not read date for document %s: %s", doc_path, e)
-        return None, None
-    return _resolve_doc_date(doc), doc.get("modifiedTime")
+        logger.warning("Could not read document %s: %s", doc_path, e)
+        return None
 
 
 @router.get("/api/collection/{name}/documents")
@@ -123,6 +153,10 @@ def list_collection_documents(
         False,
         description="Attach each document's added date. Slower — reads every document file.",
     ),
+    include_scores: bool = Query(
+        False,
+        description="Attach each document's ranking scores as floats. Slower — reads every document file.",
+    ),
     store: KnowledgeStore = Depends(get_store),
 ):
     """List all documents in a collection with their IDs and URLs.
@@ -130,9 +164,16 @@ def list_collection_documents(
     When ``include_dates`` is set, each entry also carries a ``date`` field
     (frontmatter date, falling back to file mtime) so callers can sort/group by
     recency, plus a ``modifiedTime`` field (full-precision ingest timestamp,
-    when the document has one) so callers can break intra-day ties. This reads
-    every document file, so it is opt-in to keep the default listing (used by
-    hot paths like duplicate checks) cheap.
+    when the document has one) so callers can break intra-day ties.
+
+    When ``include_scores`` is set, each entry carries whichever of
+    ``combined_score`` / ``relevance_score`` / ``engagement_score`` the document
+    has, coerced to floats (see ``_resolve_doc_scores``) so callers can rank the
+    listing before fetching bodies. Absent/unparseable scores are omitted.
+
+    Both flags read every document file, so they are opt-in to keep the default
+    listing (used by hot paths like duplicate checks) cheap. Setting both still
+    reads each file only once.
     """
     if not store.has_collection(name):
         raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
@@ -154,11 +195,15 @@ def list_collection_documents(
             continue
         seen_ids.add(doc_id)
         doc = {"id": doc_id, "url": doc_url}
-        if include_dates:
-            date, modified_time = _read_doc_dates(store, entry.get("documentPath", ""))
-            doc["date"] = date
-            if modified_time:
-                doc["modifiedTime"] = modified_time
+        if include_dates or include_scores:
+            raw = _read_doc(store, entry.get("documentPath", "")) or {}
+            if include_dates:
+                doc["date"] = _resolve_doc_date(raw) if raw else None
+                modified_time = raw.get("modifiedTime")
+                if modified_time:
+                    doc["modifiedTime"] = modified_time
+            if include_scores:
+                doc.update(_resolve_doc_scores(raw))
         documents.append(doc)
 
     return {"documents": documents}
