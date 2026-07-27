@@ -111,6 +111,7 @@ Endpoints:
 - `GET /api/search?q=...&collection=...&limit=10` — Hybrid search with reranking
 - `GET /api/collections` — List loaded collections
 - `GET /api/document/{collection}/{doc_id}` — Full document
+- `DELETE /api/document/{collection}/{doc_id}` — Soft-delete a document (localFiles collections): moves the source file to `data/deleted/` and triggers a reindex
 - `GET /api/graph/{node_id}` — Knowledge graph node
 - `GET /health` — Health check
 

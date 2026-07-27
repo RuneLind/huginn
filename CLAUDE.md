@@ -59,6 +59,70 @@ Collections live in `data/collections/`. Source documents live in `data/sources/
 
 Check `data/collections/<name>/manifest.json` — confirm `numberOfDocuments` matches expectations and `excludePatterns` show single backslashes in JSON (e.g. `"^\\.excluded/.*"`, not `"^\\\\.excluded/.*"`).
 
+## Deleting a document
+
+`DELETE /api/document/{collection}/{doc_id}` (localFiles collections only) removes a
+junk document — smoke-test residue, a bad capture — from a collection.
+
+```sh
+curl -X DELETE "http://127.0.0.1:8321/api/document/x-articles/some-doc.md"
+# {"status":"deleted","collection":"x-articles","doc_id":"some-doc.md",
+#  "movedTo":"data/deleted/x-articles/some-doc.md",
+#  "reindex":{"x-articles":"started"},
+#  "pollUrls":{"x-articles":"/api/collections/x-articles/update-status"}}
+```
+
+- **It deletes the SOURCE, not the derived JSON.** The listed document under
+  `data/collections/<name>/documents/` is regenerated from the source markdown under
+  the manifest's `reader.basePath`; deleting it leaves the index entry behind with a
+  dangling `documentPath`. Removing the source is what sticks — the update's orphan
+  pruning (`__prune_orphaned_documents`) then drops the index entries *and* the
+  derived JSON. Never hand-edit `index_document_mapping.json`.
+- **Soft delete.** The source is MOVED to `data/deleted/<collection>/<doc_id>`
+  (`HUGINN_DELETED_DIR` overrides the root; `data/` is gitignored, so this is the only
+  undo there is). A name collision is disambiguated (`x.1.md`), never overwritten.
+  Move it back and reindex to restore.
+- **Outside `basePath`, deliberately** — not a `.excluded/` folder inside it. Exclusion
+  is purely `excludePatterns`, and none of the summary collections declare one; with
+  `includePatterns: [".*"]` a file moved inside the tree is simply re-indexed under a
+  new id. Moving out needs no manifest edit. The endpoint 400s if the deleted-dir
+  resolves inside `basePath`.
+- **Only real documents of the collection.** The doc id must be present in the
+  collection's `reverse_index_document_mapping.json`, else **404** — `basePath` is not
+  the collection. Several wikis' `basePath` is a live git repo root whose reader excludes
+  most of what lives there (`CLAUDE.md`, `index.md`, dot-dirs) and skips `.git/` outright;
+  without this check the endpoint would move those out of a real repository.
+- **All collections sharing the `basePath` are reindexed**, not just the named one —
+  `wiki` + `wiki-life`, the `nav-wiki*` family, `capra-notion` + `capra-notion-v9`,
+  `jira-issues` + baseline. Otherwise the siblings keep serving the deleted doc from a
+  dangling index entry. `reindex` is therefore a **map** `{collection: status}` (named
+  one first), and `pollUrls` a map for the `started` ones.
+- **Not synchronous.** The move is immediate; the doc leaves search and the document
+  listing only after the background update finishes — poll the collection's entry in
+  `pollUrls`. A collection whose update was already running reports
+  `skipped_already_running` and gets **no** `pollUrl` (the in-flight run's status would
+  read `succeeded` without ever having seen this delete): the move still happened, and
+  the caller must POST `/api/collections/{name}/update` for it later. It is never queued
+  behind the running update, which may already be past its own enumeration step.
+- **Last document of a collection is a no-op in the index.** `__prune_orphaned_documents`
+  deliberately refuses to prune when the reader enumerates zero documents (a transient FS
+  error or a mistyped pattern would otherwise wipe the whole index). So deleting a
+  collection's *final* document moves the source and returns 200, but the index entry
+  survives. Recreate the collection instead.
+- **400s** (before anything moves) for a non-`localFiles` reader — query-based readers
+  cannot enumerate their ids, so pruning never fires for them — an unresolvable
+  `basePath`, or an unusable doc id: escaping `basePath` (realpath containment guard, so
+  `../` and out-pointing symlinks both fail), being *itself* a symlink even when its
+  target is inside (realpath would move the target and orphan the link), or containing an
+  embedded NUL (`%00`). **404** for an unknown collection, a missing source file, or a
+  file that is not an indexed document of the collection. A trailing slash in the id is
+  normalized away.
+- A relative `basePath` (e.g. x-articles' `./data/sources/x-articles`) resolves against
+  the **server's CWD**, same as `FilesDocumentReader` and the update factory read it.
+- CORS is unchanged (`GET`/`POST` only) — the endpoint is intended to be called
+  server-side; a muninn proxy for it lands separately, and it is not meant for the
+  browser extension.
+
 ## LLM entity extraction (knowledge graph)
 
 Extract entities and relationships from a collection using a local Ollama model. Outputs a `*_llm_graph.json` used for query expansion and graph context enrichment at search time.

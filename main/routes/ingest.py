@@ -14,7 +14,11 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from main.core.search_response_formatter import extract_chunk_text, truncate_snippet
 from main.ingest.registry import INGEST_SOURCES, IngestSource
 from main.ingest.youtube import fetch_transcript, list_categories
-from main.runtime.knowledge_store import KnowledgeStore, get_store, run_collection_update
+from main.runtime.knowledge_store import (
+    KnowledgeStore,
+    get_store,
+    maybe_enqueue_reindex,
+)
 from main.utils.filename import title_from_doc_path
 
 router = APIRouter()
@@ -79,19 +83,11 @@ def _similar_for_collection(store, collection_name, query, exclude_match) -> lis
     return _find_similar_documents(searcher, query=query, exclude_match=exclude_match)
 
 
-def _maybe_enqueue_reindex(store, background_tasks, collection_name) -> str:
-    """Enqueue a background reindex unless one is already running for the collection.
-
-    Ingest succeeds regardless of reindex state, so a busy collection skips the
-    duplicate rebuild (avoiding the concurrent read-modify-write clobber, H4)
-    rather than failing the ingest. Returns a status the caller surfaces.
-    """
-    if not (collection_name and store.has_collection(collection_name)):
-        return "not_configured"
-    if not store.try_begin_update(collection_name):
-        return "skipped_already_running"
-    background_tasks.add_task(run_collection_update, collection_name, store)
-    return "started"
+#: Ingest's alias for the shared enqueue contract (see
+#: ``main.runtime.knowledge_store.maybe_enqueue_reindex``). Kept as a module-level
+#: name because the ingest tests exercise it here; the delete route uses the same
+#: helper, so the two can no longer drift apart.
+_maybe_enqueue_reindex = maybe_enqueue_reindex
 
 
 def _make_ingest_handler(src: IngestSource):
