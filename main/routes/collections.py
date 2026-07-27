@@ -3,6 +3,7 @@ import json
 import logging
 import math
 import os
+import shutil
 
 from datetime import datetime, timedelta, timezone
 from statistics import median
@@ -235,6 +236,206 @@ def get_document(collection: str, doc_id: str, store: KnowledgeStore = Depends(g
         return json.loads(doc_text)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
+
+
+#: Where soft-deleted source files are parked. Deliberately CWD-relative by
+#: default, exactly like a manifest's relative ``reader.basePath`` — the server's
+#: working directory is the one anchor both already share. ``data/`` is
+#: gitignored, so nothing here is ever committed. Overridable (tests, and an
+#: operator who wants the trash on another volume) via ``HUGINN_DELETED_DIR``.
+DELETED_DIR_ENV = "HUGINN_DELETED_DIR"
+DEFAULT_DELETED_DIR = "./data/deleted"
+
+
+def _deleted_root() -> str:
+    return os.environ.get(DELETED_DIR_ENV) or DEFAULT_DELETED_DIR
+
+
+def _localfiles_base_path(store: KnowledgeStore, collection: str) -> str:
+    """Resolved, existing ``reader.basePath`` for a localFiles collection.
+
+    400 (not 404/500) for every "this collection cannot be deleted from" case, so
+    the caller learns the request was wrong rather than getting a half-done
+    delete: a non-localFiles reader has no enumerable source tree, so the orphan
+    pruning this endpoint depends on never runs for it (see
+    ``__prune_orphaned_documents`` — it is skipped for readers without
+    ``get_all_document_ids``). A relative basePath resolves against this process's
+    CWD, matching how ``FilesDocumentReader`` and the update factory
+    (``DiskPersister(base_path="./data/collections")``) already read it.
+    """
+    try:
+        manifest = json.loads(
+            store.disk_persister.read_text_file(f"{collection}/manifest.json")
+        )
+    except (OSError, ValueError) as e:
+        raise HTTPException(
+            status_code=500, detail=f"Could not read manifest for '{collection}': {e}"
+        )
+
+    reader = manifest.get("reader") or {}
+    if reader.get("type") != "localFiles":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Collection '{collection}' has reader type "
+                f"'{reader.get('type')}'; deletion is only supported for "
+                f"'localFiles' collections"
+            ),
+        )
+
+    base_path = reader.get("basePath")
+    if not base_path:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Collection '{collection}' has no reader.basePath",
+        )
+
+    resolved = os.path.realpath(base_path)
+    if not os.path.isdir(resolved):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"reader.basePath '{base_path}' for collection '{collection}' "
+                f"does not resolve to an existing directory (resolved: {resolved})"
+            ),
+        )
+    return resolved
+
+
+def _resolve_source_file(base_dir: str, doc_id: str) -> str:
+    """Absolute path of the source file backing ``doc_id``, containment-guarded.
+
+    A document id is the source file's path relative to basePath (see
+    ``FilesDocumentReader.get_all_document_ids``), so it maps back by simple
+    join — but it arrives from an untrusted URL path segment, so the REALPATH of
+    the result must still land strictly inside the realpath of basePath.
+    Comparing resolved paths (not the raw string) is what catches both ``../``
+    traversal and a symlink pointing out of the tree.
+    """
+    if not doc_id or doc_id.startswith("/"):
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+
+    resolved = os.path.realpath(os.path.join(base_dir, doc_id))
+    if not resolved.startswith(base_dir + os.sep):
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+    return resolved
+
+
+def _free_destination(path: str) -> str:
+    """``path``, or the first free ``name.N.ext`` beside it.
+
+    Two junk docs can share a basename across ingests (or the same one can be
+    re-ingested and re-deleted), and the trash is the only undo story for a
+    delete — overwriting a previous soft-delete would destroy it silently.
+    """
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(path)
+    counter = 1
+    while os.path.exists(f"{stem}.{counter}{ext}"):
+        counter += 1
+    return f"{stem}.{counter}{ext}"
+
+
+def _relative_to_cwd(path: str) -> str:
+    """``path`` relative to the server's CWD when it is under it, else absolute."""
+    cwd = os.path.realpath(os.getcwd())
+    if path == cwd or path.startswith(cwd + os.sep):
+        return os.path.relpath(path, cwd)
+    return path
+
+
+@router.delete("/api/document/{collection}/{doc_id:path}")
+def delete_document(
+    collection: str,
+    doc_id: str,
+    background_tasks: BackgroundTasks,
+    store: KnowledgeStore = Depends(get_store),
+):
+    """Soft-delete a document by moving its SOURCE file out of the collection.
+
+    Deleting the derived JSON under ``<collection>/documents/`` would achieve
+    nothing durable: it is regenerated from the source markdown under
+    ``reader.basePath``, and the index entry would survive pointing at a path
+    that no longer exists. Removing the SOURCE is the operation that sticks —
+    the next incremental update's orphan pruning
+    (``DocumentCollectionCreator.__prune_orphaned_documents``) reconciles the
+    index against the reader's full id enumeration and drops both the index
+    entries and the derived JSON.
+
+    The source is MOVED to ``data/deleted/<collection>/<doc_id>`` rather than
+    unlinked, and deliberately to a location OUTSIDE basePath. A ``.excluded/``
+    folder inside basePath would only work for collections that declare a
+    matching ``excludePatterns`` — none of the summary collections do, and with
+    ``includePatterns: [".*"]`` the moved file would simply be re-indexed under a
+    new id. Moving out of the tree needs no manifest edit and, since ``data/`` is
+    gitignored (so a hard unlink would have no undo), doubles as the undo story.
+
+    Deletion is NOT synchronous. The move is immediate; the document leaves
+    search and the document listing only once the background update finishes.
+    Poll ``GET /api/collections/{collection}/update-status`` (``pollUrl`` in the
+    response). If an update is already running, the move still succeeded and
+    ``reindex`` reports ``skipped_already_running`` — the honest outcome, and the
+    caller can simply POST ``/api/collections/{collection}/update`` later. It is
+    never queued behind the running update, because that update may already have
+    passed its own enumeration step and would then leave the index stale with no
+    signal.
+    """
+    if not store.has_collection(collection):
+        raise HTTPException(status_code=404, detail=f"Collection '{collection}' not found")
+
+    base_dir = _localfiles_base_path(store, collection)
+    source_path = _resolve_source_file(base_dir, doc_id)
+
+    if not os.path.isfile(source_path):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Source file for document '{doc_id}' not found in collection '{collection}'",
+        )
+
+    destination = os.path.realpath(
+        os.path.join(_deleted_root(), collection, os.path.relpath(source_path, base_dir))
+    )
+    # The whole design rests on the destination being outside the reader's tree.
+    # A pathological config (a deleted-dir nested under basePath) would otherwise
+    # leave the file indexed under a new id instead of deleting it.
+    if destination == base_dir or destination.startswith(base_dir + os.sep):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Deleted-documents directory resolves inside reader.basePath for "
+                f"collection '{collection}'; refusing to move (the file would be "
+                f"re-indexed). Set {DELETED_DIR_ENV} to a path outside {base_dir}."
+            ),
+        )
+    destination = _free_destination(destination)
+
+    try:
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        shutil.move(source_path, destination)
+    except OSError as e:
+        logger.warning("Could not move source file for %s/%s", collection, doc_id, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Could not move source file: {e}")
+
+    logger.info("Soft-deleted %s from %s -> %s", doc_id, collection, destination)
+
+    # Same enqueue contract the ingest routes use: reserve the rebuild slot, or
+    # report that one was already running. try_begin_update IS the per-collection
+    # mutex, so this can never race a concurrent rebuild onto the same on-disk index.
+    if store.try_begin_update(collection, trigger="manual", variant="incremental"):
+        background_tasks.add_task(run_collection_update, collection, store)
+        reindex = "started"
+    else:
+        reindex = "skipped_already_running"
+
+    return {
+        "status": "deleted",
+        "collection": collection,
+        "doc_id": doc_id,
+        "movedTo": _relative_to_cwd(destination),
+        "reindex": reindex,
+        "pollUrl": f"/api/collections/{collection}/update-status",
+    }
 
 
 async def _optional_correlation(request: Request) -> dict:

@@ -59,6 +59,47 @@ Collections live in `data/collections/`. Source documents live in `data/sources/
 
 Check `data/collections/<name>/manifest.json` — confirm `numberOfDocuments` matches expectations and `excludePatterns` show single backslashes in JSON (e.g. `"^\\.excluded/.*"`, not `"^\\\\.excluded/.*"`).
 
+## Deleting a document
+
+`DELETE /api/document/{collection}/{doc_id}` (localFiles collections only) removes a
+junk document — smoke-test residue, a bad capture — from a collection.
+
+```sh
+curl -X DELETE "http://127.0.0.1:8321/api/document/x-articles/some-doc.md"
+# {"status":"deleted","collection":"x-articles","doc_id":"some-doc.md",
+#  "movedTo":"data/deleted/x-articles/some-doc.md","reindex":"started",
+#  "pollUrl":"/api/collections/x-articles/update-status"}
+```
+
+- **It deletes the SOURCE, not the derived JSON.** The listed document under
+  `data/collections/<name>/documents/` is regenerated from the source markdown under
+  the manifest's `reader.basePath`; deleting it leaves the index entry behind with a
+  dangling `documentPath`. Removing the source is what sticks — the update's orphan
+  pruning (`__prune_orphaned_documents`) then drops the index entries *and* the
+  derived JSON. Never hand-edit `index_document_mapping.json`.
+- **Soft delete.** The source is MOVED to `data/deleted/<collection>/<doc_id>`
+  (`HUGINN_DELETED_DIR` overrides the root; `data/` is gitignored, so this is the only
+  undo there is). A name collision is disambiguated (`x.1.md`), never overwritten.
+  Move it back and reindex to restore.
+- **Outside `basePath`, deliberately** — not a `.excluded/` folder inside it. Exclusion
+  is purely `excludePatterns`, and none of the summary collections declare one; with
+  `includePatterns: [".*"]` a file moved inside the tree is simply re-indexed under a
+  new id. Moving out needs no manifest edit. The endpoint 400s if the deleted-dir
+  resolves inside `basePath`.
+- **Not synchronous.** The move is immediate; the doc leaves search and the document
+  listing only after the background update finishes — poll `pollUrl`. If an update is
+  already running, `reindex` is `skipped_already_running`: the move still happened, and
+  the caller should POST `/api/collections/{name}/update` later. It is never queued
+  behind the running update, which may already be past its own enumeration step.
+- **400s** (before anything moves) for a non-`localFiles` reader — query-based readers
+  cannot enumerate their ids, so pruning never fires for them — an unresolvable
+  `basePath`, or a doc id escaping `basePath` (realpath containment guard, so `../` and
+  symlinks both fail). **404** for an unknown collection or a missing source file.
+- A relative `basePath` (e.g. x-articles' `./data/sources/x-articles`) resolves against
+  the **server's CWD**, same as `FilesDocumentReader` and the update factory read it.
+- CORS is unchanged (`GET`/`POST` only) — this endpoint is meant to be called
+  server-side (muninn proxies it), not from the browser extension.
+
 ## LLM entity extraction (knowledge graph)
 
 Extract entities and relationships from a collection using a local Ollama model. Outputs a `*_llm_graph.json` used for query expansion and graph context enrichment at search time.
