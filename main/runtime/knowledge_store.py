@@ -447,3 +447,28 @@ def run_collection_update(collection_name: str, store: KnowledgeStore):
         store.mark_update_failed(collection_name, e)
         return
     store.mark_update_succeeded(collection_name)
+
+
+def maybe_enqueue_reindex(store, background_tasks, collection_name, *,
+                          trigger=None, variant=None) -> str:
+    """Enqueue a background reindex unless one is already running for ``collection_name``.
+
+    The single enqueue contract shared by every write route (push ingest, document
+    delete): reserve the per-collection rebuild slot with ``try_begin_update`` —
+    which IS the mutex, so this can never race a concurrent rebuild onto the same
+    on-disk index — and only then hand the work to FastAPI's background runner.
+
+    The write itself has already succeeded by the time this is called, so a busy
+    collection SKIPS the duplicate rebuild (avoiding the concurrent
+    read-modify-write clobber, H4) rather than failing the request. Returns the
+    status the caller surfaces: ``started``, ``skipped_already_running``, or
+    ``not_configured`` for a collection this store does not serve.
+    """
+    if not (collection_name and store.has_collection(collection_name)):
+        return "not_configured"
+    if not store.try_begin_update(
+        collection_name, trigger=trigger, variant=variant or "incremental"
+    ):
+        return "skipped_already_running"
+    background_tasks.add_task(run_collection_update, collection_name, store)
+    return "started"

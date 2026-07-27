@@ -17,7 +17,7 @@ from knowledge_api_server import app
 from main.core.documents_collection_creator import DocumentCollectionCreator, OPERATION_TYPE
 from main.indexes.indexers.bm25_indexer import BM25Indexer
 from main.persisters.disk_persister import DiskPersister
-from main.runtime.knowledge_store import KnowledgeStore, get_store
+from main.runtime.knowledge_store import KnowledgeStore, get_store, run_collection_update
 from main.sources.files.files_document_converter import FilesDocumentConverter
 from main.sources.files.files_document_reader import FilesDocumentReader
 
@@ -27,24 +27,37 @@ SOURCE_REL = "./data/sources/fixture-collection"
 COLLECTIONS_REL = "./data/collections"
 
 
-def _build_fixture_collection(docs: dict[str, str]) -> None:
-    """Create a real localFiles collection from ``docs`` (relative CWD paths).
-
-    BM25-only on purpose: it is the one indexer that needs no embedding model, so
-    the full create/update path runs in-process in well under a second.
-    """
-    source_dir = os.path.abspath(SOURCE_REL)
+def _write_sources(docs: dict[str, str], source_rel: str = SOURCE_REL) -> None:
+    source_dir = os.path.abspath(source_rel)
     for rel, body in docs.items():
         path = os.path.join(source_dir, rel)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             f.write(body)
 
+
+def _build_fixture_collection(
+    docs: dict[str, str],
+    name: str = COLLECTION,
+    source_rel: str = SOURCE_REL,
+    exclude_patterns: list[str] | None = None,
+) -> None:
+    """Create a real localFiles collection from ``docs`` (relative CWD paths).
+
+    BM25-only on purpose: it is the one indexer that needs no embedding model, so
+    the full create/update path runs in-process in well under a second.
+    """
+    _write_sources(docs, source_rel)
+
     DocumentCollectionCreator(
-        collection_name=COLLECTION,
+        collection_name=name,
         # A RELATIVE basePath, like the real x-articles/anthropic-docs manifests:
         # this is what pins the endpoint's "resolve against the server CWD" rule.
-        document_reader=FilesDocumentReader(base_path=SOURCE_REL, include_patterns=[".*"]),
+        document_reader=FilesDocumentReader(
+            base_path=source_rel,
+            include_patterns=[".*"],
+            exclude_patterns=exclude_patterns or [],
+        ),
         document_converter=FilesDocumentConverter(),
         document_indexers=[BM25Indexer("indexer_BM25")],
         persister=DiskPersister(base_path=COLLECTIONS_REL),
@@ -52,9 +65,9 @@ def _build_fixture_collection(docs: dict[str, str]) -> None:
     ).run()
 
 
-def _indexed_document_ids() -> set[str]:
+def _indexed_document_ids(name: str = COLLECTION) -> set[str]:
     with open(
-        os.path.join(COLLECTIONS_REL, COLLECTION, "indexes", "index_document_mapping.json"),
+        os.path.join(COLLECTIONS_REL, name, "indexes", "index_document_mapping.json"),
         encoding="utf-8",
     ) as f:
         return {entry["documentId"] for entry in json.load(f).values()}
@@ -63,10 +76,12 @@ def _indexed_document_ids() -> set[str]:
 class _DeleteCase:
     """Shared TestClient wiring + a store that serves ``COLLECTION``."""
 
-    def _store(self, monkeypatch=None) -> KnowledgeStore:
+    def _store(self, monkeypatch=None, extra_collections=()) -> KnowledgeStore:
         store = KnowledgeStore()
         store.disk_persister = DiskPersister(base_path=COLLECTIONS_REL)
         store.searchers[COLLECTION] = object()  # makes has_collection() true
+        for name in extra_collections:
+            store.searchers[name] = object()
         store._build_aux_indexes = False
         if monkeypatch is not None:
             # The fixture collection has no FAISS index, so the post-update
@@ -123,8 +138,10 @@ class TestDeleteDocumentIndexIntegrity(_DeleteCase):
         assert body["status"] == "deleted"
         assert body["collection"] == COLLECTION
         assert body["doc_id"] == "junk.md"
-        assert body["reindex"] == "started"
-        assert body["pollUrl"] == f"/api/collections/{COLLECTION}/update-status"
+        assert body["reindex"] == {COLLECTION: "started"}
+        assert body["pollUrls"] == {
+            COLLECTION: f"/api/collections/{COLLECTION}/update-status"
+        }
 
         # 1. The source left basePath and landed in the trash (the undo story).
         assert not os.path.exists(os.path.join(SOURCE_REL, "junk.md"))
@@ -154,22 +171,83 @@ class TestDeleteDocumentIndexIntegrity(_DeleteCase):
         )
         assert _indexed_document_ids() == {"keep.md", "junk.md"}
 
+    def test_trailing_slash_in_document_id_is_normalized(
+        self, fixture_collection, monkeypatch
+    ):
+        store = self._store(monkeypatch)
+        body = self._client(store).delete(f"/api/document/{COLLECTION}/junk.md/").json()
+
+        # The echoed id has to be one the caller could use again, not "junk.md/".
+        assert body["doc_id"] == "junk.md"
+        assert os.path.isfile(fixture_collection / "trash" / COLLECTION / "junk.md")
+        assert _indexed_document_ids() == {"keep.md", "nested/also-junk.md"}
+
+    def test_sibling_collections_over_the_same_base_path_are_reindexed_too(
+        self, fixture_collection, monkeypatch
+    ):
+        # wiki + wiki-life, the nav-wiki* family, capra-notion + capra-notion-v9:
+        # one basePath, several collections. Reindexing only the named one leaves
+        # the siblings serving the deleted doc from a dangling index entry.
+        sibling = "fixture-sibling"
+        _build_fixture_collection({}, name=sibling)
+        assert "junk.md" in _indexed_document_ids(sibling)
+
+        store = self._store(monkeypatch, extra_collections=[sibling])
+        body = self._client(store).delete(f"/api/document/{COLLECTION}/junk.md").json()
+
+        assert body["reindex"] == {COLLECTION: "started", sibling: "started"}
+        assert list(body["reindex"]) == [COLLECTION, sibling]  # named one first
+        assert set(body["pollUrls"]) == {COLLECTION, sibling}
+        assert "junk.md" not in _indexed_document_ids()
+        assert "junk.md" not in _indexed_document_ids(sibling)
+
+    def test_trash_collision_where_a_file_blocks_a_needed_directory(
+        self, fixture_collection, monkeypatch
+    ):
+        # A previous delete of an extensionless doc ``nested`` parked a FILE at
+        # the trash path where this delete needs a DIRECTORY. Naively that is a
+        # permanent 500; the prior soft-delete must also survive untouched.
+        trash = fixture_collection / "trash" / COLLECTION
+        trash.mkdir(parents=True)
+        (trash / "nested").write_text("an earlier extensionless doc", encoding="utf-8")
+
+        store = self._store(monkeypatch)
+        resp = self._client(store).delete(f"/api/document/{COLLECTION}/nested/also-junk.md")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert (trash / "nested").read_text(encoding="utf-8") == "an earlier extensionless doc"
+        moved_to = os.path.join(os.getcwd(), body["movedTo"])
+        assert os.path.isfile(moved_to)
+        with open(moved_to, encoding="utf-8") as f:
+            assert "More residue" in f.read()
+        assert not os.path.exists(os.path.join(SOURCE_REL, "nested", "also-junk.md"))
+        assert _indexed_document_ids() == {"keep.md", "junk.md"}
+
     def test_second_delete_of_same_name_does_not_overwrite_the_first(
         self, fixture_collection, monkeypatch
     ):
         store = self._store(monkeypatch)
         client = self._client(store)
+        first_body = "# Junk\n\nSmoke-test residue that must be deletable.\n"
         assert client.delete(f"/api/document/{COLLECTION}/junk.md").status_code == 200
 
-        # Re-ingest a document under the same id, then delete it again.
+        # Re-ingest a document under the same id (index it, so it is a real
+        # member of the collection again), then delete it a second time.
         with open(os.path.join(SOURCE_REL, "junk.md"), "w", encoding="utf-8") as f:
             f.write("# Junk again\n\nA second round of residue.\n")
+        store.try_begin_update(COLLECTION)
+        run_collection_update(COLLECTION, store)
         body = client.delete(f"/api/document/{COLLECTION}/junk.md").json()
 
         trash = fixture_collection / "trash" / COLLECTION
         assert os.path.isfile(trash / "junk.md")       # first delete survives
         assert body["movedTo"].endswith("junk.1.md")   # second is disambiguated
         assert os.path.isfile(trash / "junk.1.md")
+        # The trash is the only undo story, so "survives" has to mean the first
+        # file's CONTENT is untouched — not merely that the name still exists.
+        assert (trash / "junk.md").read_text(encoding="utf-8") == first_body
+        assert "A second round" in (trash / "junk.1.md").read_text(encoding="utf-8")
 
     def test_reindex_skipped_when_an_update_is_already_running(
         self, fixture_collection, monkeypatch
@@ -182,7 +260,10 @@ class TestDeleteDocumentIndexIntegrity(_DeleteCase):
         # The move is unconditional and already durable; only the reindex is
         # deferred to the caller, who can POST /update once the running one ends.
         assert body["status"] == "deleted"
-        assert body["reindex"] == "skipped_already_running"
+        assert body["reindex"] == {COLLECTION: "skipped_already_running"}
+        # No pollUrl for a skipped collection: it would point at the PRE-EXISTING
+        # run, which reports "succeeded" without ever having seen this delete.
+        assert body["pollUrls"] == {}
         assert not os.path.exists(os.path.join(SOURCE_REL, "junk.md"))
         assert os.path.isfile(fixture_collection / "trash" / COLLECTION / "junk.md")
         # Nothing reindexed, so the index still carries the (now sourceless) entry.
@@ -219,6 +300,85 @@ class TestDeleteDocumentRejections(_DeleteCase):
         assert resp.status_code == 400
         assert resp.json()["detail"] == "Invalid document ID"
         assert outside.is_file()
+
+    def test_nul_byte_document_id_400(self, fixture_collection, monkeypatch):
+        # ``os.path.realpath``/``lstat`` raise ValueError on an embedded NUL, so
+        # without a guard this is a 500 on a plainly invalid id.
+        resp = self._client(self._store(monkeypatch)).delete(
+            f"/api/document/{COLLECTION}/a%00b"
+        )
+
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "Invalid document ID"
+
+    def test_symlinked_document_id_pointing_inside_base_path_400(
+        self, fixture_collection, monkeypatch
+    ):
+        # realpath would resolve ``alias.md`` to ``keep.md`` and move THAT —
+        # deleting a different document and leaving a dangling symlink behind.
+        os.symlink(
+            os.path.abspath(os.path.join(SOURCE_REL, "keep.md")),
+            os.path.join(SOURCE_REL, "alias.md"),
+        )
+
+        resp = self._client(self._store(monkeypatch)).delete(
+            f"/api/document/{COLLECTION}/alias.md"
+        )
+
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "Invalid document ID"
+        assert os.path.isfile(os.path.join(SOURCE_REL, "keep.md"))
+        assert os.path.islink(os.path.join(SOURCE_REL, "alias.md"))
+
+    def test_file_on_disk_but_not_indexed_404(self, fixture_collection, monkeypatch):
+        # basePath is not the collection: a file can sit under it without ever
+        # having been indexed (arrived after the last update, or never matched).
+        _write_sources({"arrived-later.md": "# Later\n\nNot in the index yet.\n"})
+
+        resp = self._client(self._store(monkeypatch)).delete(
+            f"/api/document/{COLLECTION}/arrived-later.md"
+        )
+
+        assert resp.status_code == 404
+        assert "not indexed" in resp.json()["detail"]
+        assert os.path.isfile(os.path.join(SOURCE_REL, "arrived-later.md"))
+
+    def test_git_internals_are_not_deletable_404(self, fixture_collection, monkeypatch):
+        # Several wikis' basePath IS a live git repo root. The reader's walk skips
+        # ``.git`` entirely, so nothing in it is ever a document of the collection.
+        _write_sources({".git/config": "[core]\n\trepositoryformatversion = 0\n"})
+
+        resp = self._client(self._store(monkeypatch)).delete(
+            f"/api/document/{COLLECTION}/.git/config"
+        )
+
+        assert resp.status_code == 404
+        assert os.path.isfile(os.path.join(SOURCE_REL, ".git", "config"))
+
+    def test_excluded_pattern_file_404(self, fixture_collection, monkeypatch):
+        # ``CLAUDE.md`` is excluded by mimir's and the jarvis wiki's readers, yet
+        # it lives right under basePath — moving it out would edit a real repo.
+        excluded_collection = "fixture-excluded"
+        excluded_source = "./data/sources/fixture-excluded"
+        _build_fixture_collection(
+            {
+                "real.md": "# Real\n\nAn indexed page.\n",
+                "CLAUDE.md": "# Instructions\n\nNot part of the collection.\n",
+            },
+            name=excluded_collection,
+            source_rel=excluded_source,
+            exclude_patterns=[r"^CLAUDE\.md$"],
+        )
+        assert _indexed_document_ids(excluded_collection) == {"real.md"}
+
+        store = self._store(monkeypatch, extra_collections=[excluded_collection])
+        resp = self._client(store).delete(
+            f"/api/document/{excluded_collection}/CLAUDE.md"
+        )
+
+        assert resp.status_code == 404
+        assert "not indexed" in resp.json()["detail"]
+        assert os.path.isfile(os.path.join(excluded_source, "CLAUDE.md"))
 
     def test_symlink_escaping_base_path_400(self, fixture_collection, monkeypatch):
         outside = fixture_collection / "outside.md"
@@ -301,6 +461,7 @@ class TestResolveSourceFileContainment:
         "../x",                 # one level out
         "a/../../x",            # out via a valid-looking prefix
         "..",                   # basePath itself, not a file inside it
+        "a\x00b",               # embedded NUL — realpath raises, not returns
     ])
     def test_escaping_ids_rejected(self, tmp_path, doc_id):
         from fastapi import HTTPException

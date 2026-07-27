@@ -18,7 +18,12 @@ from main.runtime.indexing_run_ledger import (
     InvalidCollectionName,
 )
 from main.runtime.indexing_schedule import load_schedules
-from main.runtime.knowledge_store import KnowledgeStore, get_store, run_collection_update
+from main.runtime.knowledge_store import (
+    KnowledgeStore,
+    get_store,
+    maybe_enqueue_reindex,
+    run_collection_update,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -214,6 +219,17 @@ def list_collection_documents(
     return {"documents": documents}
 
 
+def _is_inside(base_dir: str, resolved: str) -> bool:
+    """Is ``resolved`` a path strictly INSIDE ``base_dir``? (both already realpath'd)
+
+    The one containment rule every path-taking route here shares. Deliberately
+    strict (``base_dir`` itself is not "inside" it) and separator-anchored, so a
+    sibling whose name merely shares a prefix — ``/data/sources/x-articles-old``
+    against ``/data/sources/x-articles`` — is correctly a different tree.
+    """
+    return resolved.startswith(base_dir + os.sep)
+
+
 @router.get("/api/document/{collection}/{doc_id:path}")
 def get_document(collection: str, doc_id: str, store: KnowledgeStore = Depends(get_store)):
     if not store.has_collection(collection):
@@ -227,8 +243,13 @@ def get_document(collection: str, doc_id: str, store: KnowledgeStore = Depends(g
         doc_path += ".json"
 
     base_dir = os.path.realpath(store.disk_persister.base_path)
-    resolved = os.path.realpath(os.path.join(base_dir, doc_path))
-    if not resolved.startswith(base_dir + os.sep):
+    try:
+        resolved = os.path.realpath(os.path.join(base_dir, doc_path))
+    except ValueError:
+        # Embedded NUL (``%00`` in the URL) — realpath raises rather than
+        # returning something we could containment-check. Same 400 as traversal.
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+    if not _is_inside(base_dir, resolved):
         raise HTTPException(status_code=400, detail="Invalid document ID")
 
     try:
@@ -311,12 +332,26 @@ def _resolve_source_file(base_dir: str, doc_id: str) -> str:
     the result must still land strictly inside the realpath of basePath.
     Comparing resolved paths (not the raw string) is what catches both ``../``
     traversal and a symlink pointing out of the tree.
+
+    A doc id that is ITSELF a symlink is refused outright, even when its target
+    is inside basePath: realpath would resolve ``alias.md`` to ``target.md`` and
+    the move would then delete a DIFFERENT document while leaving ``alias.md``
+    dangling. Symlinked source files are exotic; refusing beats guessing.
     """
     if not doc_id or doc_id.startswith("/"):
         raise HTTPException(status_code=400, detail="Invalid document ID")
 
-    resolved = os.path.realpath(os.path.join(base_dir, doc_id))
-    if not resolved.startswith(base_dir + os.sep):
+    try:
+        lexical = os.path.join(base_dir, doc_id)
+        if os.path.islink(lexical):
+            raise HTTPException(status_code=400, detail="Invalid document ID")
+        resolved = os.path.realpath(lexical)
+    except ValueError:
+        # Embedded NUL (``DELETE .../a%00b``) — os.lstat/realpath raise instead
+        # of returning a path. Same "this id is not a path" 400 as traversal.
+        raise HTTPException(status_code=400, detail="Invalid document ID")
+
+    if not _is_inside(base_dir, resolved):
         raise HTTPException(status_code=400, detail="Invalid document ID")
     return resolved
 
@@ -335,6 +370,107 @@ def _free_destination(path: str) -> str:
     while os.path.exists(f"{stem}.{counter}{ext}"):
         counter += 1
     return f"{stem}.{counter}{ext}"
+
+
+def _free_directory(path: str) -> str:
+    """``path`` if it is free or already a directory, else the first free ``path.N``.
+
+    The directory-shaped twin of ``_free_destination``. Trash paths mirror source
+    ids, and a doc id is only ever a file — so deleting extensionless ``x`` and
+    later ``x/y.md`` needs ``x`` to be a FILE and then a DIRECTORY at the same
+    trash path. Without side-stepping, ``makedirs`` raises and that second delete
+    500s forever. Nothing existing is overwritten either way.
+    """
+    if not os.path.exists(path) or os.path.isdir(path):
+        return path
+    stem, ext = os.path.splitext(path)
+    counter = 1
+    while True:
+        candidate = f"{stem}.{counter}{ext}"
+        if not os.path.exists(candidate) or os.path.isdir(candidate):
+            return candidate
+        counter += 1
+
+
+def _prepare_destination(root_dir: str, rel_path: str) -> str:
+    """Create the trash directory chain for ``rel_path`` and return a free leaf.
+
+    Walks the chain one segment at a time so a collision at ANY level (not just
+    the leaf) is side-stepped rather than fatal, and returns the path the move
+    should target.
+    """
+    parts = [p for p in rel_path.split(os.sep) if p]
+    current = root_dir
+    for part in parts[:-1]:
+        current = _free_directory(os.path.join(current, part))
+    os.makedirs(current, exist_ok=True)
+    return _free_destination(os.path.join(current, parts[-1]))
+
+
+def _collections_sharing_source(store: KnowledgeStore, source_path: str,
+                                named_collection: str) -> list[str]:
+    """Every served localFiles collection whose basePath contains ``source_path``.
+
+    Several collections deliberately share one basePath (``wiki`` + ``wiki-life``
+    over the jarvis wiki; the ``nav-wiki*`` family; ``capra-notion`` +
+    ``capra-notion-v9``). Reindexing only the named one would leave the siblings
+    serving the deleted document from a dangling index entry, so all of them get
+    the same reconciliation. The named collection comes first.
+    """
+    result = [named_collection]
+    for name in store.collection_names():
+        if name == named_collection:
+            continue
+        try:
+            manifest = json.loads(
+                store.disk_persister.read_text_file(f"{name}/manifest.json")
+            )
+        except (OSError, ValueError):
+            continue
+        reader = manifest.get("reader") or {}
+        if reader.get("type") != "localFiles" or not reader.get("basePath"):
+            continue
+        try:
+            resolved = os.path.realpath(reader["basePath"])
+        except ValueError:
+            continue
+        if os.path.isdir(resolved) and _is_inside(resolved, source_path):
+            result.append(name)
+    return result
+
+
+def _require_indexed_document(store: KnowledgeStore, collection: str, doc_id: str) -> None:
+    """404 unless ``doc_id`` is an actual indexed document of ``collection``.
+
+    basePath is not the collection — for several wikis it is a live git repo root
+    whose reader excludes most of what lives there (``CLAUDE.md``, ``index.md``,
+    dot-dirs), and ``.git/`` is skipped by the reader's walk outright. Without
+    this check the endpoint happily moves ``.git/config`` or an excluded page out
+    of a real repository: a destructive edit to something the collection never
+    owned, and one no reindex would ever "complete", since pruning only ever
+    reconciles against documents that ARE in the index.
+
+    Checked against the persisted index mapping rather than a fresh reader
+    enumeration: it is a single small JSON read, and it is exactly the set the
+    subsequent orphan pruning reconciles against.
+    """
+    path = f"{collection}/indexes/reverse_index_document_mapping.json"
+    try:
+        mapping = json.loads(store.disk_persister.read_text_file(path))
+    except (OSError, ValueError) as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not read the index mapping for '{collection}': {e}",
+        )
+    if doc_id not in mapping:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Document '{doc_id}' is not indexed in collection '{collection}' "
+                f"(the file may exist under reader.basePath but be excluded from "
+                f"the collection); refusing to move it"
+            ),
+        )
 
 
 def _relative_to_cwd(path: str) -> str:
@@ -373,16 +509,24 @@ def delete_document(
 
     Deletion is NOT synchronous. The move is immediate; the document leaves
     search and the document listing only once the background update finishes.
-    Poll ``GET /api/collections/{collection}/update-status`` (``pollUrl`` in the
-    response). If an update is already running, the move still succeeded and
-    ``reindex`` reports ``skipped_already_running`` — the honest outcome, and the
-    caller can simply POST ``/api/collections/{collection}/update`` later. It is
-    never queued behind the running update, because that update may already have
-    passed its own enumeration step and would then leave the index stale with no
-    signal.
+    ``reindex`` is a per-collection map, because several collections share one
+    basePath (``wiki`` + ``wiki-life``, the ``nav-wiki*`` family, …) and every one
+    of them would otherwise keep serving the deleted document from a dangling
+    index entry — the named collection is reported first, its siblings after.
+    ``pollUrls`` carries an update-status URL for the ``started`` collections
+    ONLY: a ``skipped_already_running`` collection's status belongs to the update
+    that was already in flight, which will report ``succeeded`` without ever
+    having seen this delete. Those need a manual POST
+    ``/api/collections/{name}/update`` afterwards. The delete is never queued
+    behind the running update, because that update may already have passed its
+    own enumeration step and would then leave the index stale with no signal.
     """
     if not store.has_collection(collection):
         raise HTTPException(status_code=404, detail=f"Collection '{collection}' not found")
+
+    # ``DELETE .../deep.md/`` reaches the handler with the trailing slash intact;
+    # normalize so the echoed doc_id is the real, usable id.
+    doc_id = doc_id.rstrip("/")
 
     base_dir = _localfiles_base_path(store, collection)
     source_path = _resolve_source_file(base_dir, doc_id)
@@ -392,14 +536,15 @@ def delete_document(
             status_code=404,
             detail=f"Source file for document '{doc_id}' not found in collection '{collection}'",
         )
+    _require_indexed_document(store, collection, doc_id)
 
-    destination = os.path.realpath(
-        os.path.join(_deleted_root(), collection, os.path.relpath(source_path, base_dir))
-    )
+    source_rel = os.path.relpath(source_path, base_dir)
+    trash_root = _deleted_root()
+    destination = os.path.realpath(os.path.join(trash_root, collection, source_rel))
     # The whole design rests on the destination being outside the reader's tree.
     # A pathological config (a deleted-dir nested under basePath) would otherwise
     # leave the file indexed under a new id instead of deleting it.
-    if destination == base_dir or destination.startswith(base_dir + os.sep):
+    if destination == base_dir or _is_inside(base_dir, destination):
         raise HTTPException(
             status_code=400,
             detail=(
@@ -408,10 +553,11 @@ def delete_document(
                 f"re-indexed). Set {DELETED_DIR_ENV} to a path outside {base_dir}."
             ),
         )
-    destination = _free_destination(destination)
 
     try:
-        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        destination = os.path.realpath(
+            _prepare_destination(trash_root, os.path.join(collection, source_rel))
+        )
         shutil.move(source_path, destination)
     except OSError as e:
         logger.warning("Could not move source file for %s/%s", collection, doc_id, exc_info=True)
@@ -419,14 +565,14 @@ def delete_document(
 
     logger.info("Soft-deleted %s from %s -> %s", doc_id, collection, destination)
 
-    # Same enqueue contract the ingest routes use: reserve the rebuild slot, or
-    # report that one was already running. try_begin_update IS the per-collection
-    # mutex, so this can never race a concurrent rebuild onto the same on-disk index.
-    if store.try_begin_update(collection, trigger="manual", variant="incremental"):
-        background_tasks.add_task(run_collection_update, collection, store)
-        reindex = "started"
-    else:
-        reindex = "skipped_already_running"
+    # Same enqueue contract the ingest routes use (try_begin_update IS the
+    # per-collection mutex), applied to every collection reading this file.
+    reindex = {
+        name: maybe_enqueue_reindex(
+            store, background_tasks, name, trigger="manual", variant="incremental"
+        )
+        for name in _collections_sharing_source(store, source_path, collection)
+    }
 
     return {
         "status": "deleted",
@@ -434,7 +580,11 @@ def delete_document(
         "doc_id": doc_id,
         "movedTo": _relative_to_cwd(destination),
         "reindex": reindex,
-        "pollUrl": f"/api/collections/{collection}/update-status",
+        "pollUrls": {
+            name: f"/api/collections/{name}/update-status"
+            for name, status in reindex.items()
+            if status == "started"
+        },
     }
 
 
