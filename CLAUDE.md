@@ -53,7 +53,14 @@ Collections live in `data/collections/`. Source documents live in `data/sources/
 | `jira-issues` | `./data/sources/jira-issues` | `^\.excluded/.*` |
 | `capra-notion-v9` | `./data/sources/capra-notion` | — |
 | `nav-wiki` | `./huginn-nav/wiki` | `index\.md` `log\.md` `CLAUDE\.md` `^\.obsidian/.*` `^\.claude/.*` |
-| `wiki` | `./huginn-jarvis/data/wiki` | `^index\.md$` `^log\.md$` `^CLAUDE\.md$` `^plans/.*` `^Clippings/.*` `^\..*` (dot-dirs: `.obsidian/`, `.smart-env/`, `.understand-anything/`) |
+| `wiki` | `./huginn-jarvis/data/wiki` | `^index\.md$` `^log\.md$` `^CLAUDE\.md$` `^plans/.*` `^Clippings/.*` `^\..*` (dot-dirs: `.obsidian/`, `.smart-env/`, `.understand-anything/`) `^life/.*` `^trails\.json$` |
+| `wiki-life` | `./huginn-jarvis/data/wiki` | same, minus `^life/.*` — plus `includePatterns: ["^life/.*"]` |
+
+> The two wiki collections share a `basePath` and are **mutually exclusive**: `wiki` is the
+> AI/tech corpus and excludes `^life/.*`; `wiki-life` includes only `^life/.*`. That exclude
+> was missing until the 2026-08-16 lint, so every `life/` page was indexed into both and the
+> AI corpus returned health/parenting hits. If a `life/` result ever shows up in a `wiki`
+> search again, check this pattern first.
 
 ### Verify after re-indexing
 
