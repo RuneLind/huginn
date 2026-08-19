@@ -12,7 +12,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-WIKI_PATH="./huginn-jarvis/data/wiki"
+WIKI_PATH="${WIKI_PATH:-PATH_TO_YOUR_WIKI}"
 COLLECTION="wiki"
 
 echo "==> Indexing wiki pages as collection: $COLLECTION"

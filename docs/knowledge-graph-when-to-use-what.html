@@ -291,7 +291,7 @@ sequenceDiagram
         <li><strong>Entity extraction limits</strong>: 5–15 per document; types restricted to <code>Technology | Person | Concept | Organization | Product</code></li>
         <li><strong>Relationship types</strong>: <code>uses | built_by | part_of | related_to | alternative_to | created_by | improves</code></li>
         <li><strong>Cache write frequency</strong>: after each doc — safe to interrupt; resume picks up where you left off</li>
-        <li><strong>Auto-routing</strong>: outputs land in collection-appropriate private sub-repos per <code>huginn/CLAUDE.md</code> (NAV collections → <code>huginn-nav/scripts/knowledge_graph/</code>, others → <code>huginn-jarvis/scripts/knowledge_graph/</code>); the API server auto-loads all <code>*_llm_graph.json</code> from those paths at startup</li>
+        <li><strong>Auto-routing</strong>: outputs land in collection-appropriate private sub-repos per <code>huginn/CLAUDE.md</code> (each private sub-repo's <code>graph_routing.json</code> lists the collections it owns; unlisted ones go to the <code>default</code> dir); the API server auto-loads all <code>*_llm_graph.json</code> from those paths at startup</li>
     </ul>
 
     <div class="note warn">
@@ -314,7 +314,7 @@ sequenceDiagram
         <tr>
             <td><strong>EESSI domain</strong></td>
             <td><code>melosys_graph.json</code></td>
-            <td><code>huginn-nav/scripts/knowledge_graph/extract_melosys_graph.py</code></td>
+            <td><code>&lt;private-sub-repo&gt;/scripts/knowledge_graph/extract_melosys_graph.py</code></td>
             <td>BUC / SED / Artikkel / Forordning (~71 nodes, 135 edges)</td>
         </tr>
     </table>
@@ -347,7 +347,7 @@ flowchart LR
     <h3>Loading &amp; maintenance</h3>
     <ul>
         <li><strong>Loaded via env vars</strong>, not the <code>*_llm_graph.json</code> auto-glob: <code>KNOWLEDGE_GRAPH_PATH</code> → <code>melosys_graph.json</code>, <code>JIRA_GRAPH_PATH</code> → <code>jira_graph.json</code> (set in the personal <code>start.sh</code>). Same startup-only loading as the LLM graphs — <strong>restart the server after regenerating</strong> (see the consumption section below).</li>
-        <li><strong>Jira graph</strong>: re-extraction is step 4 of <code>huginn-nav/scripts/daily_jira_update.sh</code>. It runs <strong>when you run that script</strong> — the script is <em>meant for</em> cron, but no scheduler is installed, so the real cadence is whatever you run by hand. Deterministic and idempotent: full rebuild every run, no cache needed, safe to re-run anytime.</li>
+        <li><strong>Jira graph</strong>: re-extraction is step 4 of the private sub-repo's <code>scripts/daily_jira_update.sh</code>. It runs <strong>when you run that script</strong> — the script is <em>meant for</em> cron, but no scheduler is installed, so the real cadence is whatever you run by hand. Deterministic and idempotent: full rebuild every run, no cache needed, safe to re-run anytime.</li>
         <li><strong>EESSI graph</strong>: run <code>extract_melosys_graph.py</code> by hand only when the domain model changes.</li>
     </ul>
 

@@ -15,6 +15,23 @@ from main.runtime.knowledge_store import KnowledgeStore, get_store
 router = APIRouter()
 
 
+def find_author_scores_path(huginn_root: Path, name: str) -> Path | None:
+    """Locate ``{name}-author-scores.json`` without naming a private sub-repo.
+
+    Same read-side precedent as ``graph_loader._discover_auto_glob_dirs``: the
+    gitignored ``huginn-*/data/`` dirs are globbed and sorted (first match wins,
+    deterministically across machines), then ``<root>/data/`` as the public
+    fallback. Returns ``None`` when no producer has written the file.
+    """
+    filename = f"{name}-author-scores.json"
+    candidates = sorted(huginn_root.glob(f"huginn-*/data/{filename}"))
+    candidates.append(huginn_root / "data" / filename)
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
 def _parse_edge_types(edge_types: str | None) -> set[str] | None:
     if not edge_types:
         return None
@@ -93,8 +110,9 @@ def collection_author_graph(
 ):
     """Serve the author interaction graph for a collection.
 
-    Reads pre-computed author scores from huginn-jarvis and transforms
-    them into the same node/edge/community format as similarity-graph.
+    Reads the pre-computed ``{name}-author-scores.json`` (discovered via
+    :func:`find_author_scores_path`) and transforms it into the same
+    node/edge/community format as similarity-graph.
     Only includes authors that have at least one interaction edge (no isolates).
     Results are cached per collection; invalidated on collection reload.
     """
@@ -102,9 +120,8 @@ def collection_author_graph(
     if cached:
         return cached
 
-    huginn_root: Path = request.app.state.huginn_root
-    scores_path = huginn_root / "huginn-jarvis" / "data" / f"{name}-author-scores.json"
-    if not scores_path.exists():
+    scores_path = find_author_scores_path(request.app.state.huginn_root, name)
+    if scores_path is None:
         raise HTTPException(status_code=404, detail=f"No author graph found for '{name}'")
 
     scores = json.loads(scores_path.read_text())

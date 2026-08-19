@@ -36,13 +36,13 @@ logger = logging.getLogger(__name__)
 
 RESULTS_DIR = Path(__file__).parent / "results"
 
-# Default graph paths to try.
-# Customer-confidential graphs live in private sub-repos (gitignored); public
-# fallbacks are user-supplied paths under ./data/.
-DEFAULT_GRAPH_PATHS = [
-    "./huginn-nav/scripts/knowledge_graph/melosys_graph.json",
-    "./huginn-nav/scripts/knowledge_graph/jira_graph.json",
-    "./huginn-jarvis/scripts/knowledge_graph/jira_graph.json",
+# Default graph paths to try. Structural graphs in the private sub-repos are
+# discovered by glob (sorted, so the order is stable across machines) rather
+# than by sub-repo name; public fallbacks are user-supplied paths under ./data/.
+DEFAULT_GRAPH_PATHS = sorted(
+    str(p) for p in Path(".").glob("huginn-*/scripts/knowledge_graph/*_graph.json")
+    if not p.name.endswith("_llm_graph.json")
+) + [
     "./data/eessi_graph.json",
     "./data/jira_graph.json",
 ]

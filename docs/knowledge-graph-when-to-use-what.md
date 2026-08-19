@@ -136,7 +136,7 @@ sequenceDiagram
 - **Entity extraction limits**: 5–15 per document; types restricted to `Technology | Person | Concept | Organization | Product`
 - **Relationship types**: `uses | built_by | part_of | related_to | alternative_to | created_by | improves`
 - **Cache write frequency**: after each doc — safe to interrupt; resume picks up where you left off
-- **Auto-routing**: outputs land in collection-appropriate private sub-repos per `huginn/CLAUDE.md` (NAV collections → `huginn-nav/scripts/knowledge_graph/`, others → `huginn-jarvis/scripts/knowledge_graph/`); the API server auto-loads all `*_llm_graph.json` from those paths at startup
+- **Auto-routing**: outputs land in collection-appropriate private sub-repos per `huginn/CLAUDE.md` (each private sub-repo's `graph_routing.json` lists the collections it owns; unlisted ones go to the `default` dir); the API server auto-loads all `*_llm_graph.json` from those paths at startup
 
 > ⚠️ **Cache invalidation on model swap is not automatic.** The cache file stores `{doc_id: entities}` — it doesn't track which model produced the entities. If you swap models and re-run, the script will *skip* every cached document and only call the new model on previously-uncached ones. Result: a hybrid graph mixing two models' output. **Delete the `*_llm_graph.cache.json` files before re-running with a different model.**
 
@@ -147,7 +147,7 @@ Besides the two graphs above, Huginn loads **deterministic structural graphs** b
 | Graph | File | Built by | Contents |
 |---|---|---|---|
 | **Jira structure** | `jira_graph.json` | `scripts/knowledge_graph/extract_jira_graph.py` | issue / epic nodes (+ subtasks); `tilhører_epic` and `refererer_til` edges |
-| **EESSI domain** | `melosys_graph.json` | `huginn-nav/scripts/knowledge_graph/extract_melosys_graph.py` | BUC / SED / Artikkel / Forordning (~71 nodes, 135 edges) |
+| **EESSI domain** | `melosys_graph.json` | `<private-sub-repo>/scripts/knowledge_graph/extract_melosys_graph.py` | BUC / SED / Artikkel / Forordning (~71 nodes, 135 edges) |
 
 ### Where the structure comes from — the fetcher, not a model
 
@@ -176,7 +176,7 @@ So the relationships in the graph are exactly the ones a saksbehandler/utvikler 
 ### Loading & maintenance
 
 - **Loaded via env vars**, not the `*_llm_graph.json` auto-glob: `KNOWLEDGE_GRAPH_PATH` → `melosys_graph.json`, `JIRA_GRAPH_PATH` → `jira_graph.json` (set in the personal `start.sh`). Same startup-only loading as the LLM graphs — **restart the server after regenerating** (see the consumption section below).
-- **Jira graph**: re-extraction is step 4 of `huginn-nav/scripts/daily_jira_update.sh`. It runs **when you run that script** — the script is *meant for* cron, but no scheduler is installed, so the real cadence is whatever you run by hand. Deterministic and idempotent: full rebuild every run, no cache needed, safe to re-run anytime.
+- **Jira graph**: re-extraction is step 4 of the private sub-repo's `scripts/daily_jira_update.sh`. It runs **when you run that script** — the script is *meant for* cron, but no scheduler is installed, so the real cadence is whatever you run by hand. Deterministic and idempotent: full rebuild every run, no cache needed, safe to re-run anytime.
 - **EESSI graph**: run `extract_melosys_graph.py` by hand only when the domain model changes.
 
 > Unlike the LLM extractor, these graphs need **no cache and no model** — re-running is cheap and always reproduces the same output from the same source. The only thing that matters is that *the source is current*: the Jira graph reflects whatever frontmatter the last fetch wrote, so a stale fetch means a stale graph.
