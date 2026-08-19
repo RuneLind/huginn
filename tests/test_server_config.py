@@ -106,13 +106,8 @@ class TestDefault:
         """default() must resolve identically to a bare CLI boot (minus collections)."""
         self._clear(monkeypatch)
         cli = _build(["--collections", "wiki"], monkeypatch)
-        dflt = ServerConfig.default()
-        assert dflt.collections == []
-        assert dflt.data_path == cli.data_path
-        assert dflt.host == cli.host
-        assert dflt.port == cli.port
         # Whole-dataclass compare: guards that default() blanks only collections.
-        assert dflt == replace(cli, collections=[])
+        assert ServerConfig.default() == replace(cli, collections=[])
 
     def test_matches_cli_boot_with_env_fallbacks(self, monkeypatch):
         """Same equality with env vars set — proves the env path flows through too."""
