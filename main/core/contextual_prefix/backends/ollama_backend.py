@@ -8,6 +8,11 @@ from main.utils.ollama_cli import OLLAMA_URL, call_ollama
 logger = logging.getLogger(__name__)
 
 
+# Mirrors _MAX_PREFIX_ATTEMPTS in the sibling chunk_prefixer (kept local so a
+# backend does not depend on the orchestrator that calls it).
+_MAX_BATCH_ATTEMPTS = 2
+
+
 class OllamaBackend:
     """Ollama backend.
 
@@ -47,15 +52,35 @@ class OllamaBackend:
         prefixes: list[str] = []
         for batch_start in range(0, len(chunks), self.chunks_per_call):
             batch = chunks[batch_start: batch_start + self.chunks_per_call]
-            batch_prefixes = self._generate_batch(document_text, batch)
+            batch_prefixes = self._generate_batch_with_retry(document_text, batch, batch_start, len(chunks))
             if len(batch_prefixes) != len(batch):
-                logger.warning(
-                    "Batch %d-%d of %d returned %d prefixes; aborting this doc's prefixing",
-                    batch_start, batch_start + len(batch), len(chunks), len(batch_prefixes),
-                )
                 return []
             prefixes.extend(batch_prefixes)
         return prefixes
+
+    def _generate_batch_with_retry(self, document_text: str, batch: list[str],
+                                   batch_start: int, total_chunks: int) -> list[str]:
+        """One batch, retried once on a non-empty wrong count. [] when it still fails.
+
+        A wrong count is model drift on this batch's prompt, which an identical retry
+        usually recovers; an empty result is `_generate_batch` reporting a transport or
+        parse failure it has already logged, and retrying that only doubles an outage.
+        Same rule as ChunkPrefixer._generate_with_retry, one altitude down.
+        """
+        for attempt in range(1, _MAX_BATCH_ATTEMPTS + 1):
+            batch_prefixes = self._generate_batch(document_text, batch)
+            if len(batch_prefixes) == len(batch):
+                return batch_prefixes
+
+            give_up = not batch_prefixes or attempt == _MAX_BATCH_ATTEMPTS
+            logger.warning(
+                "Batch %d-%d of %d returned %d prefixes (attempt %d)%s",
+                batch_start, batch_start + len(batch), total_chunks, len(batch_prefixes), attempt,
+                "; aborting this doc's prefixing" if give_up else "; retrying this batch once",
+            )
+            if give_up:
+                break
+        return []
 
     def _generate_batch(self, document_text: str, batch_chunks: list[str]) -> list[str]:
         user_content = render_user_prompt(document_text, batch_chunks)

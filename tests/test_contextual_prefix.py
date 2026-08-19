@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import os
 import tempfile
 import time
@@ -521,6 +522,79 @@ def test_ollama_backend_batch_response_error_field_returns_empty(monkeypatch):
 
     monkeypatch.setattr(ollama_cli.urllib.request, "urlopen", fake_urlopen)
     assert backend._generate_batch("doc", ["c0", "c1"]) == []
+
+
+# ---------- Per-batch retry on model drift ----------
+
+def _ollama_user_prompt(req) -> str:
+    return json.loads(req.data)["messages"][1]["content"]
+
+
+def _ollama_batch_size(user_prompt: str) -> int:
+    """How many prefixes the request asked for, read back off the rendered prompt."""
+    return int(re.search(r"array of (\d+) prefixes", user_prompt).group(1))
+
+
+def test_ollama_backend_retries_a_drifting_batch_once(monkeypatch):
+    """A non-empty wrong-count batch is model drift, not an outage: retry that batch
+    once with the same chunks. Aborting the doc instead threw away every prefix on a
+    doc whose drift a single retry recovers."""
+    from main.core.contextual_prefix.backends.ollama_backend import OllamaBackend
+    import main.utils.ollama_cli as ollama_cli
+
+    backend = OllamaBackend(model="test-model", chunks_per_call=10)
+    prompts: list[str] = []
+
+    def fake_urlopen(req, timeout=None):
+        prompts.append(_ollama_user_prompt(req))
+        n = _ollama_batch_size(prompts[-1])
+        count = n - 1 if len(prompts) == 1 else n  # batch 1 drifts on its first attempt only
+        return _ollama_resp({"message": {"content": json.dumps([f"p{i}" for i in range(count)])}})
+
+    monkeypatch.setattr(ollama_cli.urllib.request, "urlopen", fake_urlopen)
+    prefixes = backend.generate("doc text", [f"chunk{i}" for i in range(25)])
+
+    assert len(prefixes) == 25
+    assert [_ollama_batch_size(p) for p in prompts] == [10, 10, 10, 5]  # ceil(25/10) + 1 retry
+    assert prompts[0] == prompts[1]  # the retry resent the same chunks
+
+
+def test_ollama_backend_aborts_doc_when_a_batch_drifts_twice(monkeypatch):
+    """One retry only — a batch that keeps returning the wrong count still aborts the
+    doc, and no later batch is attempted."""
+    from main.core.contextual_prefix.backends.ollama_backend import OllamaBackend
+    import main.utils.ollama_cli as ollama_cli
+
+    backend = OllamaBackend(model="test-model", chunks_per_call=10)
+    sizes: list[int] = []
+
+    def fake_urlopen(req, timeout=None):
+        n = _ollama_batch_size(_ollama_user_prompt(req))
+        sizes.append(n)
+        return _ollama_resp({"message": {"content": json.dumps([f"p{i}" for i in range(n - 1)])}})
+
+    monkeypatch.setattr(ollama_cli.urllib.request, "urlopen", fake_urlopen)
+    assert backend.generate("doc text", [f"chunk{i}" for i in range(25)]) == []
+    assert sizes == [10, 10]  # batch 1 twice, then abort
+
+
+def test_ollama_backend_does_not_retry_an_empty_batch(monkeypatch):
+    """An empty batch result is the backend reporting its own failure (transport or
+    parse), already logged inside _generate_batch — retrying only doubles an outage."""
+    import urllib.error
+    from main.core.contextual_prefix.backends.ollama_backend import OllamaBackend
+    import main.utils.ollama_cli as ollama_cli
+
+    backend = OllamaBackend(model="test-model", chunks_per_call=10)
+    sizes: list[int] = []
+
+    def boom(req, timeout=None):
+        sizes.append(_ollama_batch_size(_ollama_user_prompt(req)))
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(ollama_cli.urllib.request, "urlopen", boom)
+    assert backend.generate("doc text", [f"chunk{i}" for i in range(25)]) == []
+    assert sizes == [10]  # one attempt, no retry
 
 
 def test_parallel_prefixing_handles_concurrent_calls_safely():

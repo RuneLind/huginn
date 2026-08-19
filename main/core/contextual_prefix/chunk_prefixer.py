@@ -97,10 +97,12 @@ class ChunkPrefixer:
         an outage. Exceptions are likewise not retried — the backends already retry transport
         errors themselves.
 
-        The retry assumes the mismatch is stochastic. A deterministic one — e.g. a doc past the
-        SDK backend's `max_tokens // 80` chunk ceiling — retries and fails on every reindex;
-        accepted, there is no negative cache.
+        The retry assumes the mismatch is stochastic. A deterministic one — a prompt that
+        reliably makes the model drop or duplicate an element in otherwise valid JSON — fails
+        on every reindex; accepted, there is no negative cache. (Truncation past the SDK
+        backend's `max_tokens // 80` ceiling is an *empty*-result case: it breaks the JSON.)
         """
+        retried = False
         for attempt in range(1, _MAX_PREFIX_ATTEMPTS + 1):
             retried = attempt > 1
             try:
