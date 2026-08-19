@@ -35,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 # Repo root on path so `main.*` imports resolve regardless of cwd / invocation
 # (scripts/tagging/<file>.py → parents[2] is the huginn repo root).
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from claude_cli import FRONTMATTER_RE, extract_json_array, get_content_excerpt
+from tagging_text import FRONTMATTER_RE, extract_json_array, get_content_excerpt
 from main.utils.claude_cli import call_claude
 from main.utils.frontmatter import read_frontmatter
 from main.utils.ollama_cli import DEFAULT_MODEL as DEFAULT_OLLAMA_MODEL

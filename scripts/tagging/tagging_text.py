@@ -1,5 +1,7 @@
-"""Markdown / JSON helpers used by the tagging scripts. The Claude CLI wrapper
-itself lives in ``main.utils.claude_cli`` — import it from there directly."""
+"""Markdown / JSON text helpers used by the tagging scripts. Named for what it
+holds: the Claude CLI wrapper lives in ``main.utils.claude_cli``, and this module
+used to share that basename — an import-shadowing trap for the tagging scripts,
+which put this directory on ``sys.path``."""
 import json
 import re
 
