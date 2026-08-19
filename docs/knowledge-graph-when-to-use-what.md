@@ -28,7 +28,7 @@ flowchart TB
         OLLAMA[Local Ollama LLM]
         JSON1["youtube-summaries_llm_graph.json"]
         JSON2["jira-issues_llm_graph.json"]
-        JSON3["capra-notion_llm_graph.json"]
+        JSON3["notion-workspace_llm_graph.json"]
         SCRIPT -->|prompts| OLLAMA
         OLLAMA -->|entities + rels| SCRIPT
         SCRIPT --> JSON1
@@ -39,7 +39,7 @@ flowchart TB
     WIKICOLL[(wiki collection)] --> G1
     YT[(youtube-summaries)] --> G2
     JIRA[(jira-issues)] --> G2
-    CAPRA[(capra-notion)] --> G2
+    NOTION[(notion-workspace)] --> G2
     CONF[(melosys-confluence)] --> G2
 
     G1 -.queried at search time.-> SEARCH[Huginn search]
@@ -71,7 +71,7 @@ flowchart LR
     HAND --> WK[wiki collection]
     HAND --> NW[nav-wiki collection]
 
-    LLM --> J1[capra-notion]
+    LLM --> J1[notion-workspace]
     LLM --> J2[melosys-confluence]
     LLM --> J3[jira-issues]
     LLM --> J4[youtube-summaries]
@@ -89,7 +89,7 @@ flowchart LR
 | Collection | Run extractor? | Why |
 |---|---|---|
 | `wiki`, `nav-wiki` (any LLM-Wiki-Pattern collection) | **No** | Already a hand-curated knowledge graph. Running the LLM extractor would add **redundant entities** and risk **naming drift** — e.g. `Boris` vs `Boris Cherny` vs `Boris (Anthropic)`. The wikilinks express the canonical relationships; the entity pages canonicalize the names. |
-| `capra-notion`, `melosys-confluence-v3` | **Yes** | Raw Notion / Confluence pages with no wikilinks. LLM graph is the only structured enrichment. |
+| `notion-workspace` (placeholder), `melosys-confluence-v3` | **Yes** | Raw Notion / Confluence pages with no wikilinks. LLM graph is the only structured enrichment. |
 | `jira-issues` | **Yes** | Raw Jira issue export. There's also a separate purpose-built `extract_jira_graph.py` for Jira-specific epic/cross-reference structure — the two graphs compose. |
 | `youtube-summaries`, `claude-sessions`, `x-feed` | **Yes** | Raw transcripts / posts. Same logic. |
 
@@ -271,7 +271,9 @@ rm path/to/knowledge_graph/*.cache.json
 
 # Re-extract every collection that has a graph
 cd /path/to/huginn
-uv run scripts/knowledge_graph/extract_entities_llm.py --collection capra-notion
+# notion-workspace is a placeholder -- substitute your own collection name.
+# Private collection names are not committed to this repo; see CLAUDE.md.
+uv run scripts/knowledge_graph/extract_entities_llm.py --collection notion-workspace
 uv run scripts/knowledge_graph/extract_entities_llm.py --collection jira-issues
 uv run scripts/knowledge_graph/extract_entities_llm.py --collection youtube-summaries
 # ... repeat for each raw-chunk collection that has an existing graph

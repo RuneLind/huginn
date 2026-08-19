@@ -412,8 +412,8 @@ def _collections_sharing_source(store: KnowledgeStore, source_path: str,
     """Every served localFiles collection whose basePath contains ``source_path``.
 
     Several collections deliberately share one basePath (``wiki`` + ``wiki-life``
-    over the jarvis wiki; the ``nav-wiki*`` family; ``capra-notion`` +
-    ``capra-notion-v9``). Reindexing only the named one would leave the siblings
+    over the jarvis wiki; the ``nav-wiki*`` family; ``jira-issues`` + its
+    baseline). Reindexing only the named one would leave the siblings
     serving the deleted document from a dangling index entry, so all of them get
     the same reconciliation. The named collection comes first.
     """

@@ -47,11 +47,20 @@ Collections live in `data/collections/`. Source documents live in `data/sources/
 
 ### Common collections
 
+> **Private collection names stay out of this public repo.** The table below lists
+> only collections whose names carry nothing private. A collection tied to an
+> employer, customer, or person is configured through the gitignored
+> `huginn-*/scripts/` routing files (`graph_routing.json`,
+> `schedule_routing.json` — the latter's `labelCollections` key also feeds
+> `scripts/backfill_indexing_runs.py`), never named here, in `docs/`, in
+> docstrings, or in test comments. Use a neutral placeholder such as
+> `notion-workspace` when an example needs a name.
+
+
 | Collection | Source path | Exclude patterns |
 |---|---|---|
 | `melosys-confluence-v3` | `./data/sources/melosys-confluence` | `^\.excluded/.*` `^fetch_metadata\.json$` (+ a path-specific exclude — see manifest) |
 | `jira-issues` | `./data/sources/jira-issues` | `^\.excluded/.*` |
-| `capra-notion-v9` | `./data/sources/capra-notion` | — |
 | `nav-wiki` | `./huginn-nav/wiki` | `index\.md` `log\.md` `CLAUDE\.md` `^\.obsidian/.*` `^\.claude/.*` |
 | `wiki` | `./huginn-jarvis/data/wiki` | `^index\.md$` `^log\.md$` `^CLAUDE\.md$` `^plans/.*` `^Clippings/.*` `^\..*` (dot-dirs: `.obsidian/`, `.smart-env/`, `.understand-anything/`) `^life/.*` `^trails\.json$` |
 | `wiki-life` | `./huginn-jarvis/data/wiki` | same, minus `^life/.*` — plus `includePatterns: ["^life/.*"]` |
@@ -100,9 +109,8 @@ curl -X DELETE "http://127.0.0.1:8321/api/document/x-articles/some-doc.md"
   most of what lives there (`CLAUDE.md`, `index.md`, dot-dirs) and skips `.git/` outright;
   without this check the endpoint would move those out of a real repository.
 - **All collections sharing the `basePath` are reindexed**, not just the named one —
-  `wiki` + `wiki-life`, the `nav-wiki*` family, `capra-notion` + `capra-notion-v9`,
-  `jira-issues` + baseline. Otherwise the siblings keep serving the deleted doc from a
-  dangling index entry. `reindex` is therefore a **map** `{collection: status}` (named
+  `wiki` + `wiki-life`, the `nav-wiki*` family, `jira-issues` + baseline.
+  Otherwise the siblings keep serving the deleted doc from a dangling index entry. `reindex` is therefore a **map** `{collection: status}` (named
   one first), and `pollUrls` a map for the `started` ones.
 - **Not synchronous.** The move is immediate; the doc leaves search and the document
   listing only after the background update finishes — poll the collection's entry in
@@ -184,7 +192,12 @@ job last ran, how long it took, and whether it failed. Backed by JSONL files at
   customer-adjacent, which `CLAUDE.local.md` bans outright. The names live in
   each private sub-repo's `scripts/schedule_routing.json`, discovered under
   `huginn-*/scripts/`, mirroring the `graph_routing.json` precedent. No routing
-  file ⇒ `schedule: null`, the designed degradation. A plist whose
+  file ⇒ `schedule: null`, the designed degradation. The same file's optional
+  `labelCollections` key (marker label → collections) is read by
+  `scripts/backfill_indexing_runs.py` for the same reason: labels whose
+  collection this repo names publicly are compiled in, the rest route
+  privately. An empty or blank entry there is ignored rather than allowed
+  to clobber a public default. A plist whose
   `StartCalendarInterval` is 24 entries at one minute reports
   `{kind: "hourly"}` rather than the first entry's wall-clock time.
 - Writers: `KnowledgeStore.__finish_update` (the API path) and

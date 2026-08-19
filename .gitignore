@@ -28,10 +28,10 @@ uv.lock
 # Benchmark results (timestamped JSON, machine-specific)
 benchmarks/results/
 
-# Private domain repos (each has its own .git)
-huginn-nav/
-huginn-capra/
-huginn-jarvis/
+# Private domain repos (each has its own .git). Globbed rather than listed:
+# the consuming code discovers them the same way, and the individual names
+# are private -- see the collection-name rule in CLAUDE.md.
+huginn-*/
 
 # Knowledge graphs may contain customer-confidential data; they belong in the
 # private sub-repos above, not in the public scripts/ folder. These patterns

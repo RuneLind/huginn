@@ -16,8 +16,11 @@ Design notes worth keeping:
   family-scoped (``-name 'daily_wiki_*.log'`` and friends) and none of them
   matches that filename shape. Keying on marker text picks them up as the Notion
   runs they are, with no filename special-case.
-* Three families (Jira, Confluence, Notion) carry no collection name in the
-  marker and have no installed plist, so they need the explicit map below.
+* Some families carry no collection name in the marker and have no installed
+  plist, so they need an explicit label -> collections map. Those whose
+  collection the public CLAUDE.md table already names sit in LABEL_COLLECTIONS
+  below; the rest come from the gitignored sub-repos via load_label_collections,
+  so no private collection name lives in this file.
 * The wiki marker covers two collections and is split into two records.
 * Unterminated runs are real (one family has 22 starts vs 21 finishes). They are
   recorded with status "unknown", no finishedAt and no duration, rather than
@@ -51,18 +54,64 @@ START_RE = re.compile(r"===\s*(?P<label>.+?)\s+update started(?:\s*\((?P<args>[^
 FINISH_RE = re.compile(r"===\s*(?P<label>.+?)\s+update finished")
 FAILED_RE = re.compile(r"===\s*FAILED:")
 
+_HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROUTING_GLOBS = (
+    os.path.join(_HERE, "huginn-*", "scripts", "schedule_routing.json"),
+    os.path.join(_HERE, "scripts", "schedule_routing.json"),
+)
+
 # Marker labels that name no collection and have no installed plist to consult.
-# These three collection names are deliberately spelled out: all three appear in
-# this repo's public CLAUDE.md "Common collections" table, so they carry no
-# private information (unlike the scheduled names the schedule module keeps out
-# of the public repo).
+# Only those whose collection this public repo's CLAUDE.md "Common collections"
+# table already names live here, so spelling them out leaks nothing. Every other
+# label routes through the private sub-repos, exactly like the schedule module's
+# SCRIPT_COLLECTIONS -- see load_label_collections below.
 LABEL_COLLECTIONS = {
     "Daily Jira": ["jira-issues"],
     "Daily Confluence": ["melosys-confluence-v3"],
-    # start.sh currently serves "capra-notion", but the fetch script writes
-    # "capra-notion-v9" — a backfill record describes what the script did.
-    "Daily Notion": ["capra-notion-v9"],
 }
+
+
+def load_label_collections(globs=None):
+    """Marker label -> collections, merged over the private routing files.
+
+    Mirrors ``indexing_schedule.load_script_collections`` and reads the same
+    ``schedule_routing.json`` files, taking their ``labelCollections`` key. A
+    label named there wins over the public defaults above, so a deployment can
+    both add its own private labels and repoint a public one. A missing or
+    malformed routing file costs that file's labels, never the backfill.
+    """
+    mapping = dict(LABEL_COLLECTIONS)
+    patterns = globs if globs is not None else ROUTING_GLOBS
+    for pattern in patterns:
+        try:
+            paths = sorted(glob.glob(pattern))
+        except OSError:
+            continue
+        for path in paths:
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    data = json.load(handle)
+            except (OSError, ValueError) as exc:
+                # This is an interactive CLI, not a library: say so out loud.
+                # A silently skipped routing file means a whole label family is
+                # absent from the backfill while the run still exits 0.
+                print(f"warning: ignoring routing file {path}: {exc}",
+                      file=sys.stderr)
+                continue
+            labels = data.get("labelCollections")
+            if not isinstance(labels, dict):
+                continue
+            for label, collections in labels.items():
+                # An EMPTY list is rejected, matching load_script_collections:
+                # an accidentally-blanked entry would otherwise clobber a public
+                # default and drop that family's whole history with no error.
+                # Non-str members are skipped rather than str()-coerced -- the
+                # coerced form becomes a real ledger filename downstream.
+                if isinstance(collections, list):
+                    names = [c for c in collections if isinstance(c, str) and c.strip()]
+                    if names:
+                        mapping[str(label)] = names
+    return mapping
 
 
 def _collections_for(label, args):
@@ -77,7 +126,7 @@ def _collections_for(label, args):
             if key in args:
                 value = args.split(key, 1)[1].strip()
                 return [c for c in value.split() if c]
-    return LABEL_COLLECTIONS.get(label.strip(), [])
+    return load_label_collections().get(label.strip(), [])
 
 
 def _parse_time(line):
