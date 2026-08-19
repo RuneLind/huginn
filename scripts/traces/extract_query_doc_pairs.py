@@ -10,16 +10,16 @@ A "session" is one JSONL file (one Claude Code conversation). Within
 a session, each search query is paired with documents fetched after
 that query (until the next search or end of session).
 
-Usage (--output is required; the benchmark data belongs in the private
-sub-repo that owns the domain, not in this public tree):
+Usage (--output is required unless --dry-run; the benchmark data belongs in
+the private sub-repo that owns the domain, not in this public tree, and the
+benchmark runner globs huginn-*/scripts/benchmarks). Quote the path so the
+shell neither globs nor errors on it:
     uv run scripts/traces/extract_query_doc_pairs.py \\
-        --output ./huginn-<domain>/scripts/benchmarks/query-doc-pairs.jsonl
+        --output './huginn-*/scripts/benchmarks/query-doc-pairs.jsonl'
     uv run scripts/traces/extract_query_doc_pairs.py \\
-        --output ./huginn-<domain>/scripts/benchmarks/query-doc-pairs.jsonl \\
+        --output './huginn-*/scripts/benchmarks/query-doc-pairs.jsonl' \\
         --projects melosys-api-claude melosys-eessi
-    uv run scripts/traces/extract_query_doc_pairs.py \\
-        --output ./huginn-<domain>/scripts/benchmarks/query-doc-pairs.jsonl \\
-        --since 2026-03-01
+    uv run scripts/traces/extract_query_doc_pairs.py --dry-run --since 2026-03-01
 """
 
 import argparse
@@ -213,22 +213,39 @@ def find_sessions(projects: list[str] | None, since: str | None) -> list[tuple[s
     return sessions
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Extract query-doc pairs from Claude sessions")
+def build_parser() -> argparse.ArgumentParser:
+    # RawText so the example path below breaks where we put the newline; the
+    # default formatter re-wraps it mid-token at any terminal narrower than it.
+    parser = argparse.ArgumentParser(
+        description="Extract query-doc pairs from Claude sessions",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
     parser.add_argument("--projects", nargs="*",
                         help="Project name substrings to include (default: all)")
     parser.add_argument("--since",
-                        help="Only include sessions modified after this date (ISO format)")
-    parser.add_argument("--output", required=True,
-                        help="Output JSONL path, e.g. "
-                             "./huginn-<domain>/scripts/benchmarks/query-doc-pairs.jsonl")
+                        help="Only include sessions modified after this date\n(ISO format)")
+    parser.add_argument("--output", metavar="PATH",
+                        help="Output JSONL path; required unless --dry-run.\n"
+                             "Example (quoted so the shell does not glob it):\n"
+                             "  './huginn-*/scripts/benchmarks/query-doc-pairs.jsonl'\n"
+                             "(the benchmark runner globs huginn-*/scripts/benchmarks)")
     parser.add_argument("--append", action="store_true",
-                        help="Append to existing file instead of overwriting")
+                        help="Append to existing file instead of overwriting\n(requires --output)")
     parser.add_argument("--min-fetched", type=int, default=0,
                         help="Only include pairs with at least this many fetched docs")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show stats without writing output")
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    # --output is only read to write (after the --dry-run return) and to pre-load
+    # existing trace IDs under --append, so a plain --dry-run needs no path.
+    if args.output is None and (args.append or not args.dry_run):
+        parser.error("--output is required unless --dry-run (and always with --append)")
 
     sessions = find_sessions(args.projects, args.since)
     print(f"Found {len(sessions)} session files to scan")
@@ -238,7 +255,7 @@ def main():
     existing_trace_ids = set()
 
     # Load existing trace IDs if appending
-    output_path = Path(args.output)
+    output_path = Path(args.output) if args.output else None
     if args.append and output_path.exists():
         for line in output_path.read_text().splitlines():
             if line.strip():

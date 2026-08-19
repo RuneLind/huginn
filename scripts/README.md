@@ -15,7 +15,7 @@ scripts/
 │   ├── sanitizers/        # PII detection and redaction
 │   └── auth/             # Authentication files
 ├── traces/
-│   └── extract_query_doc_pairs.py  # Extract search traces from Claude sessions
+│   └── extract_query_doc_pairs.py  # Extract search traces from Claude sessions (`--output` required except `--dry-run`)
 └── daily_notion_update.sh # Daily automated Notion index update
 ```
 
