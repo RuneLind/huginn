@@ -1,5 +1,9 @@
 """Tests for ServerConfig resolution: flags, env fallbacks, and precedence."""
 import argparse
+import sys
+from dataclasses import replace
+
+import pytest
 
 from main.ingest.registry import INGEST_SOURCES
 from main.runtime.server_config import DEFAULT_PORT, ServerConfig
@@ -102,12 +106,46 @@ class TestDefault:
         """default() must resolve identically to a bare CLI boot (minus collections)."""
         self._clear(monkeypatch)
         cli = _build(["--collections", "wiki"], monkeypatch)
-        dflt = ServerConfig.default()
-        assert dflt.collections == []
-        assert dflt.data_path == cli.data_path
-        assert dflt.host == cli.host
-        assert dflt.port == cli.port
-        assert dflt.ingest_sources == cli.ingest_sources
+        # Whole-dataclass compare: guards that default() blanks only collections.
+        assert ServerConfig.default() == replace(cli, collections=[])
+
+    def test_matches_cli_boot_with_env_fallbacks(self, monkeypatch):
+        """Same equality with env vars set — proves the env path flows through too."""
+        cli = _build(
+            ["--collections", "wiki"],
+            monkeypatch,
+            env={
+                "HUGINN_DATA_PATH": "/env/data",
+                "TIKTOK_SOURCES_PATH": "/env/tiktok",
+                "YOUTUBE_COLLECTION": "env-yt-coll",
+            },
+        )
+        assert cli.data_path == "/env/data"  # guard: the env really was in play
+        assert cli.ingest("tiktok").path == "/env/tiktok"
+        assert cli.ingest("youtube").collection == "env-yt-coll"
+        assert ServerConfig.default() == replace(cli, collections=[])
+
+    def test_default_survives_a_new_required_flag(self, monkeypatch):
+        """A flag required for CLI boot must not make default() SystemExit at import.
+
+        knowledge_api_server calls default() at module import, so any argv
+        rejection there is an ImportError for every consumer.
+        """
+        self._clear(monkeypatch)
+        cfg = _RequiredTenantConfig.default()
+        assert cfg.collections == []
+        assert cfg.data_path == "./data/collections"
+        # Guard: --tenant really is required on the CLI surface being relaxed.
+        cli_parser = argparse.ArgumentParser(add_help=False)
+        _RequiredTenantConfig.add_arguments(cli_parser)
+        with pytest.raises(SystemExit):
+            cli_parser.parse_args([])
+
+    def test_ignores_process_argv(self, monkeypatch):
+        """default() parses its own empty argv, so a junk sys.argv cannot reach it."""
+        self._clear(monkeypatch)
+        monkeypatch.setattr(sys, "argv", ["prog", "--bogus", "x"])
+        assert ServerConfig.default().collections == []
 
     def test_env_fallbacks_apply(self, monkeypatch):
         self._clear(monkeypatch)
@@ -118,3 +156,12 @@ class TestDefault:
         assert cfg.data_path == "/env/data"
         assert cfg.ingest("tiktok").path == "/env/tiktok"
         assert cfg.ingest("tiktok").collection == "env-tiktok-coll"
+
+
+class _RequiredTenantConfig(ServerConfig):
+    """Stand-in for a future flag that is mandatory on the CLI but not for default()."""
+
+    @staticmethod
+    def add_arguments(parser, *, collections_required: bool = True) -> None:
+        ServerConfig.add_arguments(parser, collections_required=collections_required)
+        parser.add_argument("--tenant", required=collections_required, default="acme")

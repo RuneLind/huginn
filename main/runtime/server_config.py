@@ -55,10 +55,14 @@ class ServerConfig:
         return self.ingest_sources[name]
 
     @staticmethod
-    def add_arguments(parser: argparse.ArgumentParser) -> None:
-        """Register every server CLI flag on ``parser`` (exact names/defaults preserved)."""
+    def add_arguments(parser: argparse.ArgumentParser, *, collections_required: bool = True) -> None:
+        """Register every server CLI flag on ``parser`` (exact names/defaults preserved).
+
+        ``collections_required=False`` relaxes the one flag a CLI boot must have,
+        so ``default()`` can reuse these registrations verbatim.
+        """
         parser.add_argument(
-            "--collections", nargs="+", required=True,
+            "--collections", nargs="+", required=collections_required, default=[],
             help="Collections to load (e.g., my-notion)",
         )
         parser.add_argument(
@@ -103,12 +107,13 @@ class ServerConfig:
     def default(cls) -> "ServerConfig":
         """Env-only config used before ``main()`` runs (module import / TestClient).
 
-        Derived from the very same ``add_arguments`` registrations a CLI boot
-        uses — no duplicated default/env-fallback literals to drift — with
-        ``collections=[]`` standing in for the required ``--collections`` flag.
+        Parses an empty argv through the very same ``add_arguments`` registrations
+        a CLI boot uses, with ``--collections`` made optional — no duplicated
+        default/env-fallback literals to drift, and no value fed to a flag just to
+        get past validation. Note that going through ``parse_args`` applies each
+        flag's ``type=`` to string defaults; byte-identical today, since ``--port``
+        is the only typed flag and its default is already an ``int``.
         """
         parser = argparse.ArgumentParser(add_help=False)
-        cls.add_arguments(parser)
-        defaults = {action.dest: action.default for action in parser._actions}
-        defaults["collections"] = []
-        return cls.from_args(argparse.Namespace(**defaults))
+        cls.add_arguments(parser, collections_required=False)
+        return cls.from_args(parser.parse_args([]))
