@@ -1,5 +1,6 @@
 """Tests for ServerConfig resolution: flags, env fallbacks, and precedence."""
 import argparse
+from dataclasses import replace
 
 from main.ingest.registry import INGEST_SOURCES
 from main.runtime.server_config import DEFAULT_PORT, ServerConfig
@@ -108,6 +109,24 @@ class TestDefault:
         assert dflt.host == cli.host
         assert dflt.port == cli.port
         assert dflt.ingest_sources == cli.ingest_sources
+        # Whole-dataclass compare, so a field added later is covered here for free.
+        assert dflt == replace(cli, collections=[])
+
+    def test_matches_cli_boot_with_env_fallbacks(self, monkeypatch):
+        """Same equality with env vars set — proves the env path flows through too."""
+        cli = _build(
+            ["--collections", "wiki"],
+            monkeypatch,
+            env={
+                "HUGINN_DATA_PATH": "/env/data",
+                "TIKTOK_SOURCES_PATH": "/env/tiktok",
+                "YOUTUBE_COLLECTION": "env-yt-coll",
+            },
+        )
+        assert cli.data_path == "/env/data"  # guard: the env really was in play
+        assert cli.ingest("tiktok").path == "/env/tiktok"
+        assert cli.ingest("youtube").collection == "env-yt-coll"
+        assert ServerConfig.default() == replace(cli, collections=[])
 
     def test_env_fallbacks_apply(self, monkeypatch):
         self._clear(monkeypatch)

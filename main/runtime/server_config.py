@@ -103,12 +103,13 @@ class ServerConfig:
     def default(cls) -> "ServerConfig":
         """Env-only config used before ``main()`` runs (module import / TestClient).
 
-        Derived from the very same ``add_arguments`` registrations a CLI boot
-        uses — no duplicated default/env-fallback literals to drift — with
-        ``collections=[]`` standing in for the required ``--collections`` flag.
+        Derived by parsing an otherwise-empty argv through the very same
+        ``add_arguments`` registrations a CLI boot uses — no duplicated
+        default/env-fallback literals to drift. ``--collections`` is required, so
+        it is fed a placeholder to let ``parse_args`` return and then blanked.
         """
         parser = argparse.ArgumentParser(add_help=False)
         cls.add_arguments(parser)
-        defaults = {action.dest: action.default for action in parser._actions}
-        defaults["collections"] = []
-        return cls.from_args(argparse.Namespace(**defaults))
+        args = parser.parse_args(["--collections", "__unset__"])
+        args.collections = []
+        return cls.from_args(args)
