@@ -118,8 +118,8 @@ class ChunkPrefixer:
                            len(prefixes), len(chunks_to_generate), doc_id, attempt,
                            "; skipping doc" if give_up else "; retrying once")
             if give_up:
-                return [], retried
-        return [], _MAX_PREFIX_ATTEMPTS > 1
+                break
+        return [], retried
 
     def prefix_documents(self, converted_documents: Iterable[dict]) -> None:
         for converted_document in converted_documents:
