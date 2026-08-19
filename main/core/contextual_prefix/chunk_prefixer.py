@@ -58,17 +58,7 @@ class ChunkPrefixer:
 
         new_prefixes: list[str] = []
         if chunk_texts_to_generate:
-            try:
-                new_prefixes = self.generator.generate(doc_text, chunk_texts_to_generate)
-            except Exception:
-                logger.exception("Prefix generation failed for doc %s; skipping prefixes for %d chunks",
-                                 doc_id, len(chunk_texts_to_generate))
-                new_prefixes = []
-
-            if len(new_prefixes) != len(chunk_texts_to_generate):
-                logger.warning("Generator returned %d prefixes for %d chunks (doc %s); skipping",
-                               len(new_prefixes), len(chunk_texts_to_generate), doc_id)
-                new_prefixes = []
+            new_prefixes = self._generate_with_retry(doc_text, chunk_texts_to_generate, doc_id)
 
         for j, idx in enumerate(indices_to_generate):
             if j >= len(new_prefixes):
@@ -91,6 +81,32 @@ class ChunkPrefixer:
             "prefix doc=%s chunks=%d cached=%d generated=%d requested=%d duration=%.1fs",
             doc_id, len(chunks), cache_hits, generated, requested, duration,
         )
+
+    def _generate_with_retry(self, doc_text: str, chunks_to_generate: list[str], doc_id: str) -> list[str]:
+        """Generate prefixes, retrying once if the backend returns the wrong count.
+
+        Backends stochastically drop or invent an item (Ollama also returns [] on its own
+        per-batch mismatch); an A/B run lost every prefix on 1 of 7 docs that way. One retry
+        with the identical prompt recovers those. Exceptions are NOT retried — the backends
+        already retry transport errors themselves.
+        """
+        for attempt in (1, 2):
+            try:
+                prefixes = self.generator.generate(doc_text, chunks_to_generate)
+            except Exception:
+                logger.exception("Prefix generation failed for doc %s; skipping prefixes for %d chunks",
+                                 doc_id, len(chunks_to_generate))
+                return []
+
+            if len(prefixes) == len(chunks_to_generate):
+                if attempt == 2:
+                    logger.info("Prefix retry succeeded for doc %s after first attempt mismatched", doc_id)
+                return prefixes
+
+            logger.warning("Generator returned %d prefixes for %d chunks (doc %s, attempt %d)%s",
+                           len(prefixes), len(chunks_to_generate), doc_id, attempt,
+                           "; retrying once" if attempt == 1 else "; skipping doc")
+        return []
 
     def prefix_documents(self, converted_documents: Iterable[dict]) -> None:
         for converted_document in converted_documents:

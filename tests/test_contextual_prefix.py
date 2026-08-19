@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import tempfile
 import time
@@ -241,6 +242,84 @@ def test_prefixer_count_mismatch_is_treated_as_failure():
 
     for chunk in doc["chunks"]:
         assert "contextualPrefix" not in chunk
+
+
+class _ScriptedBackend:
+    """Returns the next scripted result per generate() call, recording the call count."""
+    model_id = "echo:scripted"
+
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = 0
+
+    def generate(self, document_text, chunks):
+        self.calls += 1
+        result = self.results[self.calls - 1]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+def _three_chunk_doc():
+    base = "x" * (MIN_CHUNK_CHARS_FOR_PREFIX + 10)
+    return _converted_doc([base + "A", base + "B", base + "C"])
+
+
+def test_prefixer_retries_once_on_count_mismatch_and_succeeds(caplog):
+    backend = _ScriptedBackend([["p0", "p1"], ["ok0", "ok1", "ok2"]])
+    doc = _three_chunk_doc()
+
+    with tempfile.TemporaryDirectory() as td:
+        cache = ContextualCache(os.path.join(td, "cache.json"))
+        with caplog.at_level(logging.INFO, logger="main.core.contextual_prefix.chunk_prefixer"):
+            ChunkPrefixer(backend, cache).prefix_document(doc)
+
+    assert backend.calls == 2
+    assert [c["contextualPrefix"] for c in doc["chunks"]] == ["ok0", "ok1", "ok2"]
+    assert any(r.levelno == logging.INFO and "retry succeeded" in r.getMessage() for r in caplog.records)
+
+
+def test_prefixer_retries_once_on_count_mismatch_and_gives_up(caplog):
+    backend = _ScriptedBackend([["p0", "p1"], ["q0", "q1"]])
+    doc = _three_chunk_doc()
+
+    with tempfile.TemporaryDirectory() as td:
+        cache = ContextualCache(os.path.join(td, "cache.json"))
+        with caplog.at_level(logging.INFO, logger="main.core.contextual_prefix.chunk_prefixer"):
+            ChunkPrefixer(backend, cache).prefix_document(doc)
+
+    assert backend.calls == 2
+    for chunk in doc["chunks"]:
+        assert "contextualPrefix" not in chunk
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 2
+    assert "retrying once" in warnings[0].getMessage()
+    assert "skipping doc" in warnings[1].getMessage()
+
+
+def test_prefixer_does_not_retry_on_backend_exception():
+    backend = _ScriptedBackend([RuntimeError("LLM exploded"), ["a", "b", "c"]])
+    doc = _three_chunk_doc()
+
+    with tempfile.TemporaryDirectory() as td:
+        cache = ContextualCache(os.path.join(td, "cache.json"))
+        ChunkPrefixer(backend, cache).prefix_document(doc)
+
+    assert backend.calls == 1
+    for chunk in doc["chunks"]:
+        assert "contextualPrefix" not in chunk
+
+
+def test_prefixer_retries_on_too_many_prefixes():
+    backend = _ScriptedBackend([["p0", "p1", "p2", "p3"], ["ok0", "ok1", "ok2"]])
+    doc = _three_chunk_doc()
+
+    with tempfile.TemporaryDirectory() as td:
+        cache = ContextualCache(os.path.join(td, "cache.json"))
+        ChunkPrefixer(backend, cache).prefix_document(doc)
+
+    assert backend.calls == 2
+    assert [c["contextualPrefix"] for c in doc["chunks"]] == ["ok0", "ok1", "ok2"]
 
 
 # ---------- OllamaBackend._parse_prefix_array ----------
