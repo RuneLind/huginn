@@ -16,8 +16,11 @@ Design notes worth keeping:
   family-scoped (``-name 'daily_wiki_*.log'`` and friends) and none of them
   matches that filename shape. Keying on marker text picks them up as the Notion
   runs they are, with no filename special-case.
-* Three families (Jira, Confluence, Notion) carry no collection name in the
-  marker and have no installed plist, so they need the explicit map below.
+* Some families carry no collection name in the marker and have no installed
+  plist, so they need an explicit label -> collections map. Those whose
+  collection the public CLAUDE.md table already names sit in LABEL_COLLECTIONS
+  below; the rest come from the gitignored sub-repos via load_label_collections,
+  so no private collection name lives in this file.
 * The wiki marker covers two collections and is split into two records.
 * Unterminated runs are real (one family has 22 starts vs 21 finishes). They are
   recorded with status "unknown", no finishedAt and no duration, rather than
@@ -51,17 +54,17 @@ START_RE = re.compile(r"===\s*(?P<label>.+?)\s+update started(?:\s*\((?P<args>[^
 FINISH_RE = re.compile(r"===\s*(?P<label>.+?)\s+update finished")
 FAILED_RE = re.compile(r"===\s*FAILED:")
 
-# Marker labels that name no collection and have no installed plist to consult.
-# Marker labels whose collection is named in this public repo's CLAUDE.md
-# "Common collections" table, so spelling them out here leaks nothing. Every
-# other label routes through the private sub-repos, exactly like the schedule
-# module's SCRIPT_COLLECTIONS -- see load_label_collections below.
 _HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROUTING_GLOBS = (
     os.path.join(_HERE, "huginn-*", "scripts", "schedule_routing.json"),
     os.path.join(_HERE, "scripts", "schedule_routing.json"),
 )
 
+# Marker labels that name no collection and have no installed plist to consult.
+# Only those whose collection this public repo's CLAUDE.md "Common collections"
+# table already names live here, so spelling them out leaks nothing. Every other
+# label routes through the private sub-repos, exactly like the schedule module's
+# SCRIPT_COLLECTIONS -- see load_label_collections below.
 LABEL_COLLECTIONS = {
     "Daily Jira": ["jira-issues"],
     "Daily Confluence": ["melosys-confluence-v3"],
@@ -80,17 +83,34 @@ def load_label_collections(globs=None):
     mapping = dict(LABEL_COLLECTIONS)
     patterns = globs if globs is not None else ROUTING_GLOBS
     for pattern in patterns:
-        for path in sorted(glob.glob(pattern)):
+        try:
+            paths = sorted(glob.glob(pattern))
+        except OSError:
+            continue
+        for path in paths:
             try:
                 with open(path, encoding="utf-8") as handle:
                     data = json.load(handle)
-            except (OSError, ValueError):
+            except (OSError, ValueError) as exc:
+                # This is an interactive CLI, not a library: say so out loud.
+                # A silently skipped routing file means a whole label family is
+                # absent from the backfill while the run still exits 0.
+                print(f"warning: ignoring routing file {path}: {exc}",
+                      file=sys.stderr)
                 continue
             labels = data.get("labelCollections")
-            if isinstance(labels, dict):
-                for label, collections in labels.items():
-                    if isinstance(collections, list):
-                        mapping[str(label)] = [str(c) for c in collections]
+            if not isinstance(labels, dict):
+                continue
+            for label, collections in labels.items():
+                # An EMPTY list is rejected, matching load_script_collections:
+                # an accidentally-blanked entry would otherwise clobber a public
+                # default and drop that family's whole history with no error.
+                # Non-str members are skipped rather than str()-coerced -- the
+                # coerced form becomes a real ledger filename downstream.
+                if isinstance(collections, list):
+                    names = [c for c in collections if isinstance(c, str) and c.strip()]
+                    if names:
+                        mapping[str(label)] = names
     return mapping
 
 
