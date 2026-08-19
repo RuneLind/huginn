@@ -10,14 +10,12 @@ A "session" is one JSONL file (one Claude Code conversation). Within
 a session, each search query is paired with documents fetched after
 that query (until the next search or end of session).
 
-Usage (--output is required unless --dry-run; the benchmark data belongs in
-the private sub-repo that owns the domain, not in this public tree, and the
-benchmark runner globs huginn-*/scripts/benchmarks). Quote the path so the
-shell neither globs nor errors on it:
-    uv run scripts/traces/extract_query_doc_pairs.py \\
-        --output './huginn-*/scripts/benchmarks/query-doc-pairs.jsonl'
-    uv run scripts/traces/extract_query_doc_pairs.py \\
-        --output './huginn-*/scripts/benchmarks/query-doc-pairs.jsonl' \\
+Usage (--output is required unless --dry-run). The benchmark data belongs in
+the private sub-repo that owns the domain, not in this public tree: the
+benchmark runner discovers it via the glob huginn-*/scripts/benchmarks, so
+substitute your own sub-repo's path for OUTPUT_PATH below:
+    uv run scripts/traces/extract_query_doc_pairs.py --output OUTPUT_PATH
+    uv run scripts/traces/extract_query_doc_pairs.py --output OUTPUT_PATH \\
         --projects melosys-api-claude melosys-eessi
     uv run scripts/traces/extract_query_doc_pairs.py --dry-run --since 2026-03-01
 """
@@ -226,9 +224,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Only include sessions modified after this date\n(ISO format)")
     parser.add_argument("--output", metavar="PATH",
                         help="Output JSONL path; required unless --dry-run.\n"
-                             "Example (quoted so the shell does not glob it):\n"
-                             "  './huginn-*/scripts/benchmarks/query-doc-pairs.jsonl'\n"
-                             "(the benchmark runner globs huginn-*/scripts/benchmarks)")
+                             "Write it under your private sub-repo's scripts/benchmarks/\n"
+                             "(the benchmark runner globs huginn-*/scripts/benchmarks).")
     parser.add_argument("--append", action="store_true",
                         help="Append to existing file instead of overwriting\n(requires --output)")
     parser.add_argument("--min-fetched", type=int, default=0,
