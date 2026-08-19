@@ -4,9 +4,8 @@
 # Usage:
 #   ./examples/setup-wiki.sh <wiki-path> [collection-name]
 #
-# Indexes all .md files in wiki/concepts/, wiki/entities/, wiki/sources/, and
-# wiki/analyses/. Excludes index.md, log.md, and CLAUDE.md (navigation/schema
-# files, not content).
+# Indexes every .md file under <wiki-path>. Excludes index.md, log.md, and
+# CLAUDE.md (navigation/schema files, not content).
 #
 # Prerequisites: uv sync
 set -euo pipefail

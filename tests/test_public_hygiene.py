@@ -44,7 +44,7 @@ def test_no_tracked_file_names_a_private_subrepo():
         files = _tracked_files()
     except (subprocess.CalledProcessError, FileNotFoundError):
         pytest.skip("not a git checkout")
-    pattern = re.compile("(?:" + "|".join(re.escape(n) for n in names) + r")\b")
+    pattern = re.compile("(?:" + "|".join(re.escape(n) for n in names) + r")(?![A-Za-z0-9])", re.IGNORECASE)
     hits = []
     for rel in files:
         if rel in ALLOWLIST:

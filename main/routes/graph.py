@@ -25,6 +25,8 @@ def find_author_scores_path(huginn_root: Path, name: str) -> Path | None:
     """
     # ``name`` comes from the URL path, so it is never interpolated into the
     # glob pattern: only the directories are globbed, the filename is joined.
+    if not name or "/" in name or name.startswith("."):
+        return None  # a collection name is a single path segment; never traverse
     filename = f"{name}-author-scores.json"
     data_dirs = sorted(huginn_root.glob("huginn-*/data")) + [huginn_root / "data"]
     for data_dir in data_dirs:

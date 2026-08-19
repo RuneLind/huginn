@@ -182,7 +182,7 @@ def main():
                         help="Only benchmark specific collection(s)")
     parser.add_argument("--compare", action="store_true",
                         help="Compare with latest baseline after running")
-    parser.add_argument("--data-path", default="./data/collections",
+    parser.add_argument("--data-path", default=str(REPO_ROOT / "data" / "collections"),
                         help="Path to collections directory")
     parser.add_argument("--graph-path", action="append", dest="graph_paths",
                         help="Path to knowledge graph JSON file(s)")
