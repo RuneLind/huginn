@@ -1835,9 +1835,38 @@ class TestAuthorGraphRoute:
 
     def test_404_when_no_scores_file(self):
         from main.runtime.knowledge_store import KnowledgeStore
-        # A collection with no precomputed scores file under huginn-jarvis/data.
+        # A collection with no precomputed scores file under any discovered dir.
         resp = self._client(KnowledgeStore()).get("/api/collection/no-such-collection-xyz/author-graph")
         assert resp.status_code == 404
+
+    @staticmethod
+    def _scores():
+        # Shape matches the producer's {handle: info} dict. Edges come from the
+        # indexed documents (none here), so a discovered file yields an empty
+        # graph with 200 -- the 404 is what proves discovery failed.
+        return {"alice": {"author_score": 0.9, "tweet_count": 10, "community": 0}}
+
+    def test_scores_discovered_from_any_private_subrepo(self, tmp_path, monkeypatch):
+        # No sub-repo name is hardcoded: a hypothetical huginn-zzz/data/ serves it.
+        import json
+        from main.runtime.knowledge_store import KnowledgeStore
+        scores_dir = tmp_path / "huginn-zzz" / "data"
+        scores_dir.mkdir(parents=True)
+        (scores_dir / "xcol-author-scores.json").write_text(json.dumps(self._scores()))
+        monkeypatch.setattr(app.state, "huginn_root", tmp_path)
+        resp = self._client(KnowledgeStore()).get("/api/collection/xcol/author-graph")
+        assert resp.status_code == 200
+        assert resp.json()["nodes"] == []
+
+    def test_scores_fall_back_to_public_data_dir(self, tmp_path, monkeypatch):
+        import json
+        from main.runtime.knowledge_store import KnowledgeStore
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "xcol-author-scores.json").write_text(json.dumps(self._scores()))
+        monkeypatch.setattr(app.state, "huginn_root", tmp_path)
+        resp = self._client(KnowledgeStore()).get("/api/collection/xcol/author-graph")
+        assert resp.status_code == 200
+        assert resp.json()["nodes"] == []
 
 
 class TestAnthropicSummaryIngest:

@@ -353,7 +353,7 @@ flowchart LR
         <li><strong>Incremental</strong> — Per-document cache (<code>.cache.json</code>) allows stopping and resuming</li>
         <li><strong>Cross-document merging</strong> — Entities appearing in multiple documents get aggregated mention counts, revealing importance</li>
         <li><strong>Structured output</strong> — Uses Ollama's <code>format: "json"</code> and <code>think: false</code> for reliable parsing</li>
-        <li><strong>Private repo storage</strong> — NAV data goes to huginn-nav, personal data to huginn-jarvis</li>
+        <li><strong>Private repo storage</strong> — each domain's graph lands in its own gitignored <code>huginn-&lt;domain&gt;/</code> sub-repo (routed by <code>graph_routing.json</code>)</li>
     </ul>
 
     <h3>Running extraction</h3>

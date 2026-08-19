@@ -8,6 +8,7 @@ the path is only read to write the file and to pre-load trace IDs under
 
 import importlib.util
 import os
+import re
 
 import pytest
 
@@ -50,5 +51,6 @@ def test_help_names_no_private_sub_repo_and_no_shell_metacharacters(script, caps
         script.build_parser().parse_args(["--help"])
     help_text = capsys.readouterr().out
     assert "<domain>" not in help_text
-    assert "huginn-nav" not in help_text
+    # Only the glob placeholder may name a sub-repo; any concrete huginn-<name> is a leak.
+    assert re.search(r"huginn-(?!\*)[A-Za-z]", help_text) is None
     assert "huginn-*/scripts/benchmarks" in help_text

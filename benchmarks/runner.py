@@ -36,16 +36,22 @@ logger = logging.getLogger(__name__)
 
 RESULTS_DIR = Path(__file__).parent / "results"
 
-# Default graph paths to try.
-# Customer-confidential graphs live in private sub-repos (gitignored); public
-# fallbacks are user-supplied paths under ./data/.
-DEFAULT_GRAPH_PATHS = [
-    "./huginn-nav/scripts/knowledge_graph/melosys_graph.json",
-    "./huginn-nav/scripts/knowledge_graph/jira_graph.json",
-    "./huginn-jarvis/scripts/knowledge_graph/jira_graph.json",
-    "./data/eessi_graph.json",
-    "./data/jira_graph.json",
-]
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def default_graph_paths() -> list[str]:
+    """Structural (non-LLM) graphs to benchmark when ``--graph-paths`` is not given.
+
+    Private sub-repos are discovered by glob under the repo root (sorted, so the
+    order is stable across machines) rather than by name; the ``./data/`` entries
+    are the public fallbacks. Resolved at call time, anchored on the repo root,
+    so importing this module from another CWD does not freeze an empty list.
+    """
+    private = sorted(
+        str(p) for p in REPO_ROOT.glob("huginn-*/scripts/knowledge_graph/*_graph.json")
+        if not p.name.endswith("_llm_graph.json")
+    )
+    return private + [str(REPO_ROOT / "data" / "eessi_graph.json"), str(REPO_ROOT / "data" / "jira_graph.json")]
 
 
 def run_speed_benchmarks(ctx, collections: list[str]) -> list[BenchmarkResult]:
@@ -176,7 +182,7 @@ def main():
                         help="Only benchmark specific collection(s)")
     parser.add_argument("--compare", action="store_true",
                         help="Compare with latest baseline after running")
-    parser.add_argument("--data-path", default="./data/collections",
+    parser.add_argument("--data-path", default=str(REPO_ROOT / "data" / "collections"),
                         help="Path to collections directory")
     parser.add_argument("--graph-path", action="append", dest="graph_paths",
                         help="Path to knowledge graph JSON file(s)")
@@ -191,7 +197,7 @@ def main():
     logging.basicConfig(level=log_level, format="%(levelname)s %(name)s: %(message)s")
 
     # Resolve graph paths
-    graph_paths = args.graph_paths or [p for p in DEFAULT_GRAPH_PATHS if Path(p).exists()]
+    graph_paths = args.graph_paths or [p for p in default_graph_paths() if Path(p).exists()]
 
     # Load context
     print("Loading models and collections...")

@@ -83,14 +83,14 @@ class TestDiscoverAutoGlobDirs:
         # existing two, with no sub-repo name hardcoded. Results are sorted so
         # routing precedence (first "default" / first listing wins) is
         # deterministic regardless of filesystem glob order.
-        for name in ("huginn-nav", "huginn-jarvis", "huginn-newthing"):
+        for name in ("huginn-beta", "huginn-alpha", "huginn-gamma"):
             (tmp_path / name / "scripts" / "knowledge_graph").mkdir(parents=True)
         monkeypatch.chdir(tmp_path)
         dirs = _discover_auto_glob_dirs()
         assert dirs == (
-            "huginn-jarvis/scripts/knowledge_graph",
-            "huginn-nav/scripts/knowledge_graph",
-            "huginn-newthing/scripts/knowledge_graph",
+            "huginn-alpha/scripts/knowledge_graph",
+            "huginn-beta/scripts/knowledge_graph",
+            "huginn-gamma/scripts/knowledge_graph",
             "./scripts/knowledge_graph",
         )
 

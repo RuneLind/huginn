@@ -61,10 +61,12 @@ Collections live in `data/collections/`. Source documents live in `data/sources/
 |---|---|---|
 | `melosys-confluence-v3` | `./data/sources/melosys-confluence` | `^\.excluded/.*` `^fetch_metadata\.json$` (+ a path-specific exclude — see manifest) |
 | `jira-issues` | `./data/sources/jira-issues` | `^\.excluded/.*` |
-| `nav-wiki` | `./huginn-nav/wiki` | `index\.md` `log\.md` `CLAUDE\.md` `^\.obsidian/.*` `^\.claude/.*` |
-| `wiki` | `./huginn-jarvis/data/wiki` | `^index\.md$` `^log\.md$` `^CLAUDE\.md$` `^plans/.*` `^Clippings/.*` `^\..*` (dot-dirs: `.obsidian/`, `.smart-env/`, `.understand-anything/`) `^life/.*` `^trails\.json$` |
-| `wiki-life` | `./huginn-jarvis/data/wiki` | same, minus `^life/.*` — plus `includePatterns: ["^life/.*"]` |
+| `nav-wiki` | `./<private-sub-repo-a>/wiki` | `index\.md` `log\.md` `CLAUDE\.md` `^\.obsidian/.*` `^\.claude/.*` |
+| `wiki` | `./<private-sub-repo-b>/data/wiki` | `^index\.md$` `^log\.md$` `^CLAUDE\.md$` `^plans/.*` `^Clippings/.*` `^\..*` (dot-dirs: `.obsidian/`, `.smart-env/`, `.understand-anything/`) `^life/.*` `^trails\.json$` |
+| `wiki-life` | `./<private-sub-repo-b>/data/wiki` | same, minus `^life/.*` — plus `includePatterns: ["^life/.*"]` |
 
+> Exact `basePath`s are in each collection's `manifest.json` (private sub-repo names stay out of this file).
+>
 > The two wiki collections share a `basePath` and are **mutually exclusive**: `wiki` is the
 > AI/tech corpus and excludes `^life/.*`; `wiki-life` includes only `^life/.*`. That exclude
 > was missing until the 2026-08-16 lint, so every `life/` page was indexed into both and the

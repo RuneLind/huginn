@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
-# Set up the wiki collection from data/wiki/.
+# Set up the wiki collection from a wiki directory.
 #
 # Usage:
-#   ./examples/setup-wiki.sh
+#   ./examples/setup-wiki.sh <wiki-path> [collection-name]
 #
-# Indexes all .md files in wiki/concepts/, wiki/entities/, wiki/sources/, and
-# wiki/analyses/. Excludes index.md, log.md, and CLAUDE.md (navigation/schema
-# files, not content).
+# Indexes every .md file under <wiki-path>. Excludes index.md, log.md, and
+# CLAUDE.md (navigation/schema files, not content).
 #
 # Prerequisites: uv sync
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-WIKI_PATH="./huginn-jarvis/data/wiki"
-COLLECTION="wiki"
+WIKI_PATH="${1:?Usage: setup-wiki.sh <wiki-path> [collection-name]}"
+COLLECTION="${2:-wiki}"
 
 echo "==> Indexing wiki pages as collection: $COLLECTION"
 uv run files_collection_create_cmd_adapter.py \
