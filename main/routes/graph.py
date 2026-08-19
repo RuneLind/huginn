@@ -23,10 +23,12 @@ def find_author_scores_path(huginn_root: Path, name: str) -> Path | None:
     deterministically across machines), then ``<root>/data/`` as the public
     fallback. Returns ``None`` when no producer has written the file.
     """
+    # ``name`` comes from the URL path, so it is never interpolated into the
+    # glob pattern: only the directories are globbed, the filename is joined.
     filename = f"{name}-author-scores.json"
-    candidates = sorted(huginn_root.glob(f"huginn-*/data/{filename}"))
-    candidates.append(huginn_root / "data" / filename)
-    for path in candidates:
+    data_dirs = sorted(huginn_root.glob("huginn-*/data")) + [huginn_root / "data"]
+    for data_dir in data_dirs:
+        path = data_dir / filename
         if path.is_file():
             return path
     return None
