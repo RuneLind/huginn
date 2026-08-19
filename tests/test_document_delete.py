@@ -185,7 +185,7 @@ class TestDeleteDocumentIndexIntegrity(_DeleteCase):
     def test_sibling_collections_over_the_same_base_path_are_reindexed_too(
         self, fixture_collection, monkeypatch
     ):
-        # wiki + wiki-life, the nav-wiki* family, capra-notion + capra-notion-v9:
+        # wiki + wiki-life, the nav-wiki* family, jira-issues + its baseline:
         # one basePath, several collections. Reindexing only the named one leaves
         # the siblings serving the deleted doc from a dangling index entry.
         sibling = "fixture-sibling"

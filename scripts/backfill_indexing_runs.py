@@ -52,17 +52,46 @@ FINISH_RE = re.compile(r"===\s*(?P<label>.+?)\s+update finished")
 FAILED_RE = re.compile(r"===\s*FAILED:")
 
 # Marker labels that name no collection and have no installed plist to consult.
-# These three collection names are deliberately spelled out: all three appear in
-# this repo's public CLAUDE.md "Common collections" table, so they carry no
-# private information (unlike the scheduled names the schedule module keeps out
-# of the public repo).
+# Marker labels whose collection is named in this public repo's CLAUDE.md
+# "Common collections" table, so spelling them out here leaks nothing. Every
+# other label routes through the private sub-repos, exactly like the schedule
+# module's SCRIPT_COLLECTIONS -- see load_label_collections below.
+_HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROUTING_GLOBS = (
+    os.path.join(_HERE, "huginn-*", "scripts", "schedule_routing.json"),
+    os.path.join(_HERE, "scripts", "schedule_routing.json"),
+)
+
 LABEL_COLLECTIONS = {
     "Daily Jira": ["jira-issues"],
     "Daily Confluence": ["melosys-confluence-v3"],
-    # start.sh currently serves "capra-notion", but the fetch script writes
-    # "capra-notion-v9" — a backfill record describes what the script did.
-    "Daily Notion": ["capra-notion-v9"],
 }
+
+
+def load_label_collections(globs=None):
+    """Marker label -> collections, merged over the private routing files.
+
+    Mirrors ``indexing_schedule.load_script_collections`` and reads the same
+    ``schedule_routing.json`` files, taking their ``labelCollections`` key. A
+    label named there wins over the public defaults above, so a deployment can
+    both add its own private labels and repoint a public one. A missing or
+    malformed routing file costs that file's labels, never the backfill.
+    """
+    mapping = dict(LABEL_COLLECTIONS)
+    patterns = globs if globs is not None else ROUTING_GLOBS
+    for pattern in patterns:
+        for path in sorted(glob.glob(pattern)):
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    data = json.load(handle)
+            except (OSError, ValueError):
+                continue
+            labels = data.get("labelCollections")
+            if isinstance(labels, dict):
+                for label, collections in labels.items():
+                    if isinstance(collections, list):
+                        mapping[str(label)] = [str(c) for c in collections]
+    return mapping
 
 
 def _collections_for(label, args):
@@ -77,7 +106,7 @@ def _collections_for(label, args):
             if key in args:
                 value = args.split(key, 1)[1].strip()
                 return [c for c in value.split() if c]
-    return LABEL_COLLECTIONS.get(label.strip(), [])
+    return load_label_collections().get(label.strip(), [])
 
 
 def _parse_time(line):

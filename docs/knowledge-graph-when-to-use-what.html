@@ -160,7 +160,7 @@ flowchart TB
         OLLAMA[Local Ollama LLM]
         JSON1["youtube-summaries_llm_graph.json"]
         JSON2["jira-issues_llm_graph.json"]
-        JSON3["capra-notion_llm_graph.json"]
+        JSON3["notion-workspace_llm_graph.json"]
         SCRIPT -->|prompts| OLLAMA
         OLLAMA -->|entities + rels| SCRIPT
         SCRIPT --> JSON1
@@ -171,7 +171,7 @@ flowchart TB
     WIKICOLL[(wiki collection)] --> G1
     YT[(youtube-summaries)] --> G2
     JIRA[(jira-issues)] --> G2
-    CAPRA[(capra-notion)] --> G2
+    NOTION[(notion-workspace)] --> G2
     CONF[(melosys-confluence)] --> G2
 
     G1 -.queried at search time.-> SEARCH[Huginn search]
@@ -207,7 +207,7 @@ flowchart LR
     HAND --> WK[wiki collection]
     HAND --> NW[nav-wiki collection]
 
-    LLM --> J1[capra-notion]
+    LLM --> J1[notion-workspace]
     LLM --> J2[melosys-confluence]
     LLM --> J3[jira-issues]
     LLM --> J4[youtube-summaries]
@@ -229,7 +229,7 @@ flowchart LR
             <td>Already a hand-curated knowledge graph. Running the LLM extractor would add <strong>redundant entities</strong> and risk <strong>naming drift</strong> — e.g. <code>Boris</code> vs <code>Boris Cherny</code> vs <code>Boris (Anthropic)</code>. The wikilinks express the canonical relationships; the entity pages canonicalize the names.</td>
         </tr>
         <tr>
-            <td><code>capra-notion</code>, <code>melosys-confluence-v3</code></td>
+            <td><code>notion-workspace</code>, <code>melosys-confluence-v3</code></td>
             <td><strong>Yes</strong></td>
             <td>Raw Notion / Confluence pages with no wikilinks. LLM graph is the only structured enrichment.</td>
         </tr>
@@ -448,7 +448,7 @@ rm path/to/knowledge_graph/*.cache.json
 
 # Re-extract every collection that has a graph
 cd /path/to/huginn
-uv run scripts/knowledge_graph/extract_entities_llm.py --collection capra-notion
+uv run scripts/knowledge_graph/extract_entities_llm.py --collection notion-workspace
 uv run scripts/knowledge_graph/extract_entities_llm.py --collection jira-issues
 uv run scripts/knowledge_graph/extract_entities_llm.py --collection youtube-summaries
 # ... repeat for each raw-chunk collection that has an existing graph</code></pre>

@@ -112,7 +112,7 @@ def load_context(
     project_root = Path(__file__).parent.parent
     data_dirs = [project_root / "benchmarks" / "data"]
 
-    # Auto-detect domain repo benchmark data (huginn-nav, huginn-capra, etc.)
+    # Auto-detect domain repo benchmark data (any gitignored huginn-* sub-repo)
     for d in sorted(project_root.glob("huginn-*/scripts/benchmarks")):
         if d.is_dir():
             data_dirs.append(d)

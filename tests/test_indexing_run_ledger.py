@@ -567,7 +567,7 @@ class TestPhaseMerging:
 
     def test_winning_copy_borrows_a_duration_it_does_not_have(self):
         """The CLI adapter writes a reindex phase with no duration at all. Seen
-        live on the API-down dry-run of daily_capra_wiki_update.sh: preferring
+        live on the API-down dry-run of a private wiki update script: preferring
         huginn's copy left the phase timeless inside a timed 9-second run.
         Preference decides WHICH copy wins, never whether data is dropped."""
         huginn = self._huginn()
