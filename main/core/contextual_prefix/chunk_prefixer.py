@@ -11,6 +11,9 @@ logger = logging.getLogger(__name__)
 
 MIN_CHUNK_CHARS_FOR_PREFIX = 80
 
+# One retry: enough for stochastic drift, cheap enough to pay per document.
+_MAX_PREFIX_ATTEMPTS = 2
+
 
 class ChunkPrefixer:
     """Orchestrates contextual-prefix generation for a single converted document.
@@ -57,8 +60,9 @@ class ChunkPrefixer:
         requested = len(chunk_texts_to_generate)
 
         new_prefixes: list[str] = []
+        retried = False
         if chunk_texts_to_generate:
-            new_prefixes = self._generate_with_retry(doc_text, chunk_texts_to_generate, doc_id)
+            new_prefixes, retried = self._generate_with_retry(doc_text, chunk_texts_to_generate, doc_id)
 
         for j, idx in enumerate(indices_to_generate):
             if j >= len(new_prefixes):
@@ -78,35 +82,44 @@ class ChunkPrefixer:
         generated = len(cached_prefixes) - cache_hits
         duration = time.monotonic() - start_time
         logger.info(
-            "prefix doc=%s chunks=%d cached=%d generated=%d requested=%d duration=%.1fs",
-            doc_id, len(chunks), cache_hits, generated, requested, duration,
+            "prefix doc=%s chunks=%d cached=%d generated=%d requested=%d retried=%d duration=%.1fs",
+            doc_id, len(chunks), cache_hits, generated, requested, int(retried), duration,
         )
 
-    def _generate_with_retry(self, doc_text: str, chunks_to_generate: list[str], doc_id: str) -> list[str]:
-        """Generate prefixes, retrying once if the backend returns the wrong count.
+    def _generate_with_retry(self, doc_text: str, chunks_to_generate: list[str],
+                             doc_id: str) -> tuple[list[str], bool]:
+        """Generate prefixes, retrying once on a non-empty wrong count. Returns (prefixes, retried).
 
-        Backends stochastically drop or invent an item (Ollama also returns [] on its own
-        per-batch mismatch); an A/B run lost every prefix on 1 of 7 docs that way. One retry
-        with the identical prompt recovers those. Exceptions are NOT retried — the backends
-        already retry transport errors themselves.
+        A *wrong count* is model drift — the model stochastically dropped or invented an item;
+        an A/B run lost every prefix on 1 of 7 docs that way, and one retry with the identical
+        prompt recovers those. An *empty* result is the backend reporting its own failure (every
+        backend swallows its exceptions and returns []), so retrying it only doubles the cost of
+        an outage. Exceptions are likewise not retried — the backends already retry transport
+        errors themselves.
+
+        The retry assumes the mismatch is stochastic. A deterministic one — e.g. a doc past the
+        SDK backend's `max_tokens // 80` chunk ceiling — retries and fails on every reindex;
+        accepted, there is no negative cache.
         """
-        for attempt in (1, 2):
+        for attempt in range(1, _MAX_PREFIX_ATTEMPTS + 1):
+            retried = attempt > 1
             try:
                 prefixes = self.generator.generate(doc_text, chunks_to_generate)
             except Exception:
                 logger.exception("Prefix generation failed for doc %s; skipping prefixes for %d chunks",
                                  doc_id, len(chunks_to_generate))
-                return []
+                return [], retried
 
             if len(prefixes) == len(chunks_to_generate):
-                if attempt == 2:
-                    logger.info("Prefix retry succeeded for doc %s after first attempt mismatched", doc_id)
-                return prefixes
+                return prefixes, retried
 
+            give_up = not prefixes or attempt == _MAX_PREFIX_ATTEMPTS
             logger.warning("Generator returned %d prefixes for %d chunks (doc %s, attempt %d)%s",
                            len(prefixes), len(chunks_to_generate), doc_id, attempt,
-                           "; retrying once" if attempt == 1 else "; skipping doc")
-        return []
+                           "; skipping doc" if give_up else "; retrying once")
+            if give_up:
+                return [], retried
+        return [], _MAX_PREFIX_ATTEMPTS > 1
 
     def prefix_documents(self, converted_documents: Iterable[dict]) -> None:
         for converted_document in converted_documents:

@@ -130,15 +130,17 @@ def _converted_doc(chunk_texts, doc_id="docX", doc_text=None):
     }
 
 
-def test_prefixer_prepends_prefix_to_long_chunks():
+def test_prefixer_prepends_prefix_to_long_chunks(caplog):
     long_chunk = "x" * (MIN_CHUNK_CHARS_FOR_PREFIX + 50)
     doc = _converted_doc([long_chunk])
 
     with tempfile.TemporaryDirectory() as td:
         cache = ContextualCache(os.path.join(td, "cache.json"))
         prefixer = ChunkPrefixer(generator=EchoBackend(), cache=cache)
-        prefixer.prefix_document(doc)
+        with caplog.at_level(logging.INFO, logger="main.core.contextual_prefix.chunk_prefixer"):
+            prefixer.prefix_document(doc)
 
+    assert "retried=0" in _summary_line(caplog)
     assert doc["chunks"][0]["contextualPrefix"].startswith("[echo prefix for chunk 1")
     assert doc["chunks"][0]["indexedData"].startswith("[echo prefix for chunk 1")
     assert doc["chunks"][0]["indexedData"].endswith(long_chunk)
@@ -189,20 +191,29 @@ def test_prefixer_uses_cache_on_second_run():
 
 
 def test_prefixer_continues_when_backend_returns_empty():
-    """A backend failure must not crash the pipeline — chunks just stay un-prefixed."""
+    """A backend failure must not crash the pipeline — chunks just stay un-prefixed.
+
+    The empty result is the backend's own failure signal, so it is not retried.
+    """
     class FailingBackend:
         model_id = "echo:failing"
 
+        def __init__(self):
+            self.calls = 0
+
         def generate(self, document_text, chunks):
+            self.calls += 1
             return []  # backend returned nothing — simulating a parse error
 
     long_chunk = "x" * (MIN_CHUNK_CHARS_FOR_PREFIX + 10)
     doc = _converted_doc([long_chunk])
 
+    backend = FailingBackend()
     with tempfile.TemporaryDirectory() as td:
         cache = ContextualCache(os.path.join(td, "cache.json"))
-        ChunkPrefixer(FailingBackend(), cache).prefix_document(doc)
+        ChunkPrefixer(backend, cache).prefix_document(doc)
 
+    assert backend.calls == 1
     assert "contextualPrefix" not in doc["chunks"][0]
     assert doc["chunks"][0]["indexedData"] == long_chunk
 
@@ -226,20 +237,26 @@ def test_prefixer_continues_when_backend_raises():
 
 def test_prefixer_count_mismatch_is_treated_as_failure():
     """Defensive: if the model returns the wrong number of prefixes we drop all of them
-    rather than risk pairing them to the wrong chunks."""
+    after two attempts, rather than risk pairing them to the wrong chunks."""
     class WrongCountBackend:
         model_id = "echo:wrong"
 
+        def __init__(self):
+            self.calls = 0
+
         def generate(self, document_text, chunks):
+            self.calls += 1
             return ["only one"] if len(chunks) > 1 else []
 
     long_chunk = "x" * (MIN_CHUNK_CHARS_FOR_PREFIX + 10)
     doc = _converted_doc([long_chunk, long_chunk + "Y"])
 
+    backend = WrongCountBackend()
     with tempfile.TemporaryDirectory() as td:
         cache = ContextualCache(os.path.join(td, "cache.json"))
-        ChunkPrefixer(WrongCountBackend(), cache).prefix_document(doc)
+        ChunkPrefixer(backend, cache).prefix_document(doc)
 
+    assert backend.calls == 2
     for chunk in doc["chunks"]:
         assert "contextualPrefix" not in chunk
 
@@ -260,6 +277,13 @@ class _ScriptedBackend:
         return result
 
 
+def _summary_line(caplog) -> str:
+    """The single per-doc `prefix doc=... retried=N` INFO line."""
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("prefix doc=")]
+    assert len(lines) == 1, lines
+    return lines[0]
+
+
 def _three_chunk_doc():
     base = "x" * (MIN_CHUNK_CHARS_FOR_PREFIX + 10)
     return _converted_doc([base + "A", base + "B", base + "C"])
@@ -276,7 +300,7 @@ def test_prefixer_retries_once_on_count_mismatch_and_succeeds(caplog):
 
     assert backend.calls == 2
     assert [c["contextualPrefix"] for c in doc["chunks"]] == ["ok0", "ok1", "ok2"]
-    assert any(r.levelno == logging.INFO and "retry succeeded" in r.getMessage() for r in caplog.records)
+    assert "retried=1" in _summary_line(caplog)
 
 
 def test_prefixer_retries_once_on_count_mismatch_and_gives_up(caplog):
@@ -295,6 +319,28 @@ def test_prefixer_retries_once_on_count_mismatch_and_gives_up(caplog):
     assert len(warnings) == 2
     assert "retrying once" in warnings[0].getMessage()
     assert "skipping doc" in warnings[1].getMessage()
+    assert "retried=1" in _summary_line(caplog)
+
+
+def test_prefixer_does_not_retry_on_empty_result(caplog):
+    """An empty result is the backend reporting its own failure (every backend swallows
+    exceptions and returns []); retrying doubles the cost of an outage for nothing."""
+    backend = _ScriptedBackend([[], ["a", "b", "c"]])
+    doc = _three_chunk_doc()
+
+    with tempfile.TemporaryDirectory() as td:
+        cache = ContextualCache(os.path.join(td, "cache.json"))
+        with caplog.at_level(logging.INFO, logger="main.core.contextual_prefix.chunk_prefixer"):
+            ChunkPrefixer(backend, cache).prefix_document(doc)
+
+    assert backend.calls == 1
+    for chunk in doc["chunks"]:
+        assert "contextualPrefix" not in chunk
+    assert not any("retrying" in r.getMessage() for r in caplog.records)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "skipping doc" in warnings[0].getMessage()
+    assert "retried=0" in _summary_line(caplog)
 
 
 def test_prefixer_does_not_retry_on_backend_exception():
