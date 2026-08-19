@@ -1,4 +1,6 @@
 import json
+import logging
+import re
 import os
 import tempfile
 import time
@@ -129,15 +131,17 @@ def _converted_doc(chunk_texts, doc_id="docX", doc_text=None):
     }
 
 
-def test_prefixer_prepends_prefix_to_long_chunks():
+def test_prefixer_prepends_prefix_to_long_chunks(caplog):
     long_chunk = "x" * (MIN_CHUNK_CHARS_FOR_PREFIX + 50)
     doc = _converted_doc([long_chunk])
 
     with tempfile.TemporaryDirectory() as td:
         cache = ContextualCache(os.path.join(td, "cache.json"))
         prefixer = ChunkPrefixer(generator=EchoBackend(), cache=cache)
-        prefixer.prefix_document(doc)
+        with caplog.at_level(logging.INFO, logger="main.core.contextual_prefix.chunk_prefixer"):
+            prefixer.prefix_document(doc)
 
+    assert "retried=0" in _summary_line(caplog)
     assert doc["chunks"][0]["contextualPrefix"].startswith("[echo prefix for chunk 1")
     assert doc["chunks"][0]["indexedData"].startswith("[echo prefix for chunk 1")
     assert doc["chunks"][0]["indexedData"].endswith(long_chunk)
@@ -188,20 +192,29 @@ def test_prefixer_uses_cache_on_second_run():
 
 
 def test_prefixer_continues_when_backend_returns_empty():
-    """A backend failure must not crash the pipeline — chunks just stay un-prefixed."""
+    """A backend failure must not crash the pipeline — chunks just stay un-prefixed.
+
+    The empty result is the backend's own failure signal, so it is not retried.
+    """
     class FailingBackend:
         model_id = "echo:failing"
 
+        def __init__(self):
+            self.calls = 0
+
         def generate(self, document_text, chunks):
+            self.calls += 1
             return []  # backend returned nothing — simulating a parse error
 
     long_chunk = "x" * (MIN_CHUNK_CHARS_FOR_PREFIX + 10)
     doc = _converted_doc([long_chunk])
 
+    backend = FailingBackend()
     with tempfile.TemporaryDirectory() as td:
         cache = ContextualCache(os.path.join(td, "cache.json"))
-        ChunkPrefixer(FailingBackend(), cache).prefix_document(doc)
+        ChunkPrefixer(backend, cache).prefix_document(doc)
 
+    assert backend.calls == 1
     assert "contextualPrefix" not in doc["chunks"][0]
     assert doc["chunks"][0]["indexedData"] == long_chunk
 
@@ -225,22 +238,135 @@ def test_prefixer_continues_when_backend_raises():
 
 def test_prefixer_count_mismatch_is_treated_as_failure():
     """Defensive: if the model returns the wrong number of prefixes we drop all of them
-    rather than risk pairing them to the wrong chunks."""
+    after two attempts, rather than risk pairing them to the wrong chunks."""
     class WrongCountBackend:
         model_id = "echo:wrong"
 
+        def __init__(self):
+            self.calls = 0
+
         def generate(self, document_text, chunks):
+            self.calls += 1
             return ["only one"] if len(chunks) > 1 else []
 
     long_chunk = "x" * (MIN_CHUNK_CHARS_FOR_PREFIX + 10)
     doc = _converted_doc([long_chunk, long_chunk + "Y"])
 
+    backend = WrongCountBackend()
     with tempfile.TemporaryDirectory() as td:
         cache = ContextualCache(os.path.join(td, "cache.json"))
-        ChunkPrefixer(WrongCountBackend(), cache).prefix_document(doc)
+        ChunkPrefixer(backend, cache).prefix_document(doc)
 
+    assert backend.calls == 2
     for chunk in doc["chunks"]:
         assert "contextualPrefix" not in chunk
+
+
+class _ScriptedBackend:
+    """Returns the next scripted result per generate() call, recording the call count."""
+    model_id = "echo:scripted"
+
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = 0
+
+    def generate(self, document_text, chunks):
+        self.calls += 1
+        result = self.results[self.calls - 1]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+def _summary_line(caplog) -> str:
+    """The single per-doc `prefix doc=... retried=N` INFO line."""
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("prefix doc=")]
+    assert len(lines) == 1, lines
+    return lines[0]
+
+
+def _three_chunk_doc():
+    base = "x" * (MIN_CHUNK_CHARS_FOR_PREFIX + 10)
+    return _converted_doc([base + "A", base + "B", base + "C"])
+
+
+def test_prefixer_retries_once_on_count_mismatch_and_succeeds(caplog):
+    backend = _ScriptedBackend([["p0", "p1"], ["ok0", "ok1", "ok2"]])
+    doc = _three_chunk_doc()
+
+    with tempfile.TemporaryDirectory() as td:
+        cache = ContextualCache(os.path.join(td, "cache.json"))
+        with caplog.at_level(logging.INFO, logger="main.core.contextual_prefix.chunk_prefixer"):
+            ChunkPrefixer(backend, cache).prefix_document(doc)
+
+    assert backend.calls == 2
+    assert [c["contextualPrefix"] for c in doc["chunks"]] == ["ok0", "ok1", "ok2"]
+    assert "retried=1" in _summary_line(caplog)
+
+
+def test_prefixer_retries_once_on_count_mismatch_and_gives_up(caplog):
+    backend = _ScriptedBackend([["p0", "p1"], ["q0", "q1"]])
+    doc = _three_chunk_doc()
+
+    with tempfile.TemporaryDirectory() as td:
+        cache = ContextualCache(os.path.join(td, "cache.json"))
+        with caplog.at_level(logging.INFO, logger="main.core.contextual_prefix.chunk_prefixer"):
+            ChunkPrefixer(backend, cache).prefix_document(doc)
+
+    assert backend.calls == 2
+    for chunk in doc["chunks"]:
+        assert "contextualPrefix" not in chunk
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 2
+    assert "retrying once" in warnings[0].getMessage()
+    assert "skipping doc" in warnings[1].getMessage()
+    assert "retried=1" in _summary_line(caplog)
+
+
+def test_prefixer_does_not_retry_on_empty_result(caplog):
+    """An empty result is the backend reporting its own failure (every backend swallows
+    exceptions and returns []); retrying doubles the cost of an outage for nothing."""
+    backend = _ScriptedBackend([[], ["a", "b", "c"]])
+    doc = _three_chunk_doc()
+
+    with tempfile.TemporaryDirectory() as td:
+        cache = ContextualCache(os.path.join(td, "cache.json"))
+        with caplog.at_level(logging.INFO, logger="main.core.contextual_prefix.chunk_prefixer"):
+            ChunkPrefixer(backend, cache).prefix_document(doc)
+
+    assert backend.calls == 1
+    for chunk in doc["chunks"]:
+        assert "contextualPrefix" not in chunk
+    assert not any("retrying" in r.getMessage() for r in caplog.records)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "skipping doc" in warnings[0].getMessage()
+    assert "retried=0" in _summary_line(caplog)
+
+
+def test_prefixer_does_not_retry_on_backend_exception():
+    backend = _ScriptedBackend([RuntimeError("LLM exploded"), ["a", "b", "c"]])
+    doc = _three_chunk_doc()
+
+    with tempfile.TemporaryDirectory() as td:
+        cache = ContextualCache(os.path.join(td, "cache.json"))
+        ChunkPrefixer(backend, cache).prefix_document(doc)
+
+    assert backend.calls == 1
+    for chunk in doc["chunks"]:
+        assert "contextualPrefix" not in chunk
+
+
+def test_prefixer_retries_on_too_many_prefixes():
+    backend = _ScriptedBackend([["p0", "p1", "p2", "p3"], ["ok0", "ok1", "ok2"]])
+    doc = _three_chunk_doc()
+
+    with tempfile.TemporaryDirectory() as td:
+        cache = ContextualCache(os.path.join(td, "cache.json"))
+        ChunkPrefixer(backend, cache).prefix_document(doc)
+
+    assert backend.calls == 2
+    assert [c["contextualPrefix"] for c in doc["chunks"]] == ["ok0", "ok1", "ok2"]
 
 
 # ---------- OllamaBackend._parse_prefix_array ----------
@@ -396,6 +522,79 @@ def test_ollama_backend_batch_response_error_field_returns_empty(monkeypatch):
 
     monkeypatch.setattr(ollama_cli.urllib.request, "urlopen", fake_urlopen)
     assert backend._generate_batch("doc", ["c0", "c1"]) == []
+
+
+# ---------- Per-batch retry on model drift ----------
+
+def _ollama_user_prompt(req) -> str:
+    return json.loads(req.data)["messages"][1]["content"]
+
+
+def _ollama_batch_size(user_prompt: str) -> int:
+    """How many prefixes the request asked for, read back off the rendered prompt."""
+    return int(re.search(r"array of (\d+) prefixes", user_prompt).group(1))
+
+
+def test_ollama_backend_retries_a_drifting_batch_once(monkeypatch):
+    """A non-empty wrong-count batch is model drift, not an outage: retry that batch
+    once with the same chunks. Aborting the doc instead threw away every prefix on a
+    doc whose drift a single retry recovers."""
+    from main.core.contextual_prefix.backends.ollama_backend import OllamaBackend
+    import main.utils.ollama_cli as ollama_cli
+
+    backend = OllamaBackend(model="test-model", chunks_per_call=10)
+    prompts: list[str] = []
+
+    def fake_urlopen(req, timeout=None):
+        prompts.append(_ollama_user_prompt(req))
+        n = _ollama_batch_size(prompts[-1])
+        count = n - 1 if len(prompts) == 1 else n  # batch 1 drifts on its first attempt only
+        return _ollama_resp({"message": {"content": json.dumps([f"p{i}" for i in range(count)])}})
+
+    monkeypatch.setattr(ollama_cli.urllib.request, "urlopen", fake_urlopen)
+    prefixes = backend.generate("doc text", [f"chunk{i}" for i in range(25)])
+
+    assert len(prefixes) == 25
+    assert [_ollama_batch_size(p) for p in prompts] == [10, 10, 10, 5]  # ceil(25/10) + 1 retry
+    assert prompts[0] == prompts[1]  # the retry resent the same chunks
+
+
+def test_ollama_backend_aborts_doc_when_a_batch_drifts_twice(monkeypatch):
+    """One retry only — a batch that keeps returning the wrong count still aborts the
+    doc, and no later batch is attempted."""
+    from main.core.contextual_prefix.backends.ollama_backend import OllamaBackend
+    import main.utils.ollama_cli as ollama_cli
+
+    backend = OllamaBackend(model="test-model", chunks_per_call=10)
+    sizes: list[int] = []
+
+    def fake_urlopen(req, timeout=None):
+        n = _ollama_batch_size(_ollama_user_prompt(req))
+        sizes.append(n)
+        return _ollama_resp({"message": {"content": json.dumps([f"p{i}" for i in range(n - 1)])}})
+
+    monkeypatch.setattr(ollama_cli.urllib.request, "urlopen", fake_urlopen)
+    assert backend.generate("doc text", [f"chunk{i}" for i in range(25)]) == []
+    assert sizes == [10, 10]  # batch 1 twice, then abort
+
+
+def test_ollama_backend_does_not_retry_an_empty_batch(monkeypatch):
+    """An empty batch result is the backend reporting its own failure (transport or
+    parse), already logged inside _generate_batch — retrying only doubles an outage."""
+    import urllib.error
+    from main.core.contextual_prefix.backends.ollama_backend import OllamaBackend
+    import main.utils.ollama_cli as ollama_cli
+
+    backend = OllamaBackend(model="test-model", chunks_per_call=10)
+    sizes: list[int] = []
+
+    def boom(req, timeout=None):
+        sizes.append(_ollama_batch_size(_ollama_user_prompt(req)))
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(ollama_cli.urllib.request, "urlopen", boom)
+    assert backend.generate("doc text", [f"chunk{i}" for i in range(25)]) == []
+    assert sizes == [10]  # one attempt, no retry
 
 
 def test_parallel_prefixing_handles_concurrent_calls_safely():
