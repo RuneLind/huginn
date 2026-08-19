@@ -1602,44 +1602,53 @@ class TestIngestErrorHandling:
         assert resp.status_code == 503
 
 
+#: URL posted by the contract test. It embeds `_CONTRACT_ISSUE_KEY` so the
+#: self-hit below is excluded by BOTH exclude_match flavours in the registry:
+#: url-equality (every summary source) and issue-key-substring (Jira).
+_CONTRACT_ISSUE_KEY = "CONTRACT-1"
+_CONTRACT_SELF_URL = f"https://example.com/{_CONTRACT_ISSUE_KEY}/self-doc"
+
+
 class _IngestFakeSearcher:
-    """Records the similarity query and returns one canned hit."""
+    """Records each similarity query and returns two canned hits: the just-posted
+    document itself (which exclude_match must drop) and an unrelated one."""
 
     def __init__(self):
         self.queries = []
 
     def search(self, query, **kwargs):
         self.queries.append(query)
-        return {"results": [{
-            "path": "documents/other-doc.json",
-            "url": "https://example.com/other-doc",
-            "matchedChunks": [{"content": {"indexedData": "canned chunk text"}}],
-        }]}
+        return {"results": [
+            {
+                "path": "documents/self-doc.json",
+                "url": _CONTRACT_SELF_URL,
+                "matchedChunks": [{"content": {"indexedData": "self chunk text"}}],
+            },
+            {
+                "path": "documents/other-doc.json",
+                "url": "https://example.com/other-doc",
+                "matchedChunks": [{"content": {"indexedData": "canned chunk text"}}],
+            },
+        ]}
 
 
 class _IngestFakeStore:
     """Serves any collection name with the same searcher, so the real
-    _similar_for_collection / _find_similar_documents shaping still runs."""
+    _similar_for_collection / _find_similar_documents shaping still runs — but
+    records the names asked for, so the configured collection is pinned too."""
 
     def __init__(self, searcher):
         self.searcher = searcher
+        self.asked = []           # names passed to has_collection
+        self.searchers_for = []   # names passed to get_searchers
 
     def has_collection(self, name):
+        self.asked.append(name)
         return True
 
     def get_searchers(self, names):
+        self.searchers_for.extend(names)
         return {n: self.searcher for n in names}
-
-
-def _minimal_body(model):
-    """Smallest body the request model accepts: a dummy string per required field."""
-    body = {}
-    for name, field in model.model_fields.items():
-        if not field.is_required():
-            continue
-        assert field.annotation is str, f"{model.__name__}.{name}: non-str required field"
-        body[name] = "https://example.com/ingested" if "url" in name.lower() else f"contract-{name}"
-    return body
 
 
 class TestIngestContract:
@@ -1647,6 +1656,15 @@ class TestIngestContract:
 
     The parametrization is the registry itself, so a source added to
     INGEST_SOURCES without honouring the documented response shape fails here.
+
+    Pinned: the response key set and the relative order of `response_fields`;
+    `status`; each response field copied verbatim from the ingest result; the
+    similarity query being exactly `src.similar_query(req, result)`; the
+    similarity search running against the *configured* collection; `exclude_match`
+    actually dropping the self-hit; and the reindex enqueue — its return value
+    surfaced as `reindex`, called once with the injected store, a real
+    BackgroundTasks and the configured collection, and not called at all for
+    do_reindex=False sources.
     """
 
     def teardown_method(self):
@@ -1658,8 +1676,10 @@ class TestIngestContract:
         app.dependency_overrides[get_store] = lambda: store
         return TestClient(app)
 
-    @pytest.mark.parametrize("src", INGEST_SOURCES, ids=[s.name for s in INGEST_SOURCES])
+    @pytest.mark.parametrize("src", INGEST_SOURCES, ids=lambda s: s.name)
     def test_ingest_happy_path_contract(self, src, monkeypatch):
+        from fastapi import BackgroundTasks
+
         # setitem rather than _set_ingest: monkeypatch restores the entry after.
         from main.runtime.server_config import IngestSourceConfig
         monkeypatch.setitem(
@@ -1675,44 +1695,59 @@ class TestIngestContract:
         reindex_calls = []
 
         def _fake_reindex(store, background_tasks, collection):
-            reindex_calls.append(collection)
-            return "started"
+            reindex_calls.append((store, background_tasks, collection))
+            return "stub-reindex"
 
         monkeypatch.setattr("main.routes.ingest._maybe_enqueue_reindex", _fake_reindex)
 
         searcher = _IngestFakeSearcher()
-        resp = self._client(_IngestFakeStore(searcher)).post(
-            src.route_path, json=_minimal_body(src.request_model)
-        )
+        store = _IngestFakeStore(searcher)
+        # The same model instance the posted body is built from, so the expected
+        # similarity query below is the registry's own lambda, not a copy of it.
+        req = _summary_req(src, url=_CONTRACT_SELF_URL)
+        resp = self._client(store).post(src.route_path, json=req.model_dump(exclude_none=True))
 
         assert resp.status_code == 200, resp.text
         body = resp.json()
-        # Exact key set AND order: status, response_fields as declared, similar,
-        # then reindex only for sources that reindex.
-        assert list(body) == [
+        # Exact key set, plus the relative order of the declared response_fields
+        # (what the registry documents); reindex only for sources that reindex.
+        assert set(body) == {
             "status", *src.response_fields, "similar",
             *(["reindex"] if src.do_reindex else []),
-        ]
+        }
+        assert [k for k in body if k in src.response_fields] == list(src.response_fields)
         assert body["status"] == "ingested"
         for key in src.response_fields:
             assert body[key] == result[key]
+        # The self-hit is dropped by exclude_match; only the unrelated one survives.
         assert body["similar"] == [{
             "title": "other-doc",
             "url": "https://example.com/other-doc",
             "snippet": "canned chunk text",
         }]
-        assert searcher.queries and searcher.queries[0].strip()  # similar_query ran
-        assert reindex_calls == (["contract-collection"] if src.do_reindex else [])
+        assert searcher.queries == [src.similar_query(req, result)]
+        assert store.asked == ["contract-collection"]
+        assert store.searchers_for == ["contract-collection"]
+
         if src.do_reindex:
-            assert body["reindex"] == "started"
+            (called_store, called_tasks, called_collection), = reindex_calls
+            assert called_store is store
+            assert isinstance(called_tasks, BackgroundTasks)
+            assert called_collection == "contract-collection"
+            assert body["reindex"] == "stub-reindex"
+        else:
+            assert reindex_calls == []
 
     def test_route_table_matches_registry(self):
-        registered = {
-            r.path: r.methods for r in app.routes
-            if getattr(r, "path", "").startswith("/api/") and r.path.endswith("/ingest")
-        }
-        assert set(registered) == {src.route_path for src in INGEST_SOURCES}
-        assert all("POST" in methods for methods in registered.values())
+        # Pairs, not a dict: a duplicate route_path stays visible.
+        registered = [
+            (getattr(r, "path", ""), getattr(r, "methods", None)) for r in app.routes
+            if getattr(r, "path", "").startswith("/api/")
+            and getattr(r, "path", "").endswith("/ingest")
+        ]
+        assert sorted(p for p, _ in registered) == sorted(s.route_path for s in INGEST_SOURCES)
+        for path, methods in registered:
+            assert methods == {"POST"}, (path, methods)
 
 
 class TestGraphRoutes:
@@ -1937,10 +1972,11 @@ _SUMMARY_TEXT = "Parametrized summary body for the shared write path."
 
 
 def _summary_req(src, **over):
-    """Build a minimal valid request for a summary source.
+    """Build a minimal valid request for any registry source.
 
     A `summary` is always supplied so the YouTube source skips its transcript
-    fetch + Claude call; `author` is added only for models that declare it.
+    fetch + Claude call. Keys the model does not declare are dropped, so
+    `author` / `issueKey` only reach the models that have them.
     """
     fields = src.request_model.model_fields
     base = {
@@ -1949,6 +1985,7 @@ def _summary_req(src, **over):
         "summary": _SUMMARY_TEXT,
         "category": "ai/claude-code",
         "date": "2026-07-04",
+        "issueKey": _CONTRACT_ISSUE_KEY,
     }
     if "author" in fields:
         base["author"] = "@handle"
