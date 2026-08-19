@@ -41,9 +41,12 @@ import pytest
 def _query_log_off(monkeypatch):
     """Keep the suite from appending to the real query log (main/core/query_log.py).
 
-    Tests that exercise the log re-point HUGINN_QUERY_LOG at a tmp_path.
+    Tests that exercise the log re-point HUGINN_QUERY_LOG at a tmp_path — and
+    must not inherit a rotation threshold from the shell that launched pytest
+    (HUGINN_QUERY_LOG_MAX_BYTES=1 otherwise rotates on every append).
     """
     monkeypatch.setenv("HUGINN_QUERY_LOG", "off")
+    monkeypatch.delenv("HUGINN_QUERY_LOG_MAX_BYTES", raising=False)
 
 
 @pytest.fixture(autouse=True)
