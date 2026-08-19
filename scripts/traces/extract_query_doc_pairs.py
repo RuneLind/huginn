@@ -10,11 +10,16 @@ A "session" is one JSONL file (one Claude Code conversation). Within
 a session, each search query is paired with documents fetched after
 that query (until the next search or end of session).
 
-Usage:
-    uv run scripts/traces/extract_query_doc_pairs.py
-    uv run scripts/traces/extract_query_doc_pairs.py --projects melosys-api-claude melosys-eessi
-    uv run scripts/traces/extract_query_doc_pairs.py --output ./huginn-nav/scripts/benchmarks/query-doc-pairs.jsonl
-    uv run scripts/traces/extract_query_doc_pairs.py --since 2026-03-01
+Usage (--output is required; the benchmark data belongs in the private
+sub-repo that owns the domain, not in this public tree):
+    uv run scripts/traces/extract_query_doc_pairs.py \\
+        --output ./huginn-<domain>/scripts/benchmarks/query-doc-pairs.jsonl
+    uv run scripts/traces/extract_query_doc_pairs.py \\
+        --output ./huginn-<domain>/scripts/benchmarks/query-doc-pairs.jsonl \\
+        --projects melosys-api-claude melosys-eessi
+    uv run scripts/traces/extract_query_doc_pairs.py \\
+        --output ./huginn-<domain>/scripts/benchmarks/query-doc-pairs.jsonl \\
+        --since 2026-03-01
 """
 
 import argparse
@@ -214,8 +219,9 @@ def main():
                         help="Project name substrings to include (default: all)")
     parser.add_argument("--since",
                         help="Only include sessions modified after this date (ISO format)")
-    parser.add_argument("--output", default="./huginn-nav/scripts/benchmarks/query-doc-pairs.jsonl",
-                        help="Output JSONL file path")
+    parser.add_argument("--output", required=True,
+                        help="Output JSONL path, e.g. "
+                             "./huginn-<domain>/scripts/benchmarks/query-doc-pairs.jsonl")
     parser.add_argument("--append", action="store_true",
                         help="Append to existing file instead of overwriting")
     parser.add_argument("--min-fetched", type=int, default=0,

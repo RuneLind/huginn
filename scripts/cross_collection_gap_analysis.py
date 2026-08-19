@@ -18,7 +18,7 @@ Usage:
 
     .venv/bin/python scripts/cross_collection_gap_analysis.py \\
         --collections melosys-confluence-v3 jira-issues \\
-        --wiki ./huginn-nav/wiki \\
+        --wiki ./huginn-<domain>/wiki \\
         --top 30
 """
 import argparse
