@@ -19,6 +19,7 @@ from main.core.search_response_formatter import (
     shape_search_results,
     truncate_snippet,
 )
+from main.ingest.registry import INGEST_SOURCES
 from main.sources.notion.notion_document_reader import NotionDocumentReader
 
 
@@ -1599,6 +1600,119 @@ class TestIngestErrorHandling:
             json={"title": "T", "url": "https://x", "summary": "S"},
         )
         assert resp.status_code == 503
+
+
+class _IngestFakeSearcher:
+    """Records the similarity query and returns one canned hit."""
+
+    def __init__(self):
+        self.queries = []
+
+    def search(self, query, **kwargs):
+        self.queries.append(query)
+        return {"results": [{
+            "path": "documents/other-doc.json",
+            "url": "https://example.com/other-doc",
+            "matchedChunks": [{"content": {"indexedData": "canned chunk text"}}],
+        }]}
+
+
+class _IngestFakeStore:
+    """Serves any collection name with the same searcher, so the real
+    _similar_for_collection / _find_similar_documents shaping still runs."""
+
+    def __init__(self, searcher):
+        self.searcher = searcher
+
+    def has_collection(self, name):
+        return True
+
+    def get_searchers(self, names):
+        return {n: self.searcher for n in names}
+
+
+def _minimal_body(model):
+    """Smallest body the request model accepts: a dummy string per required field."""
+    body = {}
+    for name, field in model.model_fields.items():
+        if not field.is_required():
+            continue
+        assert field.annotation is str, f"{model.__name__}.{name}: non-str required field"
+        body[name] = "https://example.com/ingested" if "url" in name.lower() else f"contract-{name}"
+    return body
+
+
+class TestIngestContract:
+    """Happy-path response contract over every registered ingest source.
+
+    The parametrization is the registry itself, so a source added to
+    INGEST_SOURCES without honouring the documented response shape fails here.
+    """
+
+    def teardown_method(self):
+        from main.runtime.knowledge_store import get_store
+        app.dependency_overrides.pop(get_store, None)
+
+    def _client(self, store):
+        from main.runtime.knowledge_store import get_store
+        app.dependency_overrides[get_store] = lambda: store
+        return TestClient(app)
+
+    @pytest.mark.parametrize("src", INGEST_SOURCES, ids=[s.name for s in INGEST_SOURCES])
+    def test_ingest_happy_path_contract(self, src, monkeypatch):
+        # setitem rather than _set_ingest: monkeypatch restores the entry after.
+        from main.runtime.server_config import IngestSourceConfig
+        monkeypatch.setitem(
+            app.state.config.ingest_sources, src.name,
+            IngestSourceConfig(path="/tmp/ingest-contract", collection="contract-collection"),
+        )
+
+        result = {key: f"canned-{key}" for key in src.response_fields}
+        # The handler dereferences src.ingest_fn at call time, so patching the
+        # (non-frozen) registry entry is the seam — same as the 500-path tests.
+        monkeypatch.setattr(src, "ingest_fn", lambda req, **kw: dict(result))
+
+        reindex_calls = []
+
+        def _fake_reindex(store, background_tasks, collection):
+            reindex_calls.append(collection)
+            return "started"
+
+        monkeypatch.setattr("main.routes.ingest._maybe_enqueue_reindex", _fake_reindex)
+
+        searcher = _IngestFakeSearcher()
+        resp = self._client(_IngestFakeStore(searcher)).post(
+            src.route_path, json=_minimal_body(src.request_model)
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        # Exact key set AND order: status, response_fields as declared, similar,
+        # then reindex only for sources that reindex.
+        assert list(body) == [
+            "status", *src.response_fields, "similar",
+            *(["reindex"] if src.do_reindex else []),
+        ]
+        assert body["status"] == "ingested"
+        for key in src.response_fields:
+            assert body[key] == result[key]
+        assert body["similar"] == [{
+            "title": "other-doc",
+            "url": "https://example.com/other-doc",
+            "snippet": "canned chunk text",
+        }]
+        assert searcher.queries and searcher.queries[0].strip()  # similar_query ran
+        assert reindex_calls == (["contract-collection"] if src.do_reindex else [])
+        if src.do_reindex:
+            assert body["reindex"] == "started"
+
+    def test_route_table_matches_registry(self):
+        registered = {
+            r.path: r.methods for r in app.routes
+            if getattr(r, "path", "").startswith("/api/") and r.path.endswith("/ingest")
+        }
+        assert set(registered) == {src.route_path for src in INGEST_SOURCES}
+        assert all("POST" in methods for methods in registered.values())
 
 
 class TestGraphRoutes:
