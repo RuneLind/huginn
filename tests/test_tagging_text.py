@@ -1,6 +1,6 @@
 """Tests for scripts/tagging/tagging_text — the markdown/JSON helpers the tagging
-scripts import off sys.path (module renamed from claude_cli to stop shadowing
-main.utils.claude_cli)."""
+scripts import off sys.path (module renamed from claude_cli so an unqualified import could
+never shadow main.utils.claude_cli)."""
 import sys
 from pathlib import Path
 
