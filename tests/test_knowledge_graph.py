@@ -182,6 +182,21 @@ def chain_graph(tmp_path):
                       "label": f"Mid {i}", "properties": {}})
         edges.append({"source": "entity:mid", "target": f"entity:mid{i}",
                       "type": "uses", "properties": {"mention_count": 1}})
+    # A well-connected (5 neighbours) entity whose neighbours each continue: the
+    # shape where the eligibility gate is the only thing withholding a chain.
+    nodes.append({"id": "entity:rich", "type": "Entity", "label": "Rich", "properties": {}})
+    for i in range(5):
+        nodes.append({"id": f"entity:r{i}", "type": "Entity", "label": f"R{i}", "properties": {}})
+        nodes.append({"id": f"entity:r{i}x", "type": "Entity", "label": f"R{i}x", "properties": {}})
+        edges.append({"source": "entity:rich", "target": f"entity:r{i}",
+                      "type": "uses", "properties": {"mention_count": 5 - i}})
+        edges.append({"source": f"entity:r{i}", "target": f"entity:r{i}x",
+                      "type": "uses", "properties": {"mention_count": 1}})
+    # R0 continues twice, so draining one neighbour's beam would spend the whole
+    # budget inside R0 instead of visiting R1.
+    nodes.append({"id": "entity:r0y", "type": "Entity", "label": "R0y", "properties": {}})
+    edges.append({"source": "entity:r0", "target": "entity:r0y",
+                  "type": "uses", "properties": {"mention_count": 1}})
     graph_file = tmp_path / "chain_graph.json"
     graph_file.write_text(json.dumps({"nodes": nodes, "edges": edges}))
     return KnowledgeGraph(graph_file)
@@ -247,14 +262,65 @@ class TestWalkTriples:
         assert len(triples) == 3
         assert all(t["depth"] == 2 for t in triples)
 
-    def test_limit_spreads_across_neighbours(self, chain_graph):
-        """Round-robin: a tight limit must not drain one neighbour's whole beam."""
-        triples = chain_graph.walk_triples(["entity:hub"], hops=1, limit=3, beam=4)
-        assert len({t["source"] for t in triples} | {t["target"] for t in triples}) > 2
+    def test_limit_spreads_across_a_multi_node_frontier(self, chain_graph):
+        """Round-robin: a tight limit must not drain the first frontier node's beam.
+
+        entity:rich has 5 neighbours that each continue one hop. With a budget of 2
+        second-hop facts, they must come from two different neighbours.
+        """
+        triples = chain_graph.walk_triples(["entity:rich"], limit=2, min_depth=2, hub_degree=99)
+        assert len(triples) == 2
+        assert len({t["source"] for t in triples}) == 2
+
+    def test_edge_between_two_neighbours_is_emitted(self, chain_graph):
+        """The edge joining two of the seed's own neighbours is a fact about the
+        seed's neighbourhood, and node-level dedup used to swallow it."""
+        graph = KnowledgeGraph({
+            "nodes": [{"id": f"entity:{n}", "type": "E", "label": n.upper(), "properties": {}}
+                      for n in ("s", "m1", "m2")],
+            "edges": [
+                {"source": "entity:s", "target": "entity:m1", "type": "uses",
+                 "properties": {"mention_count": 1}},
+                {"source": "entity:s", "target": "entity:m2", "type": "uses",
+                 "properties": {"mention_count": 1}},
+                {"source": "entity:m1", "target": "entity:m2", "type": "depends_on",
+                 "properties": {"mention_count": 9}},
+            ],
+        })
+        assert ("M1", "depends_on", "M2") in _labels(graph.walk_triples(["entity:s"]))
+
+    def test_symmetric_predicate_stops_at_depth_one(self, chain_graph):
+        graph = KnowledgeGraph({
+            "nodes": [{"id": f"entity:{n}", "type": "E", "label": n.upper(), "properties": {}}
+                      for n in ("s", "m", "far")],
+            "edges": [
+                {"source": "entity:s", "target": "entity:m", "type": "related_to",
+                 "properties": {"mention_count": 1}},
+                {"source": "entity:m", "target": "entity:far", "type": "related_to",
+                 "properties": {"mention_count": 9}},
+            ],
+        })
+        labels = _labels(graph.walk_triples(["entity:s"]))
+        assert ("S", "related_to", "M") in labels  # fine as a direct relation...
+        assert ("M", "related_to", "FAR") not in labels  # ...but says nothing at depth 2
 
     def test_edge_between_two_seeds_is_emitted(self, chain_graph):
         triples = chain_graph.walk_triples(["entity:refund_policy", "entity:ops_manager"])
         assert ("Refund Policy", "approved_by", "Ops Manager") in _labels(triples)
+
+    def test_every_seed_keeps_its_own_direct_facts(self, chain_graph):
+        """Two seeds pointing at the same node must both have their edge stated."""
+        graph = KnowledgeGraph({
+            "nodes": [{"id": f"entity:{n}", "type": "E", "label": n.upper(), "properties": {}}
+                      for n in ("s1", "s2", "n")],
+            "edges": [
+                {"source": "entity:s1", "target": "entity:n", "type": "uses", "properties": {}},
+                {"source": "entity:s2", "target": "entity:n", "type": "owns", "properties": {}},
+            ],
+        })
+        labels = _labels(graph.walk_triples(["entity:s1", "entity:s2"]))
+        assert ("S1", "uses", "N") in labels
+        assert ("S2", "owns", "N") in labels
 
     def test_each_node_reached_once(self, chain_graph):
         triples = chain_graph.walk_triples(["entity:refund_policy"], hops=3)
@@ -370,10 +436,34 @@ class TestWalkProvenance:
         assert ("Left", "uses", "Shared") in labels
         assert ("Shared", "uses", "Right") not in labels
 
-    def test_node_present_in_both_dirs_may_walk_both(self, two_corpora):
-        labels = _labels(two_corpora.walk_triples(["entity:shared"]))
-        assert ("Shared", "uses", "Right") in labels
-        assert ("Left", "uses", "Shared") in labels
+    def test_a_chain_never_starts_in_one_corpus_and_ends_in_another(self, two_corpora):
+        """A shared seed may reach either corpus, but never chain across the two."""
+        triples = two_corpora.walk_triples(["entity:shared"], hops=3)
+        for deep in [t for t in triples if t["depth"] > 1]:
+            near = [t for t in triples if t["depth"] == 1]
+            origins = two_corpora._edge_origins[(deep["source"], deep["target"], deep["predicate"])]
+            assert any(
+                origins & two_corpora._edge_origins[(n["source"], n["target"], n["predicate"])]
+                for n in near
+            )
+
+    def test_context_declines_a_chain_for_a_seed_in_two_corpora(self, two_corpora):
+        # The reader cannot tell which corpus a via: fact came from, so a node that
+        # exists in both gets its direct relations only.
+        assert "via:" not in (two_corpora.get_entity_context("entity:shared") or "")
+
+    def test_constructed_from_pre_parsed_pairs_keeps_directory_provenance(self, tmp_path):
+        """graph_loader parses each file for its staleness check and passes
+        ``(path, data)`` pairs — provenance must survive that, since it is the only
+        construction path the runtime uses."""
+        left = tmp_path / "left"
+        left.mkdir()
+        path = left / "a_llm_graph.json"
+        data = {"nodes": [{"id": "entity:a", "type": "E", "label": "A", "properties": {}}],
+                "edges": []}
+        path.write_text(json.dumps(data))
+        graph = KnowledgeGraph([(path, data)])
+        assert graph._origins == [str(left.resolve())]
 
 
 class TestEntityContextChain:
@@ -389,9 +479,14 @@ class TestEntityContextChain:
 
     def test_well_connected_entity_gets_no_chain(self, chain_graph):
         # The gate: a context already carrying its full quota of direct relations
-        # spends nothing on a second hop, which is where the drift lives.
-        ctx = chain_graph.get_entity_context("entity:hub")
-        assert "via:" not in ctx
+        # spends nothing on a second hop, which is where the drift lives. entity:rich
+        # has chain facts available (5 neighbours that each continue) and must still
+        # be refused them — remove the gate and this test fails.
+        assert chain_graph.walk_triples(["entity:rich"], min_depth=2, hub_degree=99)
+        assert "via:" not in chain_graph.get_entity_context("entity:rich")
+
+    def test_thin_entity_with_the_same_shape_does_get_a_chain(self, chain_graph):
+        assert "via:" in chain_graph.get_entity_context("entity:leaf")
 
     def test_context_without_chain_is_unchanged(self, llm_entity_graph):
         # No edges at all -> no "via:" segment, and the 1-hop shape is untouched.

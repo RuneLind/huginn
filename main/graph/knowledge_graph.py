@@ -35,26 +35,37 @@ class KnowledgeGraph:
         self.nodes: dict[str, dict] = {}
         self.outgoing: dict[str, list[dict]] = defaultdict(list)
         self.incoming: dict[str, list[dict]] = defaultdict(list)
-        # Which graph *directory* each node and edge came from. The runtime merges
-        # every discovered graph into ONE KnowledgeGraph (knowledge_store.
-        # _load_knowledge_graph), so an entity like entity:wcag can exist in two
-        # unrelated corpora at once. A multi-hop walk that ignored provenance would
-        # route through such a node and emit one corpus's facts into another's
-        # results. Grouped by directory, not file, because a collection's
-        # structural and LLM-extracted graphs sit side by side and do compose.
-        self._node_origins: dict[str, set[str]] = defaultdict(set)
-        self._edge_origins: dict[tuple[str, str, str], set[str]] = defaultdict(set)
+        # Which graph *directory* each node and edge came from, as a bitmask over
+        # `self._origins`. The runtime merges every discovered graph into ONE
+        # KnowledgeGraph (knowledge_store._load_knowledge_graph), so an entity like
+        # entity:wcag can exist in two unrelated corpora at once. A multi-hop walk
+        # that ignored provenance would route through such a node and emit one
+        # corpus's facts into another's results. Grouped by directory, not file,
+        # because a collection's structural and LLM-extracted graphs sit side by
+        # side and do compose. A mask rather than a set of strings because there are
+        # as many entries here as nodes plus edges.
+        self._origins: list[str] = []
+        self._node_origins: dict[str, int] = {}
+        self._edge_origins: dict[tuple[str, str, str], int] = {}
+        self._degree_cache: dict[str, int] = {}
 
         seen_edges: set[tuple[str, str, str]] = set()
-        for origin_index, path in enumerate(paths):
-            if isinstance(path, dict):
-                data = path
-                origin = f"dict:{origin_index}"
+        for entry_index, entry in enumerate(paths):
+            # (path, data) pairs let a caller that has already parsed the file — as
+            # graph_loader does for its staleness check — keep the single parse
+            # *and* the provenance the path carries.
+            if isinstance(entry, tuple):
+                path, data = entry
+            elif isinstance(entry, dict):
+                path, data = None, entry
             else:
-                data = json.loads(Path(path).read_text())
-                origin = str(Path(path).resolve().parent)
+                path, data = entry, json.loads(Path(entry).read_text())
+            origin = str(Path(path).resolve().parent) if path is not None else f"dict:{entry_index}"
+            if origin not in self._origins:
+                self._origins.append(origin)
+            origin_bit = 1 << self._origins.index(origin)
             for node in data["nodes"]:
-                self._node_origins[node["id"]].add(origin)
+                self._node_origins[node["id"]] = self._node_origins.get(node["id"], 0) | origin_bit
                 existing = self.nodes.get(node["id"])
                 if existing is None:
                     # Copy so a later file merging into this node never mutates
@@ -73,7 +84,7 @@ class KnowledgeGraph:
                 # Dedup edges by (source, target, type) so merging files that both
                 # carry the same edge doesn't double it in the adjacency lists.
                 edge_key = (edge["source"], edge["target"], edge["type"])
-                self._edge_origins[edge_key].add(origin)
+                self._edge_origins[edge_key] = self._edge_origins.get(edge_key, 0) | origin_bit
                 if edge_key in seen_edges:
                     continue
                 seen_edges.add(edge_key)
@@ -188,10 +199,10 @@ class KnowledgeGraph:
             node = self.nodes.get(node_id)
             if not node:
                 continue
-            node_type = node["type"]
+            node_type = node.get("type", "")
 
             # Add own label (but truncate long Jira labels)
-            label = node["label"]
+            label = self._label(node_id)
             if node_type in ("Epic", "Issue") and len(label) > 60:
                 label = label[:60]
             terms.append(label)
@@ -280,9 +291,15 @@ class KnowledgeGraph:
         than one typed edge, and counting those separately would read as
         "well-connected" a node the walk sees as having two neighbours.
         """
+        cached = self._degree_cache.get(node_id)
+        if cached is not None:
+            return cached
         neighbours = {e["target"] for e in self.outgoing.get(node_id, [])}
         neighbours |= {e["source"] for e in self.incoming.get(node_id, [])}
         neighbours.discard(node_id)
+        # Memoised: the graph is immutable after construction, and this is called
+        # once per frontier node per depth inside a per-result enrichment loop.
+        self._degree_cache[node_id] = len(neighbours)
         return len(neighbours)
 
     def _ranked_neighbours(self, node_id: str, direction: str | None = None):
@@ -302,6 +319,11 @@ class KnowledgeGraph:
         pairs.sort(key=lambda p: -self._edge_weight(p[1]))
         return pairs
 
+    # Predicates the extractors write as directed edges but which read the same
+    # both ways. Continuing the arrival direction says nothing about these, so a
+    # second hop through one is a sibling dressed as a chain.
+    SYMMETRIC_PREDICATES = frozenset({"related_to", "alternative_to"})
+
     def walk_triples(
         self,
         seed_ids: list[str],
@@ -318,17 +340,27 @@ class KnowledgeGraph:
         LLM-free — the point is to resolve a chain of facts *before* a model reads
         the results, instead of hoping it chains them across passages itself.
 
-        Three things keep a deeper hop meaningful rather than merely adjacent:
+        Four things keep a deeper hop meaningful rather than merely adjacent:
 
-        - **Direction is continued.** Past depth 1 only edges pointing the same way
-          we arrived are followed, so a depth-2 fact is a real chain
-          (``seed -> mid -> next``) and not one of ``mid``'s unrelated siblings,
-          which would read as a fact about the seed.
-        - **Provenance is respected.** Only edges from a graph directory the seed
-          itself appears in are traversable (see ``_node_origins``).
+        - **One corpus per chain.** The runtime merges every graph file into one
+          graph, so a node can sit in two unrelated corpora. Each branch of the walk
+          carries the origins shared by every edge it has crossed, so a chain never
+          starts in one corpus and finishes in another. A *seed* in two corpora can
+          still walk into either — which is why ``get_entity_context`` declines to
+          show a chain for one.
+        - **Direction is continued.** Past depth 1 only edges pointing the way we
+          arrived are followed, so a depth-2 fact is a real chain
+          (``seed -> mid -> next``) rather than one of ``mid``'s siblings, which
+          would read as a fact about the seed.
+        - **Symmetric predicates stop at depth 1** (``SYMMETRIC_PREDICATES``), where
+          continuing the direction is not evidence of anything.
         - **Hubs are not tunnelled through.** A node above ``hub_degree`` links
           everything, so a chain routed through one says nothing about the seed.
           Naming a hub as a *seed* still expands it — the caller asked for it.
+
+        Facts are de-duplicated per *edge*, not per node, so an edge joining two of
+        the seed's own neighbours — often the most informative fact available — is
+        still stated, while each node is expanded only once.
 
         ``min_depth`` drops nearer facts from the result *and* from the ``limit``
         budget, so a caller wanting only the second hop gets a full budget of it.
@@ -341,46 +373,38 @@ class KnowledgeGraph:
             return []
 
         seed_set = {nid for nid in seed_ids if nid in self.nodes}
-        allowed_origins: set[str] = set()
-        for node_id in seed_set:
-            allowed_origins |= self._node_origins.get(node_id, set())
-
-        seen = set(seed_ids)
+        seen = set(seed_set)
         emitted: set[tuple[str, str, str]] = set()
-        frontier = [(node_id, None) for node_id in seed_set]  # (node, arrival direction)
+        # (node, direction we arrived by, origins every edge on this branch shares)
+        frontier = [(nid, None, self._node_origins.get(nid, 0)) for nid in seed_set]
         triples: list[dict] = []
 
         for depth in range(1, hops + 1):
             queues = [
-                (node_id, iter(self._ranked_neighbours(node_id, arrived_by)))
-                for node_id, arrived_by in frontier
+                (allowed, iter(self._ranked_neighbours(node_id, arrived_by)))
+                for node_id, arrived_by, allowed in frontier
                 if depth == 1 or self.degree(node_id) <= hub_degree
             ]
-            next_frontier: list[tuple[str, str]] = []
+            next_frontier: list[tuple[str, str, int]] = []
             # Round-robin over the frontier so a tight limit spreads across several
             # neighbours instead of draining the strongest one's whole beam.
             for _ in range(beam):
-                for node_id, neighbours in queues:
+                for allowed, neighbours in queues:
                     for neighbour_id, edge, (src, tgt), direction in neighbours:
                         if neighbour_id not in self.nodes:
                             continue
-                        # An edge between two seeds is worth stating — it is the
-                        # relation the caller named both ends of — but the seed is
-                        # already on the frontier, so don't re-expand it.
-                        seed_link = depth == 1 and neighbour_id in seed_set
-                        if neighbour_id in seen and not seed_link:
+                        if depth > 1 and edge["type"] in self.SYMMETRIC_PREDICATES:
                             continue
                         edge_key = (edge["source"], edge["target"], edge["type"])
                         if edge_key in emitted:
                             continue
-                        if allowed_origins and not (
-                            self._edge_origins.get(edge_key, set()) & allowed_origins
-                        ):
+                        shared = allowed & self._edge_origins.get(edge_key, 0)
+                        if not shared:
                             continue
                         emitted.add(edge_key)
-                        if not seed_link:
+                        if neighbour_id not in seen:
                             seen.add(neighbour_id)
-                            next_frontier.append((neighbour_id, direction))
+                            next_frontier.append((neighbour_id, direction, shared))
                         if depth >= min_depth:
                             triples.append({
                                 "source": src,
@@ -471,7 +495,7 @@ class KnowledgeGraph:
         elif node_id.startswith("entity:"):
             # LLM-extracted entity
             mentions = node.get("properties", {}).get("mention_count", 0)
-            parts.append(f"{node['label']} ({node_type})")
+            parts.append(f"{self._label(node_id)} ({node_type})")
             # Show key relationships
             related = []
             for edge in self.outgoing.get(node_id, []):
@@ -491,7 +515,11 @@ class KnowledgeGraph:
             # where the drift lives. Measured over the merged production graphs: half
             # the entities gain a chain, at a mean cost of ~8 tokens per 5-result
             # response (p90 ~30, max ~96) and 0.012 ms per context.
-            if self.degree(node_id) < self.CONTEXT_CHAIN_MIN_RELATIONS:
+            # A seed that exists in more than one corpus can chain into either, and
+            # the reader has no way to tell which one a fact came from — so it gets
+            # the direct relations only.
+            single_corpus = self._node_origins.get(node_id, 0).bit_count() == 1
+            if single_corpus and self.degree(node_id) < self.CONTEXT_CHAIN_MIN_RELATIONS:
                 chain = [
                     f"{t['source_label']} {t['predicate']} {t['target_label']}"
                     for t in self.walk_triples(
