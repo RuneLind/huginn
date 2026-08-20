@@ -135,6 +135,123 @@ class TestLlmEntityWordBoundary:
         assert nav == ["NAV"]
 
 
+@pytest.fixture
+def chain_graph(tmp_path):
+    """Entity graph with a 2-hop chain and one hub, mirroring the extracted graphs.
+
+    ``entity:hub`` stands in for a node like ``entity:claude_code`` (541 edges in
+    the real youtube-summaries graph): everything links to it, so walking *through*
+    it would pull unrelated facts into every context.
+    """
+    nodes = [
+        {"id": "entity:refund_policy", "type": "Policy", "label": "Refund Policy", "properties": {}},
+        {"id": "entity:ops_manager", "type": "Role", "label": "Ops Manager", "properties": {}},
+        {"id": "entity:sarah", "type": "Person", "label": "Sarah", "properties": {"mention_count": 4}},
+        {"id": "entity:marcus", "type": "Person", "label": "Marcus", "properties": {}},
+        {"id": "entity:hub", "type": "Product", "label": "Hub", "properties": {}},
+    ]
+    edges = [
+        {"source": "entity:refund_policy", "target": "entity:ops_manager",
+         "type": "approved_by", "properties": {"mention_count": 5}},
+        {"source": "entity:ops_manager", "target": "entity:sarah",
+         "type": "held_by", "properties": {"mention_count": 4}},
+        {"source": "entity:sarah", "target": "entity:marcus",
+         "type": "delegates_to", "properties": {"mention_count": 3}},
+        # The hub is one hop from the policy and one hop from many unrelated nodes.
+        {"source": "entity:refund_policy", "target": "entity:hub",
+         "type": "related_to", "properties": {"mention_count": 1}},
+    ]
+    for i in range(60):
+        nodes.append({"id": f"entity:noise{i}", "type": "Entity",
+                      "label": f"Noise {i}", "properties": {}})
+        edges.append({"source": "entity:hub", "target": f"entity:noise{i}",
+                      "type": "related_to", "properties": {"mention_count": 2}})
+    # A thin entity one hop from a well-connected (but not hub-sized) node: the
+    # shape where the second hop carries more facts than the chain cap allows.
+    nodes.append({"id": "entity:leaf", "type": "Entity", "label": "Leaf", "properties": {}})
+    nodes.append({"id": "entity:mid", "type": "Entity", "label": "Mid", "properties": {}})
+    edges.append({"source": "entity:leaf", "target": "entity:mid",
+                  "type": "uses", "properties": {"mention_count": 3}})
+    for i in range(6):
+        nodes.append({"id": f"entity:mid{i}", "type": "Entity",
+                      "label": f"Mid {i}", "properties": {}})
+        edges.append({"source": "entity:mid", "target": f"entity:mid{i}",
+                      "type": "uses", "properties": {"mention_count": 1}})
+    graph_file = tmp_path / "chain_graph.json"
+    graph_file.write_text(json.dumps({"nodes": nodes, "edges": edges}))
+    return KnowledgeGraph(graph_file)
+
+
+class TestWalkTriples:
+    def test_reaches_second_hop(self, chain_graph):
+        triples = chain_graph.walk_triples(["entity:refund_policy"])
+        assert ("Ops Manager", "held_by", "Sarah", 2) in triples
+
+    def test_triples_are_depth_ordered(self, chain_graph):
+        depths = [d for _, _, _, d in chain_graph.walk_triples(["entity:refund_policy"])]
+        assert depths == sorted(depths)
+
+    def test_hops_bound_the_walk(self, chain_graph):
+        # Marcus is 3 hops out (policy -> role -> Sarah -> Marcus), past the default.
+        labels = {t for _, _, t, _ in chain_graph.walk_triples(["entity:refund_policy"])}
+        assert "Marcus" not in labels
+        deeper = {t for _, _, t, _ in chain_graph.walk_triples(["entity:refund_policy"], hops=3)}
+        assert "Marcus" in deeper
+
+    def test_does_not_expand_through_a_hub(self, chain_graph):
+        labels = {t for _, _, t, _ in chain_graph.walk_triples(["entity:refund_policy"])}
+        assert "Hub" in labels  # reached as a direct neighbour...
+        assert not any(label.startswith("Noise") for label in labels)  # ...but not walked through
+
+    def test_hub_seed_is_still_expanded(self, chain_graph):
+        # The hub rule is about walking *through* a hub, not about naming one.
+        triples = chain_graph.walk_triples(["entity:hub"])
+        assert triples and any(t.startswith("Noise") for _, _, t, _ in triples)
+
+    def test_strongest_edges_first(self, chain_graph):
+        # entity:hub's noise edges (mention_count 2) outrank the policy edge (1).
+        first = chain_graph.walk_triples(["entity:hub"], hops=1, beam=1)
+        assert first[0][2].startswith("Noise")
+
+    def test_limit_caps_total_triples(self, chain_graph):
+        assert len(chain_graph.walk_triples(["entity:hub"], limit=3)) == 3
+
+    def test_no_duplicate_nodes(self, chain_graph):
+        triples = chain_graph.walk_triples(["entity:refund_policy", "entity:ops_manager"])
+        reached = [t for _, _, t, _ in triples]
+        assert len(reached) == len(set(reached))
+
+    def test_unknown_seed_yields_nothing(self, chain_graph):
+        assert chain_graph.walk_triples(["entity:nope"]) == []
+
+    def test_isolated_seed_yields_nothing(self, sample_graph):
+        assert sample_graph.walk_triples(["forordning:883/2004"], hops=1, beam=0) == []
+
+
+class TestEntityContextChain:
+    def test_context_includes_second_hop_chain(self, chain_graph):
+        ctx = chain_graph.get_entity_context("entity:refund_policy")
+        assert "via:" in ctx
+        assert "Ops Manager held_by Sarah" in ctx
+
+    def test_context_chain_is_capped(self, chain_graph):
+        ctx = chain_graph.get_entity_context("entity:leaf")
+        via = ctx.split("via: ", 1)[1]
+        # entity:mid has 6 further neighbours; only CONTEXT_CHAIN_LIMIT are carried.
+        assert len(via.split(", ")) == KnowledgeGraph.CONTEXT_CHAIN_LIMIT
+
+    def test_well_connected_entity_gets_no_chain(self, chain_graph):
+        # The gate: a context already carrying its full quota of direct relations
+        # spends nothing on a second hop, which is where the drift lives.
+        ctx = chain_graph.get_entity_context("entity:hub")
+        assert "via:" not in ctx
+
+    def test_context_without_chain_is_unchanged(self, llm_entity_graph):
+        # No edges at all -> no "via:" segment, and the 1-hop shape is untouched.
+        ctx = llm_entity_graph.get_entity_context("entity:nav")
+        assert ctx == "NAV (Entity)"
+
+
 class TestQueryExpansion:
     def test_expansion_includes_node_label(self, sample_graph):
         terms = sample_graph.get_expansion_terms(["buc:LA_BUC_01"])

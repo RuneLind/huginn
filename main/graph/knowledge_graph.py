@@ -229,7 +229,87 @@ class KnowledgeGraph:
 
         return list(dict.fromkeys(terms))
 
+    # --- Bounded multi-hop walk ---
+
+    # A multi-hop walk over the extracted entity graph is only useful when it is
+    # bounded twice over, because that graph is hub-dominated: in the
+    # youtube-summaries graph the median node has degree 1, while the busiest
+    # node carries 541 edges and reaches 1285 nodes within two hops. Unbounded,
+    # a walk either floods the context from a hub seed or drags every seed back
+    # to the same hub ("X built_by Y" surfacing under unrelated queries).
+    WALK_HOPS = 2
+    WALK_BEAM = 4  # distinct new neighbours taken per node, strongest edge first
+    WALK_LIMIT = 8  # total triples returned
+    WALK_HUB_DEGREE = 40  # never expand *through* a node this connected
+
+    def degree(self, node_id: str) -> int:
+        return len(self.outgoing.get(node_id, [])) + len(self.incoming.get(node_id, []))
+
+    def _ranked_neighbours(self, node_id: str) -> list[tuple[str, dict, tuple[str, str]]]:
+        """(neighbour_id, edge, (source_id, target_id)) both directions, strongest edge first.
+
+        Edges are ranked by ``mention_count`` so the beam keeps the relationships
+        the corpus states repeatedly rather than whichever one was extracted first.
+        The oriented pair is carried along so the triple reads in the direction the
+        edge was actually extracted, regardless of which way we traversed it.
+        """
+        pairs = [(e["target"], e, (node_id, e["target"])) for e in self.outgoing.get(node_id, [])]
+        pairs += [(e["source"], e, (e["source"], node_id)) for e in self.incoming.get(node_id, [])]
+        pairs.sort(key=lambda p: -(p[1].get("properties") or {}).get("mention_count", 0))
+        return pairs
+
+    def walk_triples(
+        self,
+        seed_ids: list[str],
+        hops: int | None = None,
+        beam: int | None = None,
+        limit: int | None = None,
+        hub_degree: int | None = None,
+    ) -> list[tuple[str, str, str, int]]:
+        """Walk out from ``seed_ids`` and return ``(source, predicate, target, depth)``.
+
+        Breadth-first, so triples come back nearest-first; ``depth`` is the hop at
+        which the triple was reached (1 = directly on a seed). Deterministic and
+        LLM-free — the point is to resolve a chain of facts *before* a model reads
+        the results, instead of hoping it chains them itself across passages.
+        """
+        hops = self.WALK_HOPS if hops is None else hops
+        beam = self.WALK_BEAM if beam is None else beam
+        limit = self.WALK_LIMIT if limit is None else limit
+        hub_degree = self.WALK_HUB_DEGREE if hub_degree is None else hub_degree
+
+        seen = set(seed_ids)
+        frontier = [nid for nid in seed_ids if nid in self.nodes]
+        triples: list[tuple[str, str, str, int]] = []
+
+        for depth in range(1, hops + 1):
+            next_frontier: list[str] = []
+            for node_id in frontier:
+                # The seeds themselves are always expanded — the caller named them.
+                if depth > 1 and self.degree(node_id) > hub_degree:
+                    continue
+                taken = 0
+                for neighbour_id, edge, (src, tgt) in self._ranked_neighbours(node_id):
+                    if taken >= beam:
+                        break
+                    if neighbour_id in seen or neighbour_id not in self.nodes:
+                        continue
+                    seen.add(neighbour_id)
+                    taken += 1
+                    triples.append(
+                        (self.nodes[src]["label"], edge["type"], self.nodes[tgt]["label"], depth)
+                    )
+                    next_frontier.append(neighbour_id)
+                    if len(triples) >= limit:
+                        return triples
+            frontier = next_frontier
+
+        return triples
+
     # --- Context enrichment ---
+
+    CONTEXT_CHAIN_LIMIT = 3  # second-hop facts appended to an entity context
+    CONTEXT_CHAIN_MIN_RELATIONS = 5  # only a context this thin gets a second hop
 
     def get_entity_context(self, node_id: str) -> str | None:
         """Return a human-readable context string for a graph entity."""
@@ -313,6 +393,21 @@ class KnowledgeGraph:
                     related.append(f"{source['label']} {edge['type']}")
             if related:
                 parts.append(", ".join(related[:5]))
+            # Second hop, but only for a thinly-connected entity. A passage rarely
+            # states a whole chain, so for a leaf ("Vector Search") the second hop
+            # is the only place the context says anything at all. A well-connected
+            # entity already spends its budget on the relations above, and its
+            # second hop drifts off-topic — measured on the youtube-summaries graph,
+            # the chain for a hub reads "CLAUDE.md related_to Vercel" while the
+            # chain for a leaf reads "Claude Mem implements Persistent Memory".
+            if len(related) < self.CONTEXT_CHAIN_MIN_RELATIONS:
+                chain = [
+                    f"{src} {pred} {tgt}"
+                    for src, pred, tgt, depth in self.walk_triples([node_id])
+                    if depth > 1
+                ]
+                if chain:
+                    parts.append("via: " + ", ".join(chain[: self.CONTEXT_CHAIN_LIMIT]))
             if mentions > 1:
                 parts.append(f"{mentions} mentions")
 
