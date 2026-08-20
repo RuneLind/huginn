@@ -35,11 +35,26 @@ class KnowledgeGraph:
         self.nodes: dict[str, dict] = {}
         self.outgoing: dict[str, list[dict]] = defaultdict(list)
         self.incoming: dict[str, list[dict]] = defaultdict(list)
+        # Which graph *directory* each node and edge came from. The runtime merges
+        # every discovered graph into ONE KnowledgeGraph (knowledge_store.
+        # _load_knowledge_graph), so an entity like entity:wcag can exist in two
+        # unrelated corpora at once. A multi-hop walk that ignored provenance would
+        # route through such a node and emit one corpus's facts into another's
+        # results. Grouped by directory, not file, because a collection's
+        # structural and LLM-extracted graphs sit side by side and do compose.
+        self._node_origins: dict[str, set[str]] = defaultdict(set)
+        self._edge_origins: dict[tuple[str, str, str], set[str]] = defaultdict(set)
 
         seen_edges: set[tuple[str, str, str]] = set()
-        for path in paths:
-            data = path if isinstance(path, dict) else json.loads(Path(path).read_text())
+        for origin_index, path in enumerate(paths):
+            if isinstance(path, dict):
+                data = path
+                origin = f"dict:{origin_index}"
+            else:
+                data = json.loads(Path(path).read_text())
+                origin = str(Path(path).resolve().parent)
             for node in data["nodes"]:
+                self._node_origins[node["id"]].add(origin)
                 existing = self.nodes.get(node["id"])
                 if existing is None:
                     # Copy so a later file merging into this node never mutates
@@ -58,6 +73,7 @@ class KnowledgeGraph:
                 # Dedup edges by (source, target, type) so merging files that both
                 # carry the same edge doesn't double it in the adjacency lists.
                 edge_key = (edge["source"], edge["target"], edge["type"])
+                self._edge_origins[edge_key].add(origin)
                 if edge_key in seen_edges:
                     continue
                 seen_edges.add(edge_key)
@@ -70,8 +86,12 @@ class KnowledgeGraph:
         # "nav" in "navnet", "sed" in "used"). Patterns are compiled once here.
         self._entity_patterns = []
         for node_id, node in self.nodes.items():
-            if node_id.startswith(ENTITY_PREFIX) and len(node["label"]) >= 3:
-                pattern = re.compile(rf'(?<!\w){re.escape(node["label"])}(?!\w)', re.IGNORECASE)
+            # A node without a label is malformed rather than impossible — graphs are
+            # merged from whatever JSON the extractors wrote — and it used to raise
+            # here, taking down graph loading for every collection at once.
+            label = node.get("label") or ""
+            if node_id.startswith(ENTITY_PREFIX) and len(label) >= 3:
+                pattern = re.compile(rf'(?<!\w){re.escape(label)}(?!\w)', re.IGNORECASE)
                 self._entity_patterns.append((pattern, node_id))
 
     def node_count(self) -> int:
@@ -231,31 +251,55 @@ class KnowledgeGraph:
 
     # --- Bounded multi-hop walk ---
 
-    # A multi-hop walk over the extracted entity graph is only useful when it is
-    # bounded twice over, because that graph is hub-dominated: in the
-    # youtube-summaries graph the median node has degree 1, while the busiest
-    # node carries 541 edges and reaches 1285 nodes within two hops. Unbounded,
-    # a walk either floods the context from a hub seed or drags every seed back
-    # to the same hub ("X built_by Y" surfacing under unrelated queries).
+    # A multi-hop walk over the merged entity graph is only useful when it is
+    # bounded, because that graph is hub-dominated: over the 5 graph files the
+    # runtime merges (13.2k nodes / 20.5k edges) the distinct-neighbour degree runs
+    # p50 1, p90 5, p99 24, max 1100. Unbounded, a walk either floods the context
+    # from a hub seed or drags every seed back to the same hub.
     WALK_HOPS = 2
-    WALK_BEAM = 4  # distinct new neighbours taken per node, strongest edge first
+    WALK_BEAM = 4  # neighbours taken per node per depth, strongest edge first
     WALK_LIMIT = 8  # total triples returned
-    WALK_HUB_DEGREE = 40  # never expand *through* a node this connected
+    WALK_HUB_DEGREE = 20  # never expand *through* a node this connected (p99; 164 nodes)
+
+    @staticmethod
+    def _edge_weight(edge: dict) -> int:
+        """``mention_count`` as an int. Graphs are merged from arbitrary JSON, so a
+        missing, null or non-numeric value must not take down a search request."""
+        raw = (edge.get("properties") or {}).get("mention_count", 0)
+        return raw if isinstance(raw, int) and not isinstance(raw, bool) else 0
+
+    def _label(self, node_id: str) -> str:
+        """Display label, falling back to the id for a node that lacks one."""
+        return self.nodes.get(node_id, {}).get("label") or node_id
 
     def degree(self, node_id: str) -> int:
-        return len(self.outgoing.get(node_id, [])) + len(self.incoming.get(node_id, []))
+        """Distinct neighbours — parallel edges and self-loops counted once.
 
-    def _ranked_neighbours(self, node_id: str) -> list[tuple[str, dict, tuple[str, str]]]:
-        """(neighbour_id, edge, (source_id, target_id)) both directions, strongest edge first.
-
-        Edges are ranked by ``mention_count`` so the beam keeps the relationships
-        the corpus states repeatedly rather than whichever one was extracted first.
-        The oriented pair is carried along so the triple reads in the direction the
-        edge was actually extracted, regardless of which way we traversed it.
+        Distinct neighbours rather than edge count because that is what the walk
+        actually traverses: 328 node pairs in the merged graph are joined by more
+        than one typed edge, and counting those separately would read as
+        "well-connected" a node the walk sees as having two neighbours.
         """
-        pairs = [(e["target"], e, (node_id, e["target"])) for e in self.outgoing.get(node_id, [])]
-        pairs += [(e["source"], e, (e["source"], node_id)) for e in self.incoming.get(node_id, [])]
-        pairs.sort(key=lambda p: -(p[1].get("properties") or {}).get("mention_count", 0))
+        neighbours = {e["target"] for e in self.outgoing.get(node_id, [])}
+        neighbours |= {e["source"] for e in self.incoming.get(node_id, [])}
+        neighbours.discard(node_id)
+        return len(neighbours)
+
+    def _ranked_neighbours(self, node_id: str, direction: str | None = None):
+        """``(neighbour_id, edge, (source_id, target_id), direction)``, strongest first.
+
+        ``direction`` restricts traversal to outgoing or incoming edges only.
+        Ranking by ``mention_count`` keeps the relationships the corpus states
+        repeatedly rather than whichever one was extracted first.
+        """
+        pairs = []
+        if direction in (None, "out"):
+            pairs += [(e["target"], e, (node_id, e["target"]), "out")
+                      for e in self.outgoing.get(node_id, [])]
+        if direction in (None, "in"):
+            pairs += [(e["source"], e, (e["source"], node_id), "in")
+                      for e in self.incoming.get(node_id, [])]
+        pairs.sort(key=lambda p: -self._edge_weight(p[1]))
         return pairs
 
     def walk_triples(
@@ -265,43 +309,90 @@ class KnowledgeGraph:
         beam: int | None = None,
         limit: int | None = None,
         hub_degree: int | None = None,
-    ) -> list[tuple[str, str, str, int]]:
-        """Walk out from ``seed_ids`` and return ``(source, predicate, target, depth)``.
+        min_depth: int = 1,
+    ) -> list[dict]:
+        """Walk out from ``seed_ids``; return facts as dicts, nearest-first.
 
-        Breadth-first, so triples come back nearest-first; ``depth`` is the hop at
-        which the triple was reached (1 = directly on a seed). Deterministic and
+        Each dict carries ``source``/``target`` ids, ``source_label``/``target_label``,
+        ``predicate`` and ``depth`` (1 = directly on a seed). Deterministic and
         LLM-free — the point is to resolve a chain of facts *before* a model reads
-        the results, instead of hoping it chains them itself across passages.
+        the results, instead of hoping it chains them across passages itself.
+
+        Three things keep a deeper hop meaningful rather than merely adjacent:
+
+        - **Direction is continued.** Past depth 1 only edges pointing the same way
+          we arrived are followed, so a depth-2 fact is a real chain
+          (``seed -> mid -> next``) and not one of ``mid``'s unrelated siblings,
+          which would read as a fact about the seed.
+        - **Provenance is respected.** Only edges from a graph directory the seed
+          itself appears in are traversable (see ``_node_origins``).
+        - **Hubs are not tunnelled through.** A node above ``hub_degree`` links
+          everything, so a chain routed through one says nothing about the seed.
+          Naming a hub as a *seed* still expands it — the caller asked for it.
+
+        ``min_depth`` drops nearer facts from the result *and* from the ``limit``
+        budget, so a caller wanting only the second hop gets a full budget of it.
         """
         hops = self.WALK_HOPS if hops is None else hops
         beam = self.WALK_BEAM if beam is None else beam
         limit = self.WALK_LIMIT if limit is None else limit
         hub_degree = self.WALK_HUB_DEGREE if hub_degree is None else hub_degree
+        if limit <= 0 or beam <= 0 or hops <= 0:
+            return []
+
+        seed_set = {nid for nid in seed_ids if nid in self.nodes}
+        allowed_origins: set[str] = set()
+        for node_id in seed_set:
+            allowed_origins |= self._node_origins.get(node_id, set())
 
         seen = set(seed_ids)
-        frontier = [nid for nid in seed_ids if nid in self.nodes]
-        triples: list[tuple[str, str, str, int]] = []
+        emitted: set[tuple[str, str, str]] = set()
+        frontier = [(node_id, None) for node_id in seed_set]  # (node, arrival direction)
+        triples: list[dict] = []
 
         for depth in range(1, hops + 1):
-            next_frontier: list[str] = []
-            for node_id in frontier:
-                # The seeds themselves are always expanded — the caller named them.
-                if depth > 1 and self.degree(node_id) > hub_degree:
-                    continue
-                taken = 0
-                for neighbour_id, edge, (src, tgt) in self._ranked_neighbours(node_id):
-                    if taken >= beam:
-                        break
-                    if neighbour_id in seen or neighbour_id not in self.nodes:
-                        continue
-                    seen.add(neighbour_id)
-                    taken += 1
-                    triples.append(
-                        (self.nodes[src]["label"], edge["type"], self.nodes[tgt]["label"], depth)
-                    )
-                    next_frontier.append(neighbour_id)
-                    if len(triples) >= limit:
-                        return triples
+            queues = [
+                (node_id, iter(self._ranked_neighbours(node_id, arrived_by)))
+                for node_id, arrived_by in frontier
+                if depth == 1 or self.degree(node_id) <= hub_degree
+            ]
+            next_frontier: list[tuple[str, str]] = []
+            # Round-robin over the frontier so a tight limit spreads across several
+            # neighbours instead of draining the strongest one's whole beam.
+            for _ in range(beam):
+                for node_id, neighbours in queues:
+                    for neighbour_id, edge, (src, tgt), direction in neighbours:
+                        if neighbour_id not in self.nodes:
+                            continue
+                        # An edge between two seeds is worth stating — it is the
+                        # relation the caller named both ends of — but the seed is
+                        # already on the frontier, so don't re-expand it.
+                        seed_link = depth == 1 and neighbour_id in seed_set
+                        if neighbour_id in seen and not seed_link:
+                            continue
+                        edge_key = (edge["source"], edge["target"], edge["type"])
+                        if edge_key in emitted:
+                            continue
+                        if allowed_origins and not (
+                            self._edge_origins.get(edge_key, set()) & allowed_origins
+                        ):
+                            continue
+                        emitted.add(edge_key)
+                        if not seed_link:
+                            seen.add(neighbour_id)
+                            next_frontier.append((neighbour_id, direction))
+                        if depth >= min_depth:
+                            triples.append({
+                                "source": src,
+                                "source_label": self._label(src),
+                                "predicate": edge["type"],
+                                "target": tgt,
+                                "target_label": self._label(tgt),
+                                "depth": depth,
+                            })
+                            if len(triples) >= limit:
+                                return triples
+                        break  # this node has used its turn in the round
             frontier = next_frontier
 
         return triples
@@ -309,7 +400,7 @@ class KnowledgeGraph:
     # --- Context enrichment ---
 
     CONTEXT_CHAIN_LIMIT = 3  # second-hop facts appended to an entity context
-    CONTEXT_CHAIN_MIN_RELATIONS = 5  # only a context this thin gets a second hop
+    CONTEXT_CHAIN_MIN_RELATIONS = 5  # only a seed with fewer neighbours gets a second hop
 
     def get_entity_context(self, node_id: str) -> str | None:
         """Return a human-readable context string for a graph entity."""
@@ -394,20 +485,21 @@ class KnowledgeGraph:
             if related:
                 parts.append(", ".join(related[:5]))
             # Second hop, but only for a thinly-connected entity. A passage rarely
-            # states a whole chain, so for a leaf ("Vector Search") the second hop
-            # is the only place the context says anything at all. A well-connected
-            # entity already spends its budget on the relations above, and its
-            # second hop drifts off-topic — measured on the youtube-summaries graph,
-            # the chain for a hub reads "CLAUDE.md related_to Vercel" while the
-            # chain for a leaf reads "Claude Mem implements Persistent Memory".
-            if len(related) < self.CONTEXT_CHAIN_MIN_RELATIONS:
+            # states a whole chain, so for a leaf the second hop is the only place
+            # the context says anything beyond a name. A well-connected entity has
+            # already spent its budget on the relations above, and its second hop is
+            # where the drift lives. Measured over the merged production graphs: half
+            # the entities gain a chain, at a mean cost of ~8 tokens per 5-result
+            # response (p90 ~30, max ~96) and 0.012 ms per context.
+            if self.degree(node_id) < self.CONTEXT_CHAIN_MIN_RELATIONS:
                 chain = [
-                    f"{src} {pred} {tgt}"
-                    for src, pred, tgt, depth in self.walk_triples([node_id])
-                    if depth > 1
+                    f"{t['source_label']} {t['predicate']} {t['target_label']}"
+                    for t in self.walk_triples(
+                        [node_id], limit=self.CONTEXT_CHAIN_LIMIT, min_depth=2
+                    )
                 ]
                 if chain:
-                    parts.append("via: " + ", ".join(chain[: self.CONTEXT_CHAIN_LIMIT]))
+                    parts.append("via: " + ", ".join(chain))
             if mentions > 1:
                 parts.append(f"{mentions} mentions")
 

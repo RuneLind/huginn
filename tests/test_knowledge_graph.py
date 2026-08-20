@@ -137,11 +137,11 @@ class TestLlmEntityWordBoundary:
 
 @pytest.fixture
 def chain_graph(tmp_path):
-    """Entity graph with a 2-hop chain and one hub, mirroring the extracted graphs.
+    """Entity graph with a 2-hop chain, a hub, and sibling edges.
 
-    ``entity:hub`` stands in for a node like ``entity:claude_code`` (541 edges in
-    the real youtube-summaries graph): everything links to it, so walking *through*
-    it would pull unrelated facts into every context.
+    ``entity:hub`` stands in for a node like ``entity:claude_code`` (hundreds of
+    edges in the real graphs): everything links to it, so walking *through* it
+    would pull unrelated facts into every context.
     """
     nodes = [
         {"id": "entity:refund_policy", "type": "Policy", "label": "Refund Policy", "properties": {}},
@@ -149,6 +149,7 @@ def chain_graph(tmp_path):
         {"id": "entity:sarah", "type": "Person", "label": "Sarah", "properties": {"mention_count": 4}},
         {"id": "entity:marcus", "type": "Person", "label": "Marcus", "properties": {}},
         {"id": "entity:hub", "type": "Product", "label": "Hub", "properties": {}},
+        {"id": "entity:payroll", "type": "Policy", "label": "Payroll", "properties": {}},
     ]
     edges = [
         {"source": "entity:refund_policy", "target": "entity:ops_manager",
@@ -157,6 +158,10 @@ def chain_graph(tmp_path):
          "type": "held_by", "properties": {"mention_count": 4}},
         {"source": "entity:sarah", "target": "entity:marcus",
          "type": "delegates_to", "properties": {"mention_count": 3}},
+        # A sibling of the chain: Payroll also points *into* ops_manager, so it is
+        # two hops from the policy but says nothing about it.
+        {"source": "entity:payroll", "target": "entity:ops_manager",
+         "type": "approved_by", "properties": {"mention_count": 9}},
         # The hub is one hop from the policy and one hop from many unrelated nodes.
         {"source": "entity:refund_policy", "target": "entity:hub",
          "type": "related_to", "properties": {"mention_count": 1}},
@@ -182,57 +187,199 @@ def chain_graph(tmp_path):
     return KnowledgeGraph(graph_file)
 
 
+def _labels(triples):
+    return {(t["source_label"], t["predicate"], t["target_label"]) for t in triples}
+
+
 class TestWalkTriples:
     def test_reaches_second_hop(self, chain_graph):
         triples = chain_graph.walk_triples(["entity:refund_policy"])
-        assert ("Ops Manager", "held_by", "Sarah", 2) in triples
+        assert ("Ops Manager", "held_by", "Sarah") in _labels(triples)
 
     def test_triples_are_depth_ordered(self, chain_graph):
-        depths = [d for _, _, _, d in chain_graph.walk_triples(["entity:refund_policy"])]
+        depths = [t["depth"] for t in chain_graph.walk_triples(["entity:refund_policy"])]
         assert depths == sorted(depths)
 
+    def test_triples_carry_node_ids(self, chain_graph):
+        first = chain_graph.walk_triples(["entity:refund_policy"], limit=1)[0]
+        assert first["source"] == "entity:refund_policy"
+        assert first["target"] == "entity:ops_manager"
+
     def test_hops_bound_the_walk(self, chain_graph):
-        # Marcus is 3 hops out (policy -> role -> Sarah -> Marcus), past the default.
-        labels = {t for _, _, t, _ in chain_graph.walk_triples(["entity:refund_policy"])}
-        assert "Marcus" not in labels
-        deeper = {t for _, _, t, _ in chain_graph.walk_triples(["entity:refund_policy"], hops=3)}
+        labels = {t["target_label"] for t in chain_graph.walk_triples(["entity:refund_policy"])}
+        assert "Marcus" not in labels  # 3 hops out, past the default
+        deeper = {t["target_label"]
+                  for t in chain_graph.walk_triples(["entity:refund_policy"], hops=3)}
         assert "Marcus" in deeper
 
+    def test_second_hop_continues_direction(self, chain_graph):
+        """A depth-2 fact must chain off the seed, not be a sibling of the neighbour."""
+        triples = chain_graph.walk_triples(["entity:refund_policy"])
+        # Payroll --approved_by--> Ops Manager is the strongest edge on ops_manager,
+        # but it points the wrong way: it is a fact about Payroll, not the policy.
+        assert ("Payroll", "approved_by", "Ops Manager") not in _labels(triples)
+        assert ("Ops Manager", "held_by", "Sarah") in _labels(triples)
+
     def test_does_not_expand_through_a_hub(self, chain_graph):
-        labels = {t for _, _, t, _ in chain_graph.walk_triples(["entity:refund_policy"])}
+        labels = {t["target_label"] for t in chain_graph.walk_triples(["entity:refund_policy"])}
         assert "Hub" in labels  # reached as a direct neighbour...
-        assert not any(label.startswith("Noise") for label in labels)  # ...but not walked through
+        assert not any(label.startswith("Noise") for label in labels)  # ...never walked through
 
     def test_hub_seed_is_still_expanded(self, chain_graph):
-        # The hub rule is about walking *through* a hub, not about naming one.
+        # The rule is about walking *through* a hub, not about naming one.
         triples = chain_graph.walk_triples(["entity:hub"])
-        assert triples and any(t.startswith("Noise") for _, _, t, _ in triples)
+        assert triples and any(t["target_label"].startswith("Noise") for t in triples)
 
     def test_strongest_edges_first(self, chain_graph):
         # entity:hub's noise edges (mention_count 2) outrank the policy edge (1).
         first = chain_graph.walk_triples(["entity:hub"], hops=1, beam=1)
-        assert first[0][2].startswith("Noise")
+        assert first[0]["target_label"].startswith("Noise")
 
     def test_limit_caps_total_triples(self, chain_graph):
         assert len(chain_graph.walk_triples(["entity:hub"], limit=3)) == 3
 
-    def test_no_duplicate_nodes(self, chain_graph):
+    def test_zero_and_negative_bounds_yield_nothing(self, chain_graph):
+        for kwargs in ({"limit": 0}, {"limit": -1}, {"beam": 0}, {"hops": 0}):
+            assert chain_graph.walk_triples(["entity:hub"], **kwargs) == [], kwargs
+
+    def test_min_depth_spends_the_budget_on_deeper_facts(self, chain_graph):
+        triples = chain_graph.walk_triples(["entity:leaf"], limit=3, min_depth=2)
+        assert len(triples) == 3
+        assert all(t["depth"] == 2 for t in triples)
+
+    def test_limit_spreads_across_neighbours(self, chain_graph):
+        """Round-robin: a tight limit must not drain one neighbour's whole beam."""
+        triples = chain_graph.walk_triples(["entity:hub"], hops=1, limit=3, beam=4)
+        assert len({t["source"] for t in triples} | {t["target"] for t in triples}) > 2
+
+    def test_edge_between_two_seeds_is_emitted(self, chain_graph):
         triples = chain_graph.walk_triples(["entity:refund_policy", "entity:ops_manager"])
-        reached = [t for _, _, t, _ in triples]
+        assert ("Refund Policy", "approved_by", "Ops Manager") in _labels(triples)
+
+    def test_each_node_reached_once(self, chain_graph):
+        triples = chain_graph.walk_triples(["entity:refund_policy"], hops=3)
+        reached = [t["target"] for t in triples if t["depth"] > 1]
         assert len(reached) == len(set(reached))
 
     def test_unknown_seed_yields_nothing(self, chain_graph):
         assert chain_graph.walk_triples(["entity:nope"]) == []
 
-    def test_isolated_seed_yields_nothing(self, sample_graph):
-        assert sample_graph.walk_triples(["forordning:883/2004"], hops=1, beam=0) == []
+    def test_isolated_seed_yields_nothing(self, chain_graph):
+        isolated = {"nodes": [{"id": "entity:alone", "type": "Entity", "label": "Alone",
+                               "properties": {}}], "edges": []}
+        assert KnowledgeGraph(isolated).walk_triples(["entity:alone"]) == []
+
+    def test_duplicate_seeds_are_harmless(self, chain_graph):
+        once = chain_graph.walk_triples(["entity:refund_policy"])
+        twice = chain_graph.walk_triples(["entity:refund_policy", "entity:refund_policy"])
+        assert _labels(once) == _labels(twice)
+
+
+class TestWalkRobustness:
+    """Merged graphs come from arbitrary JSON; a malformed edge must not 500 a search."""
+
+    def test_null_mention_count_does_not_raise(self):
+        graph = KnowledgeGraph({
+            "nodes": [{"id": "entity:a", "type": "E", "label": "A", "properties": {}},
+                      {"id": "entity:b", "type": "E", "label": "B", "properties": {}}],
+            "edges": [{"source": "entity:a", "target": "entity:b", "type": "uses",
+                       "properties": {"mention_count": None}}],
+        })
+        assert _labels(graph.walk_triples(["entity:a"])) == {("A", "uses", "B")}
+
+    def test_non_numeric_mention_count_does_not_raise(self):
+        graph = KnowledgeGraph({
+            "nodes": [{"id": "entity:a", "type": "E", "label": "A", "properties": {}},
+                      {"id": "entity:b", "type": "E", "label": "B", "properties": {}}],
+            "edges": [{"source": "entity:a", "target": "entity:b", "type": "uses",
+                       "properties": {"mention_count": "many"}}],
+        })
+        assert graph.walk_triples(["entity:a"])
+
+    def test_node_without_label_falls_back_to_id(self):
+        graph = KnowledgeGraph({
+            "nodes": [{"id": "entity:a", "type": "E", "label": "A", "properties": {}},
+                      {"id": "entity:b", "type": "E", "properties": {}}],
+            "edges": [{"source": "entity:a", "target": "entity:b", "type": "uses",
+                       "properties": {}}],
+        })
+        assert graph.walk_triples(["entity:a"])[0]["target_label"] == "entity:b"
+
+    def test_dangling_edge_is_skipped(self):
+        graph = KnowledgeGraph({
+            "nodes": [{"id": "entity:a", "type": "E", "label": "A", "properties": {}}],
+            "edges": [{"source": "entity:a", "target": "entity:gone", "type": "uses",
+                       "properties": {}}],
+        })
+        assert graph.walk_triples(["entity:a"]) == []
+
+    def test_cycle_terminates(self):
+        graph = KnowledgeGraph({
+            "nodes": [{"id": f"entity:{c}", "type": "E", "label": c.upper(), "properties": {}}
+                      for c in "abc"],
+            "edges": [{"source": "entity:a", "target": "entity:b", "type": "uses", "properties": {}},
+                      {"source": "entity:b", "target": "entity:c", "type": "uses", "properties": {}},
+                      {"source": "entity:c", "target": "entity:a", "type": "uses", "properties": {}}],
+        })
+        assert len(graph.walk_triples(["entity:a"], hops=10)) <= 3
+
+    def test_self_loop_counts_once_in_degree(self):
+        graph = KnowledgeGraph({
+            "nodes": [{"id": "entity:a", "type": "E", "label": "A", "properties": {}},
+                      {"id": "entity:b", "type": "E", "label": "B", "properties": {}}],
+            "edges": [{"source": "entity:a", "target": "entity:a", "type": "uses", "properties": {}},
+                      {"source": "entity:a", "target": "entity:b", "type": "uses", "properties": {}}],
+        })
+        assert graph.degree("entity:a") == 1
+
+    def test_parallel_edges_count_once_in_degree(self):
+        graph = KnowledgeGraph({
+            "nodes": [{"id": "entity:a", "type": "E", "label": "A", "properties": {}},
+                      {"id": "entity:b", "type": "E", "label": "B", "properties": {}}],
+            "edges": [{"source": "entity:a", "target": "entity:b", "type": "uses", "properties": {}},
+                      {"source": "entity:a", "target": "entity:b", "type": "improves", "properties": {}}],
+        })
+        assert graph.degree("entity:a") == 1
+
+
+class TestWalkProvenance:
+    """The runtime merges every graph file into one KnowledgeGraph. A shared node
+    must not become a bridge that leaks one corpus's facts into another's."""
+
+    @pytest.fixture
+    def two_corpora(self, tmp_path):
+        shared = {"id": "entity:shared", "type": "E", "label": "Shared", "properties": {}}
+        left = tmp_path / "left"
+        right = tmp_path / "right"
+        left.mkdir()
+        right.mkdir()
+        (left / "a_llm_graph.json").write_text(json.dumps({
+            "nodes": [shared, {"id": "entity:left", "type": "E", "label": "Left", "properties": {}}],
+            "edges": [{"source": "entity:left", "target": "entity:shared", "type": "uses",
+                       "properties": {"mention_count": 1}}],
+        }))
+        (right / "b_llm_graph.json").write_text(json.dumps({
+            "nodes": [shared, {"id": "entity:right", "type": "E", "label": "Right", "properties": {}}],
+            "edges": [{"source": "entity:shared", "target": "entity:right", "type": "uses",
+                       "properties": {"mention_count": 9}}],
+        }))
+        return KnowledgeGraph([left / "a_llm_graph.json", right / "b_llm_graph.json"])
+
+    def test_walk_does_not_cross_into_another_graph_dir(self, two_corpora):
+        labels = _labels(two_corpora.walk_triples(["entity:left"]))
+        assert ("Left", "uses", "Shared") in labels
+        assert ("Shared", "uses", "Right") not in labels
+
+    def test_node_present_in_both_dirs_may_walk_both(self, two_corpora):
+        labels = _labels(two_corpora.walk_triples(["entity:shared"]))
+        assert ("Shared", "uses", "Right") in labels
+        assert ("Left", "uses", "Shared") in labels
 
 
 class TestEntityContextChain:
     def test_context_includes_second_hop_chain(self, chain_graph):
         ctx = chain_graph.get_entity_context("entity:refund_policy")
-        assert "via:" in ctx
-        assert "Ops Manager held_by Sarah" in ctx
+        assert "via: Ops Manager held_by Sarah" in ctx
 
     def test_context_chain_is_capped(self, chain_graph):
         ctx = chain_graph.get_entity_context("entity:leaf")
@@ -248,8 +395,7 @@ class TestEntityContextChain:
 
     def test_context_without_chain_is_unchanged(self, llm_entity_graph):
         # No edges at all -> no "via:" segment, and the 1-hop shape is untouched.
-        ctx = llm_entity_graph.get_entity_context("entity:nav")
-        assert ctx == "NAV (Entity)"
+        assert llm_entity_graph.get_entity_context("entity:nav") == "NAV (Entity)"
 
 
 class TestQueryExpansion:
