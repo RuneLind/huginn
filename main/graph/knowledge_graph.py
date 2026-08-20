@@ -30,7 +30,8 @@ class KnowledgeGraph:
                 the path carries. A bare dict has no provenance and is treated as
                 a corpus of its own.
         """
-        if isinstance(graph_path, tuple) and len(graph_path) == 2 and isinstance(graph_path[1], dict):
+        if (isinstance(graph_path, tuple) and len(graph_path) == 2
+                and isinstance(graph_path[0], (str, Path)) and isinstance(graph_path[1], dict)):
             paths = [graph_path]  # a single (path, data) pair, not a two-entry list
         elif isinstance(graph_path, (list, tuple)):
             paths = graph_path
@@ -241,16 +242,14 @@ class KnowledgeGraph:
                 for edge in self.outgoing.get(node_id, []):
                     if neighbor_count >= 5:
                         break
-                    target = self.nodes.get(edge["target"])
-                    if target:
-                        terms.append(target["label"])
+                    if edge["target"] in self.nodes:
+                        terms.append(self._label(edge["target"]))
                         neighbor_count += 1
                 for edge in self.incoming.get(node_id, []):
                     if neighbor_count >= 5:
                         break
-                    source = self.nodes.get(edge["source"])
-                    if source:
-                        terms.append(source["label"])
+                    if edge["source"] in self.nodes:
+                        terms.append(self._label(edge["source"]))
                         neighbor_count += 1
             else:
                 # EESSI types: BUC → SED, BUC → Artikkel, etc.
@@ -309,6 +308,13 @@ class KnowledgeGraph:
         # once per frontier node per depth inside a per-result enrichment loop.
         self._degree_cache[node_id] = len(neighbours)
         return len(neighbours)
+
+    def _reverse_edge(self, source_id: str, target_id: str, predicate: str) -> dict | None:
+        """The same predicate stated the other way round, if the graph carries it."""
+        for edge in self.outgoing.get(target_id, []):
+            if edge["target"] == source_id and edge["type"] == predicate:
+                return edge
+        return None
 
     def _ranked_neighbours(self, node_id: str, direction: str | None = None):
         """``(neighbour_id, edge, (source_id, target_id), direction)``, strongest first.
@@ -387,9 +393,11 @@ class KnowledgeGraph:
         seed_set = {nid for nid in seed_ids if nid in self.nodes}
         seen = set(seed_set)
         emitted: set[tuple[str, str, str]] = set()
-        # (node, direction we arrived by, origins every edge on this branch shares)
-        # (node, direction arrived by, predicate arrived by, origins the branch shares)
-        frontier = [(nid, None, None, self._node_origins.get(nid, 0)) for nid in seed_set]
+        # (node, direction arrived by, predicate arrived by, origins the branch shares).
+        # Sorted: set iteration order varies with PYTHONHASHSEED, and frontier order
+        # decides which facts a tight budget keeps — "deterministic" has to survive a
+        # restart, not just a rerun.
+        frontier = [(nid, None, None, self._node_origins.get(nid, 0)) for nid in sorted(seed_set)]
         triples: list[dict] = []
 
         for depth in range(1, hops + 1):
@@ -400,7 +408,7 @@ class KnowledgeGraph:
                 or (self.degree(node_id) <= hub_degree
                     and arrived_via not in self.SYMMETRIC_PREDICATES)
             ]
-            next_frontier: list[tuple[str, str, str, int]] = []
+            next_frontier: list[tuple[str, str | None, str | None, int]] = []
             # Round-robin over the frontier so a tight limit spreads across several
             # neighbours instead of draining the strongest one's whole beam.
             for _ in range(beam):
@@ -426,6 +434,13 @@ class KnowledgeGraph:
                         if not shared:
                             continue
                         emitted.add(fact_key)
+                        # Of a reversed duplicate, state the better-attested
+                        # direction: past depth 1 only one of the two is even
+                        # visible, and a lone backwards claim reads as fact where
+                        # the pair used to let the reader discount it.
+                        reverse = self._reverse_edge(src, tgt, edge["type"])
+                        if reverse is not None and self._edge_weight(reverse) > self._edge_weight(edge):
+                            src, tgt = tgt, src
                         if neighbour_id not in seen:
                             seen.add(neighbour_id)
                             next_frontier.append((neighbour_id, direction, edge["type"], shared))
@@ -523,13 +538,11 @@ class KnowledgeGraph:
             # Show key relationships
             related = []
             for edge in self.outgoing.get(node_id, []):
-                target = self.nodes.get(edge["target"])
-                if target:
-                    related.append(f"{edge['type']} {target['label']}")
+                if edge["target"] in self.nodes:
+                    related.append(f"{edge['type']} {self._label(edge['target'])}")
             for edge in self.incoming.get(node_id, []):
-                source = self.nodes.get(edge["source"])
-                if source:
-                    related.append(f"{source['label']} {edge['type']}")
+                if edge["source"] in self.nodes:
+                    related.append(f"{self._label(edge['source'])} {edge['type']}")
             if related:
                 parts.append(", ".join(related[:5]))
             # Second hop, but only for a thinly-connected entity. A passage rarely
@@ -538,8 +551,10 @@ class KnowledgeGraph:
             # already spent its budget on the relations above, and its second hop is
             # where the drift lives. Measured over the merged production graphs
             # (13.2k nodes, five files): 26% of entity contexts carry a chain, worth
-            # ~17 tokens each; sampling real result titles, that is ~4 tokens per
-            # 5-result response (p90 ~23, max ~33).
+            # ~18 tokens each. Sampling 400 five-result responses from the indexed
+            # document titles of the three LLM-graph collections, that is ~6 tokens
+            # per response — median 0, p90 22, max 69, since a response's cost is
+            # whether its titles happen to name thin entities.
             # A seed that exists in more than one corpus can chain into either, and
             # the reader has no way to tell which one a fact came from — so it gets
             # the direct relations only.

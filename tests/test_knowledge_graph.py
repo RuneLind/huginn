@@ -1,5 +1,10 @@
 """Tests for KnowledgeGraph entity detection, expansion, and query answering."""
 import json
+import os
+import subprocess
+import sys
+import textwrap
+
 import pytest
 from pathlib import Path
 from main.graph.knowledge_graph import KnowledgeGraph
@@ -279,7 +284,7 @@ class TestWalkTriples:
         assert len(triples) == 2
         assert len({t["source"] for t in triples}) == 2
 
-    def test_edge_between_two_neighbours_is_emitted(self, chain_graph):
+    def test_edge_between_two_neighbours_is_emitted(self):
         """The edge joining two of the seed's own neighbours is a fact about the
         seed's neighbourhood, and node-level dedup used to swallow it."""
         graph = KnowledgeGraph({
@@ -295,6 +300,118 @@ class TestWalkTriples:
             ],
         })
         assert ("M1", "depends_on", "M2") in _labels(graph.walk_triples(["entity:s"]))
+
+    def test_in_arrival_does_not_follow_outgoing_edges(self):
+        """Arriving over an incoming edge, only incoming edges continue the chain.
+
+        The mirror of the test below, and the only way to observe the outgoing
+        filter: an "in" branch that started following outgoing edges would report
+        the neighbour's dependencies as facts about the seed.
+        """
+        graph = KnowledgeGraph({
+            "nodes": [{"id": f"entity:{n}", "type": "E", "label": n.upper(), "properties": {}}
+                      for n in ("s", "m", "far")],
+            "edges": [
+                {"source": "entity:m", "target": "entity:s", "type": "uses",
+                 "properties": {"mention_count": 1}},
+                {"source": "entity:m", "target": "entity:far", "type": "uses",
+                 "properties": {"mention_count": 9}},
+            ],
+        })
+        assert ("M", "uses", "FAR") not in _labels(graph.walk_triples(["entity:s"]))
+
+    def test_out_arrival_does_not_follow_incoming_edges(self):
+        """Arriving over an outgoing edge, only outgoing edges continue the chain.
+
+        Isolated from the symmetric rule: everything here is a directed predicate,
+        so this fails if and only if the out-direction filter is dropped.
+        """
+        graph = KnowledgeGraph({
+            "nodes": [{"id": f"entity:{n}", "type": "E", "label": n.upper(), "properties": {}}
+                      for n in ("s", "m", "sib")],
+            "edges": [
+                {"source": "entity:s", "target": "entity:m", "type": "uses",
+                 "properties": {"mention_count": 1}},
+                # A third party pointing *at* m: a sibling of the seed, not a chain.
+                {"source": "entity:sib", "target": "entity:m", "type": "uses",
+                 "properties": {"mention_count": 9}},
+            ],
+        })
+        assert ("SIB", "uses", "M") not in _labels(graph.walk_triples(["entity:s"]))
+
+    def test_symmetric_edge_is_not_emitted_as_a_deeper_fact(self):
+        """Arrival is directed, so the arrival rule cannot be what blocks this —
+        only the depth-2 emit gate can."""
+        graph = KnowledgeGraph({
+            "nodes": [{"id": f"entity:{n}", "type": "E", "label": n.upper(), "properties": {}}
+                      for n in ("s", "m", "far")],
+            "edges": [
+                {"source": "entity:s", "target": "entity:m", "type": "uses",
+                 "properties": {"mention_count": 1}},
+                {"source": "entity:m", "target": "entity:far", "type": "related_to",
+                 "properties": {"mention_count": 9}},
+            ],
+        })
+        assert ("M", "related_to", "FAR") not in _labels(graph.walk_triples(["entity:s"]))
+
+    def test_ranking_beats_insertion_order(self):
+        """The beam keeps the best-attested edge, not the first one extracted."""
+        graph = KnowledgeGraph({
+            "nodes": [{"id": f"entity:{n}", "type": "E", "label": n.upper(), "properties": {}}
+                      for n in ("s", "weak", "strong")],
+            "edges": [
+                {"source": "entity:s", "target": "entity:weak", "type": "uses",
+                 "properties": {"mention_count": 1}},
+                {"source": "entity:s", "target": "entity:strong", "type": "uses",
+                 "properties": {"mention_count": 9}},
+            ],
+        })
+        assert graph.walk_triples(["entity:s"], beam=1)[0]["target_label"] == "STRONG"
+
+    def test_reversed_duplicate_keeps_the_better_attested_direction(self):
+        graph = KnowledgeGraph({
+            "nodes": [{"id": f"entity:{n}", "type": "E", "label": n.upper(), "properties": {}}
+                      for n in ("s", "m", "x")],
+            "edges": [
+                {"source": "entity:s", "target": "entity:m", "type": "uses",
+                 "properties": {"mention_count": 5}},
+                # Reached at depth 2 in the weak direction only; the strong reverse
+                # says the opposite and is what should be stated.
+                {"source": "entity:m", "target": "entity:x", "type": "created_by",
+                 "properties": {"mention_count": 1}},
+                {"source": "entity:x", "target": "entity:m", "type": "created_by",
+                 "properties": {"mention_count": 9}},
+            ],
+        })
+        deep = [t for t in graph.walk_triples(["entity:s"]) if t["depth"] > 1]
+        assert [(t["source_label"], t["target_label"]) for t in deep] == [("X", "M")]
+
+    def test_multi_seed_result_survives_a_process_restart(self):
+        """`walk_triples` is documented deterministic. Set iteration order depends on
+        PYTHONHASHSEED, so a frontier built straight from a set returns different
+        facts on different server starts — only visible across processes."""
+        script = textwrap.dedent("""
+            from main.graph.knowledge_graph import KnowledgeGraph
+            graph = KnowledgeGraph({
+                "nodes": [{"id": f"entity:{n}", "type": "E", "label": n.upper(),
+                           "properties": {}} for n in ("s1", "s2", "a", "b")],
+                "edges": [
+                    {"source": "entity:s1", "target": "entity:a", "type": "uses",
+                     "properties": {}},
+                    {"source": "entity:s2", "target": "entity:b", "type": "uses",
+                     "properties": {}},
+                ],
+            })
+            print(graph.walk_triples(["entity:s1", "entity:s2"], limit=1)[0]["source"])
+        """)
+        results = set()
+        for hash_seed in ("1", "2", "3", "4", "5", "6"):
+            env = {**os.environ, "PYTHONHASHSEED": hash_seed}
+            out = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                                 text=True, env=env, cwd=Path(__file__).resolve().parents[1])
+            assert out.returncode == 0, out.stderr
+            results.add(out.stdout.strip())
+        assert results == {"entity:s1"}
 
     def test_hub_gate_blocks_the_second_hop_through_a_hub(self, chain_graph):
         """entity:hub has 61 continuing neighbours reachable in the arrival
@@ -375,7 +492,7 @@ class TestWalkTriples:
         })
         assert len(graph.walk_triples(["entity:a"])) == 1
 
-    def test_symmetric_predicate_stops_at_depth_one(self, chain_graph):
+    def test_symmetric_predicate_stops_at_depth_one(self):
         graph = KnowledgeGraph({
             "nodes": [{"id": f"entity:{n}", "type": "E", "label": n.upper(), "properties": {}}
                       for n in ("s", "m", "far")],
@@ -394,7 +511,7 @@ class TestWalkTriples:
         triples = chain_graph.walk_triples(["entity:refund_policy", "entity:ops_manager"])
         assert ("Refund Policy", "approved_by", "Ops Manager") in _labels(triples)
 
-    def test_every_seed_keeps_its_own_direct_facts(self, chain_graph):
+    def test_every_seed_keeps_its_own_direct_facts(self):
         """Two seeds pointing at the same node must both have their edge stated."""
         graph = KnowledgeGraph({
             "nodes": [{"id": f"entity:{n}", "type": "E", "label": n.upper(), "properties": {}}
@@ -494,6 +611,33 @@ class TestWalkRobustness:
         assert graph.degree("entity:a") == 1
 
 
+class TestMalformedNodeTolerance:
+    """A node missing keys the extractors normally write must not 500 a search."""
+
+    @pytest.fixture
+    def sparse_graph(self):
+        return KnowledgeGraph({
+            "nodes": [
+                {"id": "entity:a", "type": "E", "label": "A", "properties": {}},
+                {"id": "entity:b", "properties": {}},  # no type, no label
+            ],
+            "edges": [{"source": "entity:a", "target": "entity:b", "type": "uses",
+                       "properties": {}}],
+        })
+
+    def test_expansion_terms_tolerate_a_bare_neighbour(self, sparse_graph):
+        assert "entity:b" in sparse_graph.get_expansion_terms(["entity:a"])
+
+    def test_expansion_terms_tolerate_a_bare_seed(self, sparse_graph):
+        assert sparse_graph.get_expansion_terms(["entity:b"]) == ["entity:b", "A"]
+
+    def test_entity_context_tolerates_a_bare_node(self, sparse_graph):
+        assert "entity:b" in (sparse_graph.get_entity_context("entity:a") or "")
+
+    def test_context_of_the_bare_node_itself_does_not_raise(self, sparse_graph):
+        assert sparse_graph.get_entity_context("entity:b") is not None
+
+
 class TestWalkProvenance:
     """The runtime merges every graph file into one KnowledgeGraph. A shared node
     must not become a bridge that leaks one corpus's facts into another's."""
@@ -554,6 +698,17 @@ class TestWalkProvenance:
         graph = KnowledgeGraph([(one, json.loads(one.read_text())),
                                 (two, json.loads(two.read_text()))])
         assert graph._origins == [str(one.resolve()), str(two.resolve())]
+
+    def test_the_same_file_twice_is_one_corpus(self, tmp_path):
+        """Two spellings of one path must not make its nodes look multi-corpus,
+        which would silently deny every one of them a chain."""
+        path = tmp_path / "a_llm_graph.json"
+        data = {"nodes": [{"id": "entity:a", "type": "E", "label": "A", "properties": {}}],
+                "edges": []}
+        path.write_text(json.dumps(data))
+        graph = KnowledgeGraph([(path, data), (Path(str(path)), data)])
+        assert graph._origins == [str(path.resolve())]
+        assert graph._node_origins["entity:a"].bit_count() == 1
 
     def test_single_pair_is_not_read_as_a_two_entry_list(self, tmp_path):
         path = tmp_path / "a_llm_graph.json"
