@@ -10,6 +10,7 @@ from main.graph.graph_loader import (
     _discover_auto_glob_dirs,
     check_graph_staleness,
     discover_graph_paths,
+    load_default_knowledge_graph,
     resolve_graph_output_path,
 )
 
@@ -315,3 +316,30 @@ class TestBuildSourceStamp:
                         lastModifiedDocumentTime="2026-01-01T00:00:00")
         stamp = _load_extractor_module().build_source_stamp("c", str(tmp_path), processed_doc_count=20)
         assert stamp["document_count"] == 20
+
+
+class TestLoadedGraphProvenance:
+    """The loader is the only construction path the runtime uses, so it is where
+    provenance has to survive: it parses each file once for the staleness check,
+    and passing the parsed dicts alone would leave every corpus anonymous."""
+
+    def _write(self, path: Path, node_id: str):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "nodes": [{"id": node_id, "type": "E", "label": node_id, "properties": {}}],
+            "edges": [],
+        }))
+        return path
+
+    def test_each_file_becomes_its_own_corpus(self, tmp_path):
+        one = self._write(tmp_path / "one.json", "entity:one")
+        two = self._write(tmp_path / "two.json", "entity:two")
+        graph = load_default_knowledge_graph(extra_paths=[str(one), str(two)])
+        assert graph._origins == [str(one.resolve()), str(two.resolve())]
+        assert graph._node_origins["entity:one"] != graph._node_origins["entity:two"]
+
+    def test_a_node_in_two_files_is_marked_as_spanning_both(self, tmp_path):
+        one = self._write(tmp_path / "one.json", "entity:shared")
+        two = self._write(tmp_path / "two.json", "entity:shared")
+        graph = load_default_knowledge_graph(extra_paths=[str(one), str(two)])
+        assert graph._node_origins["entity:shared"].bit_count() == 2

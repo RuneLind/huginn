@@ -309,13 +309,6 @@ class KnowledgeGraph:
         self._degree_cache[node_id] = len(neighbours)
         return len(neighbours)
 
-    def _reverse_edge(self, source_id: str, target_id: str, predicate: str) -> dict | None:
-        """The same predicate stated the other way round, if the graph carries it."""
-        for edge in self.outgoing.get(target_id, []):
-            if edge["target"] == source_id and edge["type"] == predicate:
-                return edge
-        return None
-
     def _ranked_neighbours(self, node_id: str, direction: str | None = None):
         """``(neighbour_id, edge, (source_id, target_id), direction)``, strongest first.
 
@@ -427,6 +420,12 @@ class KnowledgeGraph:
                         # Dedup on the *unordered* pair: the extractors write 203
                         # reversed duplicates ("A created_by B" and "B created_by A"),
                         # and stating both spends the budget saying one thing twice.
+                        # Which of the two survives is whichever the walk reached
+                        # first. Ranking them by `mention_count` was tried and
+                        # reverted: it is a frequency count, not a direction oracle,
+                        # and on real data it inverted as many facts as it fixed
+                        # (a person "created_by" a Jira issue). 152 of the 203 pairs
+                        # are exact ties anyway.
                         fact_key = (min(src, tgt), max(src, tgt), edge["type"])
                         if fact_key in emitted:
                             continue
@@ -434,13 +433,6 @@ class KnowledgeGraph:
                         if not shared:
                             continue
                         emitted.add(fact_key)
-                        # Of a reversed duplicate, state the better-attested
-                        # direction: past depth 1 only one of the two is even
-                        # visible, and a lone backwards claim reads as fact where
-                        # the pair used to let the reader discount it.
-                        reverse = self._reverse_edge(src, tgt, edge["type"])
-                        if reverse is not None and self._edge_weight(reverse) > self._edge_weight(edge):
-                            src, tgt = tgt, src
                         if neighbour_id not in seen:
                             seen.add(neighbour_id)
                             next_frontier.append((neighbour_id, direction, edge["type"], shared))
@@ -551,10 +543,11 @@ class KnowledgeGraph:
             # already spent its budget on the relations above, and its second hop is
             # where the drift lives. Measured over the merged production graphs
             # (13.2k nodes, five files): 26% of entity contexts carry a chain, worth
-            # ~18 tokens each. Sampling 400 five-result responses from the indexed
-            # document titles of the three LLM-graph collections, that is ~6 tokens
-            # per response — median 0, p90 22, max 69, since a response's cost is
-            # whether its titles happen to name thin entities.
+            # ~17 tokens each (median 16). Sampling 400 five-result responses from the
+            # indexed document titles of the three LLM-graph collections, at three RNG
+            # seeds: mean 4.6-6.2 tokens per response, median 0, p90 22-24. A response
+            # costs nothing unless its titles happen to name thin entities, and the
+            # tail is long — the worst single draw ran to ~96.
             # A seed that exists in more than one corpus can chain into either, and
             # the reader has no way to tell which one a fact came from — so it gets
             # the direct relations only.

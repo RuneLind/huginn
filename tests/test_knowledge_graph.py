@@ -368,24 +368,6 @@ class TestWalkTriples:
         })
         assert graph.walk_triples(["entity:s"], beam=1)[0]["target_label"] == "STRONG"
 
-    def test_reversed_duplicate_keeps_the_better_attested_direction(self):
-        graph = KnowledgeGraph({
-            "nodes": [{"id": f"entity:{n}", "type": "E", "label": n.upper(), "properties": {}}
-                      for n in ("s", "m", "x")],
-            "edges": [
-                {"source": "entity:s", "target": "entity:m", "type": "uses",
-                 "properties": {"mention_count": 5}},
-                # Reached at depth 2 in the weak direction only; the strong reverse
-                # says the opposite and is what should be stated.
-                {"source": "entity:m", "target": "entity:x", "type": "created_by",
-                 "properties": {"mention_count": 1}},
-                {"source": "entity:x", "target": "entity:m", "type": "created_by",
-                 "properties": {"mention_count": 9}},
-            ],
-        })
-        deep = [t for t in graph.walk_triples(["entity:s"]) if t["depth"] > 1]
-        assert [(t["source_label"], t["target_label"]) for t in deep] == [("X", "M")]
-
     def test_multi_seed_result_survives_a_process_restart(self):
         """`walk_triples` is documented deterministic. Set iteration order depends on
         PYTHONHASHSEED, so a frontier built straight from a set returns different
@@ -620,9 +602,14 @@ class TestMalformedNodeTolerance:
             "nodes": [
                 {"id": "entity:a", "type": "E", "label": "A", "properties": {}},
                 {"id": "entity:b", "properties": {}},  # no type, no label
+                {"id": "entity:c", "properties": {}},  # ditto, on the incoming side
             ],
-            "edges": [{"source": "entity:a", "target": "entity:b", "type": "uses",
-                       "properties": {}}],
+            "edges": [
+                {"source": "entity:a", "target": "entity:b", "type": "uses",
+                 "properties": {}},
+                {"source": "entity:c", "target": "entity:a", "type": "uses",
+                 "properties": None},  # null properties, not merely absent
+            ],
         })
 
     def test_expansion_terms_tolerate_a_bare_neighbour(self, sparse_graph):
@@ -633,6 +620,27 @@ class TestMalformedNodeTolerance:
 
     def test_entity_context_tolerates_a_bare_node(self, sparse_graph):
         assert "entity:b" in (sparse_graph.get_entity_context("entity:a") or "")
+
+    def test_bare_node_on_the_incoming_side_is_tolerated(self, sparse_graph):
+        # Both functions read neighbour labels in both directions.
+        assert "entity:c" in sparse_graph.get_expansion_terms(["entity:a"])
+        assert "entity:c" in (sparse_graph.get_entity_context("entity:a") or "")
+
+    def test_null_properties_on_an_edge_do_not_raise(self, sparse_graph):
+        assert sparse_graph.walk_triples(["entity:a"])
+
+    def test_boolean_mention_count_is_not_a_weight(self):
+        graph = KnowledgeGraph({
+            "nodes": [{"id": f"entity:{n}", "type": "E", "label": n.upper(), "properties": {}}
+                      for n in ("s", "flagged", "real")],
+            "edges": [
+                {"source": "entity:s", "target": "entity:flagged", "type": "uses",
+                 "properties": {"mention_count": True}},
+                {"source": "entity:s", "target": "entity:real", "type": "uses",
+                 "properties": {"mention_count": 1}},
+            ],
+        })
+        assert graph.walk_triples(["entity:s"], beam=1)[0]["target_label"] == "REAL"
 
     def test_context_of_the_bare_node_itself_does_not_raise(self, sparse_graph):
         assert sparse_graph.get_entity_context("entity:b") is not None
@@ -716,6 +724,43 @@ class TestWalkProvenance:
                 "edges": []}
         path.write_text(json.dumps(data))
         assert KnowledgeGraph((path, data))._origins == [str(path.resolve())]
+
+    def test_a_tuple_of_two_paths_is_still_two_graphs(self, tmp_path):
+        """The pair form must not swallow the ordinary "several files" call."""
+        paths = []
+        for name in ("a", "b"):
+            path = tmp_path / f"{name}_llm_graph.json"
+            path.write_text(json.dumps({
+                "nodes": [{"id": f"entity:{name}", "type": "E", "label": name.upper(),
+                           "properties": {}}], "edges": []}))
+            paths.append(path)
+        graph = KnowledgeGraph(tuple(paths))
+        assert graph.node_count() == 2
+        assert len(graph._origins) == 2
+
+    def test_a_three_tuple_is_not_a_pair(self, tmp_path):
+        """(path, data, anything) is not the pair form — reading it as one would
+        silently drop the third entry."""
+        path = tmp_path / "a_llm_graph.json"
+        data = {"nodes": [{"id": "entity:a", "type": "E", "label": "A", "properties": {}}],
+                "edges": []}
+        path.write_text(json.dumps(data))
+        other = tmp_path / "b_llm_graph.json"
+        other.write_text(json.dumps({
+            "nodes": [{"id": "entity:b", "type": "E", "label": "B", "properties": {}}],
+            "edges": []}))
+        graph = KnowledgeGraph((path, data, other))
+        assert graph.node_count() == 2
+
+    def test_a_tuple_of_two_parsed_graphs_is_two_graphs(self, tmp_path):
+        """Two already-parsed dicts in a tuple are two graphs, not (path, data) —
+        the first element is not a path."""
+        graphs = tuple(
+            {"nodes": [{"id": f"entity:{n}", "type": "E", "label": n.upper(),
+                        "properties": {}}], "edges": []}
+            for n in ("a", "b")
+        )
+        assert KnowledgeGraph(graphs).node_count() == 2
 
     def test_no_emitted_fact_comes_from_a_file_the_seed_is_absent_from(self, tmp_path):
         """Checked against the raw JSON rather than the graph's own origin maps, so
