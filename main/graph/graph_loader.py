@@ -206,7 +206,10 @@ def load_default_knowledge_graph(extra_paths=None, data_path=None):
     graphs = [(path, json.loads(Path(path).read_text(encoding="utf-8"))) for path in paths]
     if data_path:
         check_graph_staleness(graphs, data_path)
-    graph = KnowledgeGraph([data for _, data in graphs])
+    # Pass (path, data) pairs, not bare dicts: the path is where the graph's
+    # provenance comes from, and KnowledgeGraph needs it to keep a multi-hop walk
+    # inside one corpus when several graph files are merged into one graph.
+    graph = KnowledgeGraph(graphs)
     logger.info(
         f"Knowledge graph loaded from {len(paths)} file(s): "
         f"{graph.node_count()} nodes, {graph.edge_count()} edges"
