@@ -140,17 +140,110 @@ curl -X DELETE "http://127.0.0.1:8321/api/document/x-articles/some-doc.md"
   server-side; a muninn proxy for it lands separately, and it is not meant for the
   browser extension.
 
+## Build-time people aliasing (privacy)
+
+Some collections index documents full of real colleagues' names. Those
+collections must be copyable to another machine, so people are **aliased at
+index build time**, inside `FilesDocumentConverter.convert()` — the built
+collection under `data/collections/` never contains a real name, and the reverse
+map stays local.
+
+- `main/privacy/alias_registry.py` compiles the map into one regex pass:
+  mapped people → their alias (`dev-06`), unmapped people → `[~ukjent-person]`,
+  role nouns / test users / countries → left alone, `[A-Za-z]\d{6}` idents (bare
+  or wrapped as `[~Q000124]`) → `[~person]`. A second pass turns any leftover
+  dotted handle into `@person`, and in a dotted email *local part* the local part
+  becomes `person` (`ola.nordmann@nav.no` → `person@nav.no`). `id` and `url` are
+  never rewritten — they are the join keys to the source file and the index
+  mapping.
+- **What that second pass leaves alone**, because the corpora are code-heavy:
+  `@v1.2.3` versions; package paths under a known root (`@org.`, `@jakarta.`,
+  `@kotlin.`, `@android.`, `@net.`, …); **code annotations**, i.e. a lowercase
+  root plus a CamelCase segment (`@lombok.Setter`, `@dagger.Provides` — the
+  annotation vocabulary is open-ended, so a root list alone cannot keep up); and
+  hosts, decided by an **explicit** last-label list (TLDs plus `internal`,
+  `local`, `test`, `dev`, `localhost`). The email rule additionally requires a
+  real domain after the `@`, so Python's matmul (`np.eye@vec`, `A.T@B`) is not
+  read as an address. There is deliberately no "short last segment looks like a
+  TLD" heuristic: Norwegian surnames are short, and `@ola.berg` / `@kari.moe` /
+  `@per.aas` survived into the built collection under it. The cost of the
+  explicit list is that a Capitalized.Capitalized handle with no known root is a
+  person, so `@Abac.Attr`-style shorthand redacts to `@person`.
+- Multi-token variants match across a whitespace run **spanning at most one
+  newline** (a blank line is a paragraph break, not a wrapped name) or `%20`, and
+  their boundaries also accept `%2C`/`%20`/`%40`, so a name percent-encoded in a
+  URL query string still matches. Bare single-token variants additionally block a
+  preceding `.`, so a mononym cannot be welded onto a surviving dotted path
+  segment — but not a preceding `-`, which is punctuation far more often than it
+  is a path.
+- **The map is validated at compile time** and a bad one refuses to build
+  (`PrivacyMapInvalid`, a `PrivacyMapMissing`): blank literals, zero entries, an
+  entry variant that is a bare given name (a single all-alphabetic token —
+  hyphenated compounds like `Nord-Hansen` are fine), two distinct literals
+  sharing a casefold key (`Weiss`/`Weiß`, where one would silently take the
+  other's replacement), schema drift. Two discovered maps are `ambiguous` rather
+  than first-wins.
+- **Scope** is `main/privacy/scope.json` (public collection names + public source
+  dirs) plus an optional private `huginn-*/privacy/scope.json` for the paths that
+  are not public — the same glob convention as `graph_routing.json`. Matching is
+  by collection name **or** reader `basePath`, so sibling/backup collections
+  sharing a `basePath` arm too. Everything else gets `alias_registry=None` and
+  behaves exactly as before.
+- **Fail closed.** An in-scope collection whose map (`huginn-*/privacy/aliases.json`)
+  is missing raises `PrivacyMapMissing` *before* the create path removes the
+  collection folder. A clone with no private sub-repos simply builds nothing
+  in scope.
+- The manifest gets a `privacy: {policy_version, map_version, aliasedAt}` stamp on
+  the **create branch only** — it asserts the whole index was built aliased, which
+  a windowed nightly update (which re-converts only recent documents) cannot
+  promise. The update branch preserves whatever stamp is already there and never
+  adds one; that stamp is also what re-arms aliasing even if the scope files drift.
+- **Rebuilding:** `.venv/bin/python scripts/audit/rebuild_aliased.py --collection
+  <name>` builds into `<name>-aliased` (the create path deletes the target folder
+  first, so never build in place), reusing the existing manifest's reader, indexers
+  and contextual-prefix model, and passing the create adapter a `--contextual-cache`
+  pointing at the REAL collection's cache. The build refuses to finish unless the
+  new manifest's privacy stamp matches the current map/policy version and its
+  reader block reproduces the source's. `--swap` re-checks the stamp, parks the
+  live one under `data/prealias/<name>-<date>` (**outside** `data/collections/`, so
+  no server glob serves it) and reloads the server — a failed reload exits non-zero.
+- **Verify:** `.venv/bin/python scripts/audit/verify_aliased_collection.py
+  --collection <name>-aliased --compare <name>` (`--collections-dir` verifies a
+  staged copy, `--map` pins the map). It decodes JSON rather than grepping bytes,
+  checks the BM25 token list separately — a byte-grep of the pickle finds nothing
+  while both name tokens sit adjacent in `corpus_tokens` — and scans **every** file
+  under the collection dir, failing on a `.bak` or an unrecognised binary rather
+  than skipping it. With `--compare` it also asserts the rebuild's
+  `numberOfDocuments`/`numberOfChunks` equal the pre-alias twin's;
+  `--allow-count-drift` downgrades that to a printed `WARN`, for a source tree
+  that has grown since the live collection was last built. Bare given names are
+  explicitly out of scope (see the module docstring).
+- **Derived caches carry pre-alias text.**
+  `.venv/bin/python scripts/audit/purge_prealias_caches.py` retires them (LLM graph
+  caches deleted, dormant contextual caches renamed to `.pre-alias.bak`). The
+  extractor's own policy check only discards a stale cache **in memory** — the file
+  keeps the pre-alias extractions until this script removes it. The contextual cache
+  of an actively-prefixed collection is kept on purpose: the pipeline invalidates
+  exactly the documents aliasing changed (`ContextualCache.invalidate_doc`), instead
+  of re-prefixing every chunk.
+
 ## LLM entity extraction (knowledge graph)
 
 Extract entities and relationships from a collection using a local Ollama model. Outputs a `*_llm_graph.json` used for query expansion and graph context enrichment at search time.
 
 ```sh
-uv run scripts/knowledge_graph/extract_entities_llm.py --collection <collection-name>
-uv run scripts/knowledge_graph/extract_entities_llm.py --collection <collection-name> --limit 20  # test run
+.venv/bin/python scripts/knowledge_graph/extract_entities_llm.py --collection <collection-name>
+.venv/bin/python scripts/knowledge_graph/extract_entities_llm.py --collection <collection-name> --limit 20  # test run
 ```
 
 - Requires Ollama running locally with `qwen3.6:35b-a3b-coding-nvfp4` (or pass `--model`)
-- Incremental: uses a `.cache.json` file, safe to stop and resume
+- Incremental: uses a `.cache.json` file, safe to stop and resume. It is written as
+  `{"policy_version": N, "entries": {...}}` — an envelope, not a sentinel key beside
+  the doc ids, because a doc id may itself start with `_`. For a collection the
+  privacy registry arms, a cache under a different (or absent) policy version is
+  discarded **in memory** rather than replaying pre-alias extractions; deleting the
+  file is `purge_prealias_caches.py`'s job. Out-of-scope collections load their
+  legacy flat cache unchanged.
 - Output routing (no private collection names live in this public repo):
   1. `--output <path>` always wins.
   2. Else a `graph_routing.json` in one of the private sub-repo dirs (`huginn-*/scripts/knowledge_graph/`) or `./scripts/knowledge_graph/`. Each routing file either lists owned collections (`{"collections": [...]}`) or is the catch-all (`{"default": true}`). A listed collection writes into that file's dir; unlisted collections go to the `default` dir.

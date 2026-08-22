@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "knowledge_graph"))
 
 import extract_entities_llm  # noqa: E402
@@ -173,3 +175,127 @@ class TestLimitDryRunPath:
         # FAISS extracted from both processed docs.
         labels = {n["label"] for n in written["nodes"]}
         assert "FAISS" in labels
+
+
+class TestExtractionCache:
+    """The graph cache is keyed by doc id alone, so a cache written from
+    PRE-alias documents replays real names into the graph JSON after a rebuild.
+    The privacy policy version gates that — but only for a collection the
+    registry is actually armed for."""
+
+    def _write(self, path, payload):
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    def test_envelope_round_trips_doc_ids_that_start_with_underscore(self, tmp_path):
+        cache_path = tmp_path / "g.cache.json"
+        entries = {"_internal/notes.md": {"entities": []}, "a.md": {"entities": []}}
+        extract_entities_llm.write_extraction_cache(cache_path, entries)
+        assert extract_entities_llm.load_extraction_cache(cache_path, aliased=True) == entries
+
+    def test_current_policy_version_is_kept(self, tmp_path):
+        cache_path = tmp_path / "g.cache.json"
+        extract_entities_llm.write_extraction_cache(cache_path, {"a.md": {"entities": []}})
+        assert extract_entities_llm.load_extraction_cache(cache_path, aliased=True)
+
+    def test_legacy_flat_cache_is_discarded_for_an_in_scope_collection(self, tmp_path, capsys):
+        cache_path = self._write(tmp_path / "g.cache.json",
+                                 {"a.md": {"entities": []}, "b.md": {"entities": []}})
+        assert extract_entities_llm.load_extraction_cache(cache_path, aliased=True) == {}
+        # off-by-one: the old sentinel-key form counted the sentinel as an entry
+        assert "2 stale" in capsys.readouterr().out
+
+    def test_legacy_flat_cache_is_kept_for_an_out_of_scope_collection(self, tmp_path):
+        entries = {"a.md": {"entities": []}, "b.md": {"entities": []}}
+        cache_path = self._write(tmp_path / "g.cache.json", entries)
+        assert extract_entities_llm.load_extraction_cache(cache_path, aliased=False) == entries
+
+    def test_wrong_policy_version_is_discarded(self, tmp_path):
+        cache_path = self._write(tmp_path / "g.cache.json",
+                                 {"policy_version": 999, "entries": {"a.md": {}}})
+        assert extract_entities_llm.load_extraction_cache(cache_path, aliased=True) == {}
+
+    def test_missing_or_unreadable_cache_is_empty(self, tmp_path):
+        assert extract_entities_llm.load_extraction_cache(tmp_path / "absent.json", aliased=True) == {}
+        broken = tmp_path / "broken.json"
+        broken.write_text("{not json", encoding="utf-8")
+        assert extract_entities_llm.load_extraction_cache(broken, aliased=True) == {}
+
+
+class TestPrivacyArming:
+    """The extractor writes a graph JSON straight out of the collection's own
+    documents, so it must make the SAME scoping decision the build made.
+
+    Two ways it silently made a different one: it never passed
+    `armed_by_manifest`, so a collection kept aliased only by its manifest stamp
+    (the scope files having drifted) extracted with no registry and re-derived
+    real names into the graph; and a `PrivacyMapMissing` propagated as a
+    traceback, which under a nightly wrapper reads as a crash rather than as
+    "refused to extract".
+    """
+
+    def _collection(self, tmp_path, manifest):
+        docs_dir = tmp_path / "coll" / "documents"
+        docs_dir.mkdir(parents=True)
+        (docs_dir / "doc0.json").write_text(json.dumps({
+            "id": "doc0", "text": "FAISS is a vector search library. " * 10,
+            "metadata": {"title": "Doc 0"},
+        }), encoding="utf-8")
+        (tmp_path / "coll" / "manifest.json").write_text(json.dumps(manifest),
+                                                         encoding="utf-8")
+
+    def _argv(self, tmp_path):
+        return ["extract_entities_llm.py", "--collection", "coll",
+                "--data-path", str(tmp_path), "--output", str(tmp_path / "graph.json"),
+                "--limit", "1"]
+
+    def _run(self, tmp_path, resolve):
+        graph = json.dumps({"entities": [{"name": "FAISS", "type": "Technology"}],
+                            "relationships": []})
+
+        def fake_urlopen(target, timeout=None):
+            url = target if isinstance(target, str) else target.full_url
+            if url.endswith("/api/tags"):
+                return _FakeResp(b"{}")
+            return _resp({"message": {"content": graph}})
+
+        with patch.object(sys, "argv", self._argv(tmp_path)), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen), \
+             patch.object(extract_entities_llm, "resolve_registry", resolve):
+            extract_entities_llm.main()
+
+    def test_manifest_privacy_stamp_arms_the_registry(self, tmp_path):
+        seen = {}
+
+        def resolve(collection, base_path, **kwargs):
+            seen.update(kwargs)
+            return None
+
+        self._collection(tmp_path, {"reader": {"basePath": "./data/sources/demo"},
+                                    "privacy": {"policy_version": 1, "map_version": 7}})
+        self._run(tmp_path, resolve)
+        assert seen["armed_by_manifest"] is True
+
+    def test_a_collection_without_a_stamp_is_not_armed_by_the_manifest(self, tmp_path):
+        seen = {}
+
+        def resolve(collection, base_path, **kwargs):
+            seen.update(kwargs)
+            return None
+
+        self._collection(tmp_path, {"reader": {"basePath": "./data/sources/demo"}})
+        self._run(tmp_path, resolve)
+        assert seen["armed_by_manifest"] is False
+
+    def test_a_missing_alias_map_exits_2_with_one_line(self, tmp_path, capsys):
+        def resolve(collection, base_path, **kwargs):
+            raise extract_entities_llm.PrivacyMapMissing("no alias map found")
+
+        self._collection(tmp_path, {"reader": {"basePath": "./data/sources/demo"},
+                                    "privacy": {"policy_version": 1, "map_version": 7}})
+        with pytest.raises(SystemExit) as excinfo:
+            self._run(tmp_path, resolve)
+        assert excinfo.value.code == 2
+        out = capsys.readouterr().out
+        assert "no alias map found" in out
+        assert not (tmp_path / "graph.json").exists()

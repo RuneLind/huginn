@@ -5,6 +5,7 @@ from main.utils.logger import setup_root_logger
 from main.sources.files.files_document_reader import FilesDocumentReader
 from main.sources.files.files_document_converter import FilesDocumentConverter
 from main.factories.create_collection_factory import create_collection_creator
+from main.privacy.alias_registry import resolve_registry
 
 setup_root_logger()
 
@@ -32,9 +33,14 @@ files_document_reader = FilesDocumentReader(base_path=args['basePath'],
                                             include_patterns=args['includePatterns'],
                                             exclude_patterns=args['excludePatterns'],
                                             fail_fast=args['failFast'])
-files_document_converter = FilesDocumentConverter()
-
 collection_name = args['collection'] if args['collection'] else os.path.basename(args['basePath'])
+
+# Resolved (and, for an in-scope collection with no map, failed) BEFORE the
+# creator runs — __create_collection() starts by removing the collection folder,
+# so a late failure would leave nothing behind.
+files_document_converter = FilesDocumentConverter(
+    alias_registry=resolve_registry(collection_name, args['basePath']))
+
 files_collection_creator = create_collection_creator(collection_name=collection_name,
                                                      indexers=args['indexers'],
                                                      document_reader=files_document_reader,

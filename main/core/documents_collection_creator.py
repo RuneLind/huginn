@@ -5,6 +5,7 @@ from enum import Enum
 import numpy as np
 import logging
 
+from ..privacy.alias_registry import ALIAS_CHANGED_KEY
 from ..utils.progress_bar import wrap_generator_with_progress_bar
 from ..utils.progress_bar import wrap_iterator_with_progress_bar
 from ..utils.performance import log_execution_duration
@@ -131,6 +132,7 @@ class DocumentCollectionCreator:
                                                          number_of_expected_documents,
                                                          progress_bar_name="Reading documents"):
             for converted_document in self.document_converter.convert(document):
+                self.__invalidate_prefix_cache_if_aliased(converted_document)
                 if parallel_mode:
                     pending.append(converted_document)
                     if len(pending) >= self.contextual_workers * 2:
@@ -147,6 +149,27 @@ class DocumentCollectionCreator:
             self.chunk_prefixer.cache.flush()
 
         return document_ids, number_of_expected_documents
+
+    def __invalidate_prefix_cache_if_aliased(self, converted_document):
+        """Drop cached contextual prefixes for a document the alias registry changed.
+
+        The cache key is doc_id::chunk_hash::model_id, so a chunk whose text the
+        aliasing rewrote misses anyway — but a chunk that was NOT rewritten still
+        hits, and its cached prefix was generated from the pre-alias document and
+        can name a real person. Per document, not blanket: measured 2026-08-22 on
+        the one prefixed in-scope collection, aliasing changes 40 of its 276
+        documents and 88 of its 2476 chunks — wiping the cache would re-prefix all
+        2476 through the LLM.
+
+        The marker is popped here so it never reaches the persisted document JSON.
+        """
+        if not converted_document.pop(ALIAS_CHANGED_KEY, False):
+            return
+        if self.chunk_prefixer is None:
+            return
+        dropped = self.chunk_prefixer.cache.invalidate_doc(converted_document["id"])
+        if dropped:
+            logging.info(f"Aliasing changed {converted_document['id']}; dropped {dropped} cached prefix(es)")
 
     def __index_documents_for_new_collection(self, document_ids):
         index_mapping = {}
@@ -362,6 +385,11 @@ class DocumentCollectionCreator:
                 pass
             if embedding_block:
                 merged["embedding"] = embedding_block
+            # No privacy stamp on the update branch. An update re-converts only
+            # documents newer than the last run, so stamping here would claim a
+            # collection whose bulk predates aliasing was built clean. Whatever
+            # stamp the existing manifest carries is preserved by the merge, and
+            # that is what re-arms aliasing next time.
             return merged
 
         manifest = {
@@ -377,7 +405,22 @@ class DocumentCollectionCreator:
             manifest["contextualPrefix"] = contextual_prefix_block
         if embedding_block:
             manifest["embedding"] = embedding_block
+        privacy_block = self.__privacy_block(update_time)
+        if privacy_block:
+            manifest["privacy"] = privacy_block
         return manifest
+
+    def __privacy_block(self, update_time):
+        """Record that this build aliased people, and under which policy/map.
+
+        Create branch only — it asserts that the WHOLE index was built aliased.
+        Also what re-arms aliasing on the next update: the update factory reads
+        this key back, so a collection stays aliased even if the scope files drift.
+        """
+        registry = getattr(self.document_converter, "alias_registry", None)
+        if registry is None:
+            return None
+        return registry.manifest_stamp(aliased_at=update_time)
 
     def __embedding_metadata(self):
         """Embedding model identity + library versions from the FAISS indexer, if any.

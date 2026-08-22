@@ -84,12 +84,15 @@ def _record(status, error, duration_source_start):
                         collection, exc_info=True)
 
 
-updater = create_collection_updater(collection,
-                                    contextual_backend_spec=args['contextual_model'],
-                                    contextual_cache_path=args['contextual_cache'],
-                                    contextual_workers=args['contextual_workers'])
-
 try:
+    # Inside the try: building the updater resolves the reader, the indexers and
+    # the privacy scope, so a fail-closed PrivacyMapMissing (or a bad manifest)
+    # happens here — and used to leave no ledger record at all, which reads as
+    # "still up to date" on the dashboard.
+    updater = create_collection_updater(collection,
+                                        contextual_backend_spec=args['contextual_model'],
+                                        contextual_cache_path=args['contextual_cache'],
+                                        contextual_workers=args['contextual_workers'])
     updater.run()
 except BaseException as e:
     _record("failed", str(e), started_at)
