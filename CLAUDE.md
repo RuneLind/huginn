@@ -207,17 +207,67 @@ map stays local.
   reader block reproduces the source's. `--swap` re-checks the stamp, parks the
   live one under `data/prealias/<name>-<date>` (**outside** `data/collections/`, so
   no server glob serves it) and reloads the server — a failed reload exits non-zero.
-- **Verify:** `.venv/bin/python scripts/audit/verify_aliased_collection.py
-  --collection <name>-aliased --compare <name>` (`--collections-dir` verifies a
-  staged copy, `--map` pins the map). It decodes JSON rather than grepping bytes,
-  checks the BM25 token list separately — a byte-grep of the pickle finds nothing
-  while both name tokens sit adjacent in `corpus_tokens` — and scans **every** file
-  under the collection dir, failing on a `.bak` or an unrecognised binary rather
-  than skipping it. With `--compare` it also asserts the rebuild's
-  `numberOfDocuments`/`numberOfChunks` equal the pre-alias twin's;
-  `--allow-count-drift` downgrades that to a printed `WARN`, for a source tree
-  that has grown since the live collection was last built. Bare given names are
-  explicitly out of scope (see the module docstring).
+- **The distribution gate** is `main/privacy/index_scan.py`, driven by
+  `.venv/bin/python scripts/audit/scan_index.py --collection <name>` (add
+  `--compare <name>` for the pre-alias twin invariants, `--collections-dir` for a
+  staged copy or an untarred package, `--map` to pin the map). *This script was
+  called `verify_aliased_collection.py` until the checks were promoted into
+  `main/privacy/` so the packager could call them as a library; the flags are
+  unchanged.* It decodes JSON rather than grepping bytes, checks the BM25 token
+  list separately — a byte-grep of the pickle finds nothing while both name
+  tokens sit adjacent in `corpus_tokens` — and scans **every** file under the
+  collection dir, failing on a `.bak` or an unrecognised binary rather than
+  skipping it. With `--compare` it also asserts `numberOfDocuments` /
+  `numberOfChunks` equal the twin's (`--allow-count-drift` downgrades that to a
+  warning; a count the twin's manifest does not record at all is skipped).
+  Everything printed and everything in `--json-report` is a shape or a count;
+  `--candidates-out` is the one output with real text in it and belongs in a
+  gitignored private sub-repo.
+  - **Check 9, capitalised-bigram candidates, is the one that finds people the
+    map never knew** — every other check works *from* the map and is blind to
+    them. A `Capitalised Capitalised(+)` run is **retained** as a candidate when
+    its first token is a plausible given name (public `main/privacy/given_names.txt`
+    ∪ the private map's given names and `bare_given_name_residual`, unioned at
+    runtime), then `non_person_labels` and a reviewed allow-list
+    (`huginn-*/privacy/non_person_bigrams.json`, gitignored) are subtracted.
+    **Retention, not subtraction** — a filter that drops "things that look like
+    names" removes exactly the target category. The public gazetteer must never
+    grow corpus-specific names; a structural test keeps it to one alphabetic
+    token per line, and `test_public_hygiene.py` exempts only that file from the
+    bare-given-name rule (see the comment there for why a list of common names
+    with holes in it is a *reverse* fingerprint).
+  - **Checks 10 and 11** are new categories rather than map lookups: distributor
+    fingerprints (an absolute `/Users/` path or a `.bak` reference anywhere in
+    the unit — this found another person's macOS username in a pasted stack
+    trace) and `main/privacy/sensitivity_scanner.py`. The sensitivity categories
+    that BLOCK are the ones measured precise enough to block on (fødselsnummer,
+    organisasjonsnummer, bankkonto, credential, ident, dotted handle); email,
+    plaintext-password patterns and phone numbers are reported and do not fail
+    the gate. Anchoring is what makes that affordable: 48 findings across the
+    three collections, against 1 262 for the same detectors without the keyword
+    anchors and leading-digit rules (`benchmarks/pii/RESULTS.md`). The new
+    categories are **never** wired into `PiiSanitizer.sanitize` — that is the
+    live Jira ingest write path, where a false positive mangles a stored
+    document irreversibly.
+  - Bare given names standing alone stay out of scope (the map's
+    `bare_given_name_residual`, a documented campaign decision).
+- **Packaging is the only hand-off path.** `.venv/bin/python
+  scripts/audit/package_collection.py --collection <name> [--out dir]` runs the
+  scan and writes `<name>-<date>.tar.gz` **only** when every check passes; a
+  failure prints the report, writes nothing and exits non-zero. The tarball holds
+  `PACKAGE-STAMP.json` (collection, scan date, policy/map version, document
+  count, per-check counts) plus `data/collections/<name>/` at the path it unpacks
+  to — never the map, never `data/prealias/`, never a cache. It refuses outright
+  for a collection out of privacy scope or without a manifest `privacy` stamp:
+  nothing aliased it, so a clean scan would certify nothing. Copying the
+  collection directory by hand is not a supported hand-off.
+- **`scripts/tagging/tag_documents.py` refuses an external backend on a scoped
+  tree.** It reads RAW source markdown and defaults to `--backend claude-cli`,
+  which ships an excerpt of every file off the machine. When `--source` resolves
+  inside an in-scope basePath (`alias_registry.path_in_scope`, realpath
+  containment) and the backend is not `ollama`, it aborts before opening a single
+  file. Only this script: the two graph extractors read the same trees but are
+  deterministic and local.
 - **Derived caches carry pre-alias text.**
   `.venv/bin/python scripts/audit/purge_prealias_caches.py` retires them (LLM graph
   caches deleted, dormant contextual caches renamed to `.pre-alias.bak`). The

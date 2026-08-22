@@ -75,8 +75,20 @@ MIN_NAME_LENGTH = 5  # shorter literals collide with ordinary words and code
 # because they author documents in the indexed corpora. Public by intent.
 PERSON_ALLOWLIST = {"LICENSE"}
 
+# The public given-name gazetteer the distribution gate's bigram detector reads.
+# It is a list of common given names compiled from public sources, and a
+# Norwegian corpus's colleagues necessarily share given names with it — a list
+# of common Norwegian names with holes punched where this machine's colleagues
+# happen to be is both useless as a gazetteer and a *reverse* fingerprint. So
+# single-token literals (bare given names, and the map's single-token mononyms)
+# are not checked against this ONE file. Everything else still is: a full name,
+# a `first.last` slug or any multi-token variant in the gazetteer is a leak, and
+# `test_given_names_file_holds_only_single_tokens` makes it structurally
+# impossible for one to be added.
+GIVEN_NAMES_FILE = "main/privacy/given_names.txt"
 
-def _mapped_person_literals():
+
+def _mapped_person_literals(single_tokens: bool = True):
     """Every real-person literal the alias map knows, from the gitignored maps.
 
     Same shape as the sub-repo guard above: the names are never spelled out
@@ -84,6 +96,9 @@ def _mapped_person_literals():
     clone without private sub-repos skips. This is the backstop for the one
     mistake this campaign already made once — a real name in a docstring, which
     had to be removed by rewriting history.
+
+    `single_tokens=False` drops the bare given names and mononyms, for the one
+    file allowed to contain those (see GIVEN_NAMES_FILE).
     """
     literals = set()
     for path in sorted(REPO_ROOT.glob("huginn-*/privacy/aliases.json")):
@@ -94,7 +109,12 @@ def _mapped_person_literals():
             literals.update(variants)
         literals.update(data.get("bare_given_name_residual", {}))
     return sorted({literal for literal in literals
-                   if isinstance(literal, str) and len(literal) >= MIN_NAME_LENGTH})
+                   if isinstance(literal, str) and len(literal) >= MIN_NAME_LENGTH
+                   and (single_tokens or not literal.isalpha())})
+
+
+def _pattern_for(literals):
+    return re.compile("|".join(r"(?<!\w)" + re.escape(n) + r"(?!\w)" for n in literals), re.I)
 
 
 def test_no_tracked_file_names_a_mapped_person():
@@ -105,11 +125,17 @@ def test_no_tracked_file_names_a_mapped_person():
         files = _tracked_files()
     except (subprocess.CalledProcessError, FileNotFoundError):
         pytest.skip("not a git checkout")
-    pattern = re.compile("|".join(r"(?<!\w)" + re.escape(n) + r"(?!\w)" for n in literals), re.I)
+    pattern = _pattern_for(literals)
+    multi_token = _pattern_for(_mapped_person_literals(single_tokens=False))
     hits = []
     for rel in files:
         if rel in PERSON_ALLOWLIST:
             continue
+        if rel == GIVEN_NAMES_FILE:
+            # Given names only; a full name or a slug is still a leak here.
+            pattern_for_file = multi_token
+        else:
+            pattern_for_file = pattern
         path = REPO_ROOT / rel
         if not path.is_file():
             continue
@@ -118,8 +144,29 @@ def test_no_tracked_file_names_a_mapped_person():
         except (UnicodeDecodeError, OSError):
             continue
         for lineno, line in enumerate(text.splitlines(), 1):
-            if pattern.search(line):
+            if pattern_for_file.search(line):
                 # The offending text is NOT echoed: this assertion message ends
                 # up in CI logs and pasted into PRs.
                 hits.append(f"{rel}:{lineno}")
     assert hits == [], "a mapped person's name appears in these tracked files:\n" + "\n".join(hits)
+
+
+def test_given_names_file_holds_only_single_tokens():
+    """The structural half of the carve-out above.
+
+    The gazetteer is exempt from the bare-given-name check, so what keeps a full
+    name out of it is this: every entry must be ONE alphabetic token. No space,
+    no dot, no underscore, no comma, no digit — which makes `First Last`,
+    `first.last` and `Last, First` all impossible to add, whatever the intent.
+    """
+    path = REPO_ROOT / GIVEN_NAMES_FILE
+    assert path.exists(), f"{GIVEN_NAMES_FILE} is missing; the bigram detector needs it"
+    bad = []
+    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        entry = line.strip()
+        if not entry or entry.startswith("#"):
+            continue
+        if not entry.isalpha():
+            bad.append(f"line {lineno}")
+    assert bad == [], (f"{GIVEN_NAMES_FILE} must contain one alphabetic token per line; "
+                       f"offending lines: {bad}")

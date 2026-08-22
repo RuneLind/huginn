@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "taggin
 
 from tag_documents import (  # noqa: E402
     build_prompt,
+    external_backend_refusal,
     call_backend,
     get_html_excerpt,
     has_html_tags,
@@ -22,6 +23,7 @@ from tag_documents import (  # noqa: E402
     inject_tags,
     process_files,
 )
+from tag_documents import main as tag_documents_main  # noqa: E402
 
 from main.core.search_response_formatter import apply_metadata_filters  # noqa: E402
 
@@ -420,3 +422,66 @@ class TestFileExclusion:
             process_files(args)
 
         assert seen == ["plans/real.md"]
+
+
+class TestExternalBackendGuard:
+    """A privacy-scoped source tree may only be tagged by a local backend.
+
+    This script reads RAW source markdown — the pre-alias text — and its default
+    backend ships an excerpt of every file to a hosted model. The guard has to
+    fire before a single file is opened; a refusal after the first excerpt has
+    left the machine is not a refusal.
+    """
+
+    @pytest.fixture
+    def scoped(self, tmp_path, monkeypatch):
+        tree = tmp_path / "sources" / "in-scope"
+        (tree / "sub").mkdir(parents=True)
+        (tmp_path / "outside").mkdir()
+        privacy = tmp_path / "huginn-x" / "privacy"
+        privacy.mkdir(parents=True)
+        (privacy / "scope.json").write_text(
+            json.dumps({"collections": [], "basePaths": ["./sources/in-scope"]}),
+            encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        return tmp_path, tree
+
+    def test_an_in_scope_tree_refuses_an_external_backend(self, scoped):
+        _, tree = scoped
+        refusal = external_backend_refusal(str(tree), "claude-cli")
+        assert refusal is not None
+        assert "ollama" in refusal and "Nothing was read" in refusal
+
+    def test_a_subdirectory_of_an_in_scope_tree_refuses_too(self, scoped):
+        _, tree = scoped
+        assert external_backend_refusal(str(tree / "sub"), "claude-cli") is not None
+
+    def test_an_in_scope_tree_may_be_tagged_locally(self, scoped):
+        _, tree = scoped
+        assert external_backend_refusal(str(tree), "ollama") is None
+
+    def test_an_out_of_scope_tree_is_unaffected(self, scoped):
+        root, _ = scoped
+        assert external_backend_refusal(str(root / "outside"), "claude-cli") is None
+
+    def test_main_exits_before_reading_anything(self, scoped, monkeypatch, capsys):
+        """End to end through main(): no file is opened, not even the taxonomy."""
+        _, tree = scoped
+        (tree / "a.md").write_text("body", encoding="utf-8")
+        opened = []
+        real_open = Path.open
+
+        def spy(self, *args, **kwargs):
+            opened.append(str(self))
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", spy)
+        monkeypatch.setattr(sys, "argv", [
+            "tag_documents.py", "--source", str(tree),
+            "--taxonomy", "/nonexistent/taxonomy.json", "--dry-run",
+        ])
+        with pytest.raises(SystemExit) as excinfo:
+            tag_documents_main()
+        assert excinfo.value.code == 2
+        assert "sends document text off this machine" in capsys.readouterr().err
+        assert opened == []

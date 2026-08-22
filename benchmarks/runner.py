@@ -145,11 +145,19 @@ def run_graph_benchmarks(ctx) -> list[BenchmarkResult]:
 def run_pii_benchmarks(ctx, collections: list[str]) -> list[BenchmarkResult]:
     """Run all PII benchmarks."""
     from benchmarks.pii.bench_pii_detection import bench_pii_detection, bench_pii_collection_scan
+    from benchmarks.pii.bench_sensitivity_detection import (
+        bench_bigram_detector, bench_sensitivity_detection,
+    )
 
     results = []
 
     print("  PII: detection accuracy")
     results.append(bench_pii_detection(ctx))
+
+    print("  PII: distribution-gate detectors")
+    results.append(bench_sensitivity_detection(ctx))
+    print("  PII: capitalised-bigram detector")
+    results.append(bench_bigram_detector(ctx))
 
     # Scan Jira collections for PII leaks
     jira_collections = [c for c in collections if "jira" in c.lower()]

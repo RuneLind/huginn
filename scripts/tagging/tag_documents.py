@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 # (scripts/tagging/<file>.py → parents[2] is the huginn repo root).
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tagging_text import FRONTMATTER_RE, extract_json_array, get_content_excerpt
+from main.privacy.alias_registry import path_in_scope
 from main.utils.claude_cli import call_claude
 from main.utils.frontmatter import read_frontmatter
 from main.utils.ollama_cli import DEFAULT_MODEL as DEFAULT_OLLAMA_MODEL
@@ -139,6 +140,31 @@ Rules:
 - If no tags fit at all, return an empty array
 - Return ONLY a JSON array of tag strings, e.g. ["salg", "kundedatabase"]
 - No explanation, no markdown, just the JSON array"""
+
+
+def external_backend_refusal(source: str, backend: str) -> str | None:
+    """Why this run must not start, or None.
+
+    This script reads RAW source markdown — the pre-alias text, not the built
+    collection — and its default backend ships an excerpt of every file to a
+    hosted model. For the trees in privacy scope that is the one thing the whole
+    aliasing campaign exists to prevent, and it would happen file by file with
+    no trace. So: an in-scope source tree may only be tagged by a local backend.
+
+    Checked in ``main()``, before a single file is opened, because a refusal
+    after the first excerpt has already left the machine is not a refusal.
+
+    Deliberately only this script. The two knowledge-graph extractors read the
+    same trees, but they are deterministic and local; adding the guard there
+    would be ceremony that stops nothing.
+    """
+    if backend == "ollama":
+        return None
+    if not path_in_scope(source):
+        return None
+    return (f"--source {source} is inside a privacy-scoped tree, and --backend {backend} "
+            f"sends document text off this machine. Use --backend ollama (local) for this "
+            f"tree, or point --source somewhere out of scope. Nothing was read.")
 
 
 def load_taxonomy(path: str) -> dict:
@@ -404,6 +430,13 @@ def main():
                              "(one per line) to this path. Non-dry-run only; empty when nothing "
                              "was written. Lets a caller commit exactly those files.")
     args = parser.parse_args()
+
+    # Before anything is opened, including the taxonomy: a privacy-scoped source
+    # tree may not be tagged through a backend that leaves this machine.
+    refusal = external_backend_refusal(args.source, args.backend)
+    if refusal:
+        print(f"Error: {refusal}", file=sys.stderr)
+        sys.exit(2)
 
     # Ollama saturates the GPU with a single thread; claude-cli parallelizes to 10.
     if args.workers is None:

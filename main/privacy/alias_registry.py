@@ -77,10 +77,16 @@ _SEPARATOR_RUN = re.compile(r"(?:\s|%20)+", re.IGNORECASE)
 # string: in `?f=%2CAda%20Example%40nav.no` the character before the name is the
 # `C` of `%2C` and the one after is the `%` of `%40`, so `(?<!\w)`/`(?!\w)`
 # refused a full name sitting in the clear. Exported because
-# scripts/audit/verify_aliased_collection.py must build its needles with the
-# same boundary, or the sweep certifies a form the substituter never removed.
-VARIANT_LEFT_BOUNDARY = r"(?:(?<!\w)|(?<=%20)|(?<=%2C))"
-VARIANT_RIGHT_BOUNDARY = r"(?:(?!\w)|(?=%20)|(?=%40)|(?=%2C))"
+# main/privacy/index_scan.py must build its needles with the same boundary, or
+# the sweep certifies a form the substituter never removed.
+#
+# Any percent-escape, not the three that happened to show up first: `%2C`/`%20`/
+# `%40` were enumerated from one corpus sample, and a name fenced by `%3B`, `%2F`
+# or `%3A` (query separators every bit as common) fell straight through. The
+# generalised form is also symmetric — an enumerated left and a differently
+# enumerated right boundary is a bug waiting for the next escape.
+VARIANT_LEFT_BOUNDARY = r"(?:(?<!\w)|(?<=%[0-9A-Fa-f]{2}))"
+VARIANT_RIGHT_BOUNDARY = r"(?:(?!\w)|(?=%[0-9A-Fa-f]{2}))"
 
 _SCOPE_FILE = os.path.join(os.path.dirname(__file__), "scope.json")
 _PRIVATE_SCOPE_GLOB = "huginn-*/privacy/scope.json"
@@ -167,7 +173,7 @@ class PrivacyMapInvalid(PrivacyMapMissing):
     """A map that loaded but would substitute wrongly. Same fail-closed effect."""
 
 
-def _boundaried(literal: str) -> str:
+def boundaried(literal: str) -> str:
     r"""Escape `literal` and wrap it in the boundaries its shape needs.
 
     A *slug* (one token with `.`/`_`) must not match inside a longer dotted path,
@@ -181,6 +187,12 @@ def _boundaried(literal: str) -> str:
     by non-word characters. A trailing full stop never blocks: it ends a
     sentence. A boundary applies only on a side whose edge character is a word
     character (`Ada Example [X]` ends in `]`).
+
+    Public because main/privacy/index_scan.py builds its needles with it. Before
+    that, the sweep wrapped EVERY needle in the multi-token boundary, which is
+    the loosest of the three: a mononym needle sitting after a dot
+    (`some.path.Zylphia`) was reported as a leak the substituter deliberately
+    does not remove, and a slug needle matched inside a longer dotted path.
     """
     tokens = literal.split()
     body = VARIANT_SEPARATOR.join(re.escape(t) for t in tokens) if len(tokens) > 1 \
@@ -216,7 +228,7 @@ def is_person_handle(handle: str) -> bool:
     survived into the built collection. An explicit list is the only version of
     this rule that fails towards redaction.
 
-    Shared with scripts/audit/verify_aliased_collection.py so the acceptance
+    Shared with main/privacy/index_scan.py so the acceptance
     sweep counts exactly what the substituter would have redacted.
     """
     segments = handle.lstrip("@").split(".")
@@ -268,7 +280,11 @@ def _validate(map_data: dict) -> None:
             raise PrivacyMapInvalid("every entry needs an 'alias' and a 'variants' list")
         for variant in entry["variants"]:
             _require_literal(variant)
-            if _BARE_GIVEN_NAME_RE.fullmatch(variant):
+            # `.strip()` first: `" Ada "` is the same bare given name as `"Ada"`,
+            # but fullmatch() against the padded form fails, so a variant that
+            # picked up whitespace in hand-editing walked past this guard and
+            # then compiled into a pattern that substitutes a given name.
+            if _BARE_GIVEN_NAME_RE.fullmatch(variant.strip()):
                 raise PrivacyMapInvalid("an entry variant is a bare given name (a single "
                                         "all-alphabetic token); those are never substituted")
     for variants in unmapped.values():
@@ -314,10 +330,13 @@ class AliasRegistry:
         alternatives: list[str] = []
         seen_rank: dict[str, int] = {}
         seen_literal: dict[str, str] = {}
+        seen_replacement: dict[str, str | None] = {}
         for _, rank, literal, replacement in ranked:
             key = _lookup_key(literal)
+            stored = None if rank == _EXEMPT else replacement
             if key in seen_rank:
-                if seen_literal[key] != _case_key(literal):
+                if (seen_literal[key] != _case_key(literal)
+                        and seen_replacement[key] != stored):
                     # Two DIFFERENT literals collapsing onto one table key
                     # ("Weiss" and "Weiß" both casefold to "weiss"). The table is
                     # keyed on the casefold, so the second literal's replacement
@@ -325,9 +344,23 @@ class AliasRegistry:
                     # Nothing downstream can see that; refuse to compile.
                     # The key is a real name; report its SHAPE, since this
                     # message ends up in build logs and tracebacks.
+                    #
+                    # Only when the replacements actually differ. Two spellings
+                    # of one person's name (`Weiss`/`Weiß` under the same alias)
+                    # collapse onto the same key and get the same alias either
+                    # way — there is nothing to silently drop, and refusing made
+                    # the map unloadable over an entry that was simply thorough.
                     raise PrivacyMapInvalid(
                         f"two distinct literals share a casefold key (shape "
                         f"{_shape(key)!r}); one would silently take the other's replacement")
+                if seen_literal[key] != _case_key(literal):
+                    # A different spelling that folds onto the same key and wants
+                    # the same replacement. The TABLE already has the answer (the
+                    # lookup casefolds too), but the PATTERN does not: IGNORECASE
+                    # folds case, not ß onto ss, so without its own alternative
+                    # this spelling is never matched at all.
+                    alternatives.append(boundaried(literal))
+                    continue
                 # Same literal twice. Within a class this is just case variation
                 # in the map ("Saksbehandler"/"saksbehandler"); across classes it
                 # means the map's own lints let a real conflict through, so say so.
@@ -337,8 +370,9 @@ class AliasRegistry:
                 continue
             seen_rank[key] = rank
             seen_literal[key] = _case_key(literal)
-            self._replacements[key] = None if rank == _EXEMPT else replacement
-            alternatives.append(_boundaried(literal))
+            seen_replacement[key] = stored
+            self._replacements[key] = stored
+            alternatives.append(boundaried(literal))
 
         alternatives.append(_IDENT_ALTERNATIVE)
         self._pattern = re.compile("|".join(alternatives), re.IGNORECASE)
@@ -498,6 +532,23 @@ def load_scope() -> tuple[set, set]:
     return collections, base_paths
 
 
+def path_in_scope(path: str) -> bool:
+    """True when `path` is an in-scope source tree, or lives inside one.
+
+    Containment, not equality: a collection's reader points at the whole tree,
+    but a caller — `scripts/tagging/tag_documents.py --source <subdir>` — may
+    name any directory under it, and the documents there are the same documents.
+    Realpath on both sides, so a symlink pointing into an in-scope tree is in
+    scope and `../` cannot walk out of one.
+    """
+    if not path:
+        return False
+    _, base_paths = load_scope()
+    resolved = os.path.realpath(path)
+    return any(resolved == base or resolved.startswith(base + os.sep)
+               for base in base_paths)
+
+
 def resolve_registry(collection_name, base_path, armed_by_manifest: bool = False,
                      map_path: str | None = None) -> AliasRegistry | None:
     """The single scoping decision both construction sites make.
@@ -515,10 +566,8 @@ def resolve_registry(collection_name, base_path, armed_by_manifest: bool = False
     """
     in_scope = armed_by_manifest
     if not in_scope:
-        collections, base_paths = load_scope()
-        in_scope = collection_name in collections or (
-            bool(base_path) and os.path.realpath(base_path) in base_paths
-        )
+        collections, _ = load_scope()
+        in_scope = collection_name in collections or path_in_scope(base_path)
     if not in_scope:
         return None
 
