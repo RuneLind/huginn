@@ -64,6 +64,24 @@ class ContextualCache:
             }
             self._dirty = True
 
+    def invalidate_doc(self, doc_id: str) -> int:
+        """Drop every cached prefix for one document; return how many went.
+
+        Used when build-time aliasing rewrote a document: a chunk whose text
+        changed misses on its own (the hash is in the key), but an *unchanged*
+        chunk of the same document still hits, and its prefix was generated from
+        the pre-alias document text — which can name a real person. Scoped to the
+        one document so the rest of the collection keeps its cache.
+        """
+        prefix = f"{doc_id}::"
+        with self._lock:
+            stale = [key for key in self._entries if key.startswith(prefix)]
+            for key in stale:
+                del self._entries[key]
+            if stale:
+                self._dirty = True
+        return len(stale)
+
     def flush(self) -> None:
         with self._lock:
             if not self._dirty:

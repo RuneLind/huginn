@@ -1,6 +1,7 @@
 import os
 import re
 
+from main.privacy import ALIAS_CHANGED_KEY
 from main.sources.files.markdown_heading_splitter import MarkdownHeadingSplitter
 from main.sources.files.session_markdown_splitter import SessionMarkdownSplitter
 from main.utils.frontmatter import parse_tags, read_frontmatter, strip_frontmatter
@@ -16,7 +17,10 @@ class FilesDocumentConverter:
     _S3_URL_RE = re.compile(r'https://[a-zA-Z0-9._-]+\.s3\.[a-zA-Z0-9-]+\.amazonaws\.com/[^\s)]*')
     _CODE_BLOCK_RE = re.compile(r'```[^\n]*\n.*?```', re.DOTALL)
 
-    def __init__(self):
+    def __init__(self, alias_registry=None):
+        # None => byte-identical behaviour to before build-time aliasing existed.
+        # Set only for collections main.privacy.resolve_registry puts in scope.
+        self.alias_registry = alias_registry
         self.heading_splitter = MarkdownHeadingSplitter(
             chunk_size=1000,
             chunk_overlap=100,
@@ -39,6 +43,11 @@ class FilesDocumentConverter:
         }
         if fm_metadata:
             result["metadata"] = fm_metadata
+        # Aliasing happens HERE, before the chunk prefixer runs on the result
+        # (documents_collection_creator calls convert() first), so no contextual
+        # prefix is ever generated from a real name.
+        if self.alias_registry is not None and self.alias_registry.apply_document(result):
+            result[ALIAS_CHANGED_KEY] = True
         return [result]
     
     def __build_breadcrumb(self, file_relative_path):

@@ -1,0 +1,111 @@
+{
+  "Team/Sub/Deeper/nested-deep-page.md": {
+    "chunks": [
+      {
+        "heading": "Nested deep page",
+        "indexedData": "[Team > Sub > Deeper > nested-deep-page]\n## Nested deep page\nPath is deeper than four levels so the breadcrumb truncates. Ada Example wrote this."
+      }
+    ],
+    "id": "Team/Sub/Deeper/nested-deep-page.md",
+    "text": "[Team > Sub > Deeper > nested-deep-page]\n\n# Nested deep page\n\nPath is deeper than four levels so the breadcrumb truncates. Ada Example wrote this.",
+    "url": "file://<BASE>/Team/Sub/Deeper/nested-deep-page.md"
+  },
+  "plain.md": {
+    "chunks": [
+      {
+        "heading": "Plain page",
+        "indexedData": "[plain]\n## Plain page\nSome intro text mentioning Ada Example and a link to [file] here."
+      },
+      {
+        "heading": "Section one",
+        "indexedData": "[plain]\n## Section one\nBody of section one. Contact bo.tester or Tester, Bo about Q000124."
+      },
+      {
+        "heading": "Section two",
+        "indexedData": "[plain]\n## Section two\nMore text. Se også @ada.example og @nav.no og org.springframework.Bean."
+      }
+    ],
+    "id": "plain.md",
+    "text": "[plain]\n\n# Plain page\n\nSome intro text mentioning Ada Example and a link to [file] here.\n\n\n\n## Section one\n\nBody of section one. Contact bo.tester or Tester, Bo about Q000124.\n\n\n\n## Section two\n\nMore text. Se også @ada.example og @nav.no og org.springframework.Bean.",
+    "url": "file://<BASE>/plain.md"
+  },
+  "session.md": {
+    "chunks": [
+      {
+        "heading": "Turn 1",
+        "indexedData": "[session]\n## Turn 1\n**User:** Kan du se på saken til Ada Example?\n\n```bash\necho \"keep this code block\"\n```\n\n**Assistant:** Ja. Jeg sjekket med Tester, Bo og fant ident Q000124.\nKontakt @bo.tester eller @ada.example.",
+        "metadata": {
+          "date": "2026-01-03",
+          "gitBranch": "feature/demo",
+          "project": "demo-project",
+          "session_id": "sess-0001",
+          "title": "Session transcript"
+        }
+      }
+    ],
+    "id": "session.md",
+    "metadata": {
+      "date": "2026-01-03",
+      "gitBranch": "feature/demo",
+      "project": "demo-project",
+      "session_id": "sess-0001",
+      "title": "Session transcript"
+    },
+    "text": "[session]\n\n# Session transcript\n\n## User\n\nKan du se på saken til Ada Example?\n\n```bash\necho \"keep this code block\"\n```\n\n## Assistant\n\nJa. Jeg sjekket med Tester, Bo og fant ident Q000124.\nKontakt @bo.tester eller @ada.example.",
+    "url": "file://<BASE>/session.md"
+  },
+  "tagged.md": {
+    "chunks": [
+      {
+        "heading": "Ada Example - 2026-01-02T10:00:00.000+0100",
+        "indexedData": "[tagged]\ntags: rapportering, Ada Example\nepic: Epic owned by Ada Example\n## Ada Example - 2026-01-02T10:00:00.000+0100\nKommentar fra bo.tester. Ident [~Q000124] og Q000456.",
+        "metadata": {
+          "breadcrumb": "Demo > Tagged",
+          "epic_link": "DEMO-99",
+          "epic_summary": "Epic owned by Ada Example",
+          "issue_key": "DEMO-1",
+          "issue_type": "Task",
+          "labels": "[alpha, beta]",
+          "space": "DEMO",
+          "status": "Open",
+          "tags": "[rapportering, Ada Example]",
+          "title": "Tagged issue page",
+          "url": "https://example.invalid/browse/DEMO-1"
+        }
+      },
+      {
+        "heading": "Detaljer",
+        "indexedData": "[tagged]\ntags: rapportering, Ada Example\nepic: Epic owned by Ada Example\n## Detaljer\nUtsendt arbeidstaker er et begrep. Bo Tester [X] svarte.",
+        "metadata": {
+          "breadcrumb": "Demo > Tagged",
+          "epic_link": "DEMO-99",
+          "epic_summary": "Epic owned by Ada Example",
+          "issue_key": "DEMO-1",
+          "issue_type": "Task",
+          "labels": "[alpha, beta]",
+          "space": "DEMO",
+          "status": "Open",
+          "tags": "[rapportering, Ada Example]",
+          "title": "Tagged issue page",
+          "url": "https://example.invalid/browse/DEMO-1"
+        }
+      }
+    ],
+    "id": "tagged.md",
+    "metadata": {
+      "breadcrumb": "Demo > Tagged",
+      "epic_link": "DEMO-99",
+      "epic_summary": "Epic owned by Ada Example",
+      "issue_key": "DEMO-1",
+      "issue_type": "Task",
+      "labels": "[alpha, beta]",
+      "space": "DEMO",
+      "status": "Open",
+      "tags": "[rapportering, Ada Example]",
+      "title": "Tagged issue page",
+      "url": "https://example.invalid/browse/DEMO-1"
+    },
+    "text": "[tagged]\n\n# Tagged issue page\n\n### Ada Example - 2026-01-02T10:00:00.000+0100\n\nKommentar fra bo.tester. Ident [~Q000124] og Q000456.\n\n## Detaljer\n\nUtsendt arbeidstaker er et begrep. Bo Tester [X] svarte.",
+    "url": "https://example.invalid/browse/DEMO-1"
+  }
+}

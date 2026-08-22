@@ -1,0 +1,13 @@
+{
+  "_comment": "Collections whose built index must carry no real person name. Extended by huginn-*/privacy/scope.json for collections whose names or source paths are not public. Relative basePaths resolve against the process CWD, like every other reader path in this repo.",
+  "version": 1,
+  "collections": [
+    "melosys-confluence-v3",
+    "jira-issues",
+    "nav-wiki"
+  ],
+  "basePaths": [
+    "./data/sources/melosys-confluence",
+    "./data/sources/jira-issues"
+  ]
+}

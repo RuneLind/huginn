@@ -140,6 +140,48 @@ curl -X DELETE "http://127.0.0.1:8321/api/document/x-articles/some-doc.md"
   server-side; a muninn proxy for it lands separately, and it is not meant for the
   browser extension.
 
+## Build-time people aliasing (privacy)
+
+Some collections index documents full of real colleagues' names. Those
+collections must be copyable to another machine, so people are **aliased at
+index build time**, inside `FilesDocumentConverter.convert()` — the built
+collection under `data/collections/` never contains a real name, and the reverse
+map stays local.
+
+- `main/privacy/alias_registry.py` compiles the map into one regex pass:
+  mapped people → their alias (`dev-06`), unmapped people → `[~ukjent-person]`,
+  role nouns / test users / countries → left alone, `[A-Za-z]\d{6}` idents (bare
+  or wrapped as `[~Q000124]`) → `[~person]`, and any leftover dotted handle →
+  `@person`. `id` and `url` are never rewritten — they are the join keys to the
+  source file and the index mapping.
+- **Scope** is `main/privacy/scope.json` (public collection names + public source
+  dirs) plus an optional private `huginn-*/privacy/scope.json` for the paths that
+  are not public — the same glob convention as `graph_routing.json`. Matching is
+  by collection name **or** reader `basePath`, so sibling/backup collections
+  sharing a `basePath` arm too. Everything else gets `alias_registry=None` and
+  behaves exactly as before.
+- **Fail closed.** An in-scope collection whose map (`huginn-*/privacy/aliases.json`)
+  is missing raises `PrivacyMapMissing` *before* the create path removes the
+  collection folder. A clone with no private sub-repos simply builds nothing
+  in scope.
+- The manifest gets a `privacy: {policy_version, map_version, aliasedAt}` stamp on
+  both the create and the update branch. That stamp also re-arms aliasing on
+  update even if the scope files drift.
+- **Rebuilding:** `scripts/audit/rebuild_aliased.py --collection <name>` builds into
+  `<name>-aliased` (the create path deletes the target folder first, so never build
+  in place), reusing the existing manifest's reader, indexers and contextual-prefix
+  model and pointing `--contextual-cache` at the REAL collection's cache. `--swap`
+  parks the live one as `<name>-prealias-<date>` and reloads the server.
+- **Verify:** `scripts/audit/verify_aliased_collection.py --collection <name>-aliased
+  --compare <name>`. It decodes JSON rather than grepping bytes, and checks the BM25
+  token list separately — a byte-grep of the pickle finds nothing while both name
+  tokens sit adjacent in `corpus_tokens`.
+- **Derived caches carry pre-alias text.** `scripts/audit/purge_prealias_caches.py`
+  retires them (LLM graph caches deleted, dormant contextual caches renamed to
+  `.pre-alias.bak`). The contextual cache of an actively-prefixed collection is
+  kept on purpose: the pipeline invalidates exactly the documents aliasing changed
+  (`ContextualCache.invalidate_doc`), instead of re-prefixing every chunk.
+
 ## LLM entity extraction (knowledge graph)
 
 Extract entities and relationships from a collection using a local Ollama model. Outputs a `*_llm_graph.json` used for query expansion and graph context enrichment at search time.
@@ -150,7 +192,10 @@ uv run scripts/knowledge_graph/extract_entities_llm.py --collection <collection-
 ```
 
 - Requires Ollama running locally with `qwen3.6:35b-a3b-coding-nvfp4` (or pass `--model`)
-- Incremental: uses a `.cache.json` file, safe to stop and resume
+- Incremental: uses a `.cache.json` file, safe to stop and resume. The cache is
+  stamped with the privacy `policy_version`; a cache written before build-time
+  aliasing (or under an older policy) is discarded wholesale rather than replaying
+  pre-alias extractions — real names would go straight back into the graph JSON.
 - Output routing (no private collection names live in this public repo):
   1. `--output <path>` always wins.
   2. Else a `graph_routing.json` in one of the private sub-repo dirs (`huginn-*/scripts/knowledge_graph/`) or `./scripts/knowledge_graph/`. Each routing file either lists owned collections (`{"collections": [...]}`) or is the catch-all (`{"default": true}`). A listed collection writes into that file's dir; unlisted collections go to the `default` dir.

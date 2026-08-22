@@ -27,6 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from main.graph.graph_loader import get_collection_manifest, resolve_graph_output_path
+from main.privacy import POLICY_VERSION as PRIVACY_POLICY_VERSION
 from main.utils.ollama_cli import call_ollama as call_ollama_chat
 
 
@@ -262,13 +263,26 @@ def main():
     if args.limit > 0:
         doc_files = doc_files[:args.limit]
 
-    # Load cache of previously extracted documents
+    # Load cache of previously extracted documents.
+    #
+    # The cache is keyed by doc_id alone, so an extraction made from the
+    # PRE-alias documents would keep being replayed after the collection is
+    # rebuilt with build-time aliasing — putting real names straight back into
+    # the graph JSON. The privacy policy version is stored alongside the
+    # entries; a mismatch (including the absence of the key, i.e. every cache
+    # written before this change) discards the whole cache rather than
+    # silently reusing it.
     cache = {}
     if cache_path.exists():
         try:
-            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+            raw = json.loads(cache_path.read_text(encoding="utf-8"))
         except Exception:
-            cache = {}
+            raw = {}
+        if raw.get("_policy_version") == PRIVACY_POLICY_VERSION:
+            cache = {k: v for k, v in raw.items() if not k.startswith("_")}
+        elif raw:
+            print(f"Cache ignored: privacy policy version {raw.get('_policy_version')} "
+                  f"!= {PRIVACY_POLICY_VERSION} ({len(raw)} stale entries)")
 
     print(f"Collection: {args.collection}")
     print(f"Model: {args.model}")
@@ -329,14 +343,14 @@ def main():
             cache[doc_id] = extraction
             new_count += 1
             if new_count % 20 == 0:
-                cache_path.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+                cache_path.write_text(json.dumps({"_policy_version": PRIVACY_POLICY_VERSION, **cache}, ensure_ascii=False), encoding="utf-8")
         else:
             print("failed")
             errors += 1
 
     # Final cache write
     if new_count > 0:
-        cache_path.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+        cache_path.write_text(json.dumps({"_policy_version": PRIVACY_POLICY_VERSION, **cache}, ensure_ascii=False), encoding="utf-8")
 
     elapsed = time.time() - start_time
     cached_count = len(all_extractions) - new_count
