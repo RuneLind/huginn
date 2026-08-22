@@ -152,18 +152,37 @@ map stays local.
   mapped people → their alias (`dev-06`), unmapped people → `[~ukjent-person]`,
   role nouns / test users / countries → left alone, `[A-Za-z]\d{6}` idents (bare
   or wrapped as `[~Q000124]`) → `[~person]`. A second pass turns any leftover
-  dotted handle into `@person` and a dotted email *local part* into `person@`,
-  leaving domains, `@org.junit.Test`-style package paths and `@v1.2.3` versions
-  alone. `id` and `url` are never rewritten — they are the join keys to the
-  source file and the index mapping.
-- Multi-token variants match across **any** whitespace run or `%20`, so a name
-  broken across a line or percent-encoded in a URL still matches; bare
-  single-token variants additionally block a preceding `.`/`-`, so a mononym
-  cannot be welded onto a surviving dotted path segment.
+  dotted handle into `@person`, and in a dotted email *local part* the local part
+  becomes `person` (`ola.nordmann@nav.no` → `person@nav.no`). `id` and `url` are
+  never rewritten — they are the join keys to the source file and the index
+  mapping.
+- **What that second pass leaves alone**, because the corpora are code-heavy:
+  `@v1.2.3` versions; package paths under a known root (`@org.`, `@jakarta.`,
+  `@kotlin.`, `@android.`, `@net.`, …); **code annotations**, i.e. a lowercase
+  root plus a CamelCase segment (`@lombok.Setter`, `@dagger.Provides` — the
+  annotation vocabulary is open-ended, so a root list alone cannot keep up); and
+  hosts, decided by an **explicit** last-label list (TLDs plus `internal`,
+  `local`, `test`, `dev`, `localhost`). The email rule additionally requires a
+  real domain after the `@`, so Python's matmul (`np.eye@vec`, `A.T@B`) is not
+  read as an address. There is deliberately no "short last segment looks like a
+  TLD" heuristic: Norwegian surnames are short, and `@ola.berg` / `@kari.moe` /
+  `@per.aas` survived into the built collection under it. The cost of the
+  explicit list is that a Capitalized.Capitalized handle with no known root is a
+  person, so `@Abac.Attr`-style shorthand redacts to `@person`.
+- Multi-token variants match across a whitespace run **spanning at most one
+  newline** (a blank line is a paragraph break, not a wrapped name) or `%20`, and
+  their boundaries also accept `%2C`/`%20`/`%40`, so a name percent-encoded in a
+  URL query string still matches. Bare single-token variants additionally block a
+  preceding `.`, so a mononym cannot be welded onto a surviving dotted path
+  segment — but not a preceding `-`, which is punctuation far more often than it
+  is a path.
 - **The map is validated at compile time** and a bad one refuses to build
   (`PrivacyMapInvalid`, a `PrivacyMapMissing`): blank literals, zero entries, an
-  entry variant that is a bare given name, schema drift. Two discovered maps are
-  `ambiguous` rather than first-wins.
+  entry variant that is a bare given name (a single all-alphabetic token —
+  hyphenated compounds like `Nord-Hansen` are fine), two distinct literals
+  sharing a casefold key (`Weiss`/`Weiß`, where one would silently take the
+  other's replacement), schema drift. Two discovered maps are `ambiguous` rather
+  than first-wins.
 - **Scope** is `main/privacy/scope.json` (public collection names + public source
   dirs) plus an optional private `huginn-*/privacy/scope.json` for the paths that
   are not public — the same glob convention as `graph_routing.json`. Matching is
@@ -194,8 +213,11 @@ map stays local.
   checks the BM25 token list separately — a byte-grep of the pickle finds nothing
   while both name tokens sit adjacent in `corpus_tokens` — and scans **every** file
   under the collection dir, failing on a `.bak` or an unrecognised binary rather
-  than skipping it. Bare given names are explicitly out of scope (see the module
-  docstring).
+  than skipping it. With `--compare` it also asserts the rebuild's
+  `numberOfDocuments`/`numberOfChunks` equal the pre-alias twin's;
+  `--allow-count-drift` downgrades that to a printed `WARN`, for a source tree
+  that has grown since the live collection was last built. Bare given names are
+  explicitly out of scope (see the module docstring).
 - **Derived caches carry pre-alias text.**
   `.venv/bin/python scripts/audit/purge_prealias_caches.py` retires them (LLM graph
   caches deleted, dormant contextual caches renamed to `.pre-alias.bak`). The
@@ -210,8 +232,8 @@ map stays local.
 Extract entities and relationships from a collection using a local Ollama model. Outputs a `*_llm_graph.json` used for query expansion and graph context enrichment at search time.
 
 ```sh
-uv run scripts/knowledge_graph/extract_entities_llm.py --collection <collection-name>
-uv run scripts/knowledge_graph/extract_entities_llm.py --collection <collection-name> --limit 20  # test run
+.venv/bin/python scripts/knowledge_graph/extract_entities_llm.py --collection <collection-name>
+.venv/bin/python scripts/knowledge_graph/extract_entities_llm.py --collection <collection-name> --limit 20  # test run
 ```
 
 - Requires Ollama running locally with `qwen3.6:35b-a3b-coding-nvfp4` (or pass `--model`)

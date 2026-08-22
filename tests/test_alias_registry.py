@@ -9,7 +9,9 @@ import json
 
 import pytest
 
-from main.privacy.alias_registry import AliasRegistry, PrivacyMapMissing, resolve_registry
+from main.privacy.alias_registry import (
+    AliasRegistry, PrivacyMapInvalid, PrivacyMapMissing, resolve_registry,
+)
 
 
 def _entry(alias, name, variants, role="dev", require_full_name=False, extra=()):
@@ -163,9 +165,40 @@ def test_bare_token_variant_is_not_welded_onto_a_dotted_path(registry):
     # without the same left boundary on the bare token the engine falls through
     # to `Zylphia` and produces "no.nav.[~ukjent-person].quorndal.Klasse".
     assert registry.apply("no.nav.zylphia.quorndal.Klasse") == "no.nav.zylphia.quorndal.Klasse"
-    assert registry.apply("pakke-Zylphia") == "pakke-Zylphia"
     # …but a sentence boundary still redacts (the case the left boundary must not eat).
     assert registry.apply("Jeg sjekket med Zylphia") == "Jeg sjekket med [~ukjent-person]"
+
+
+def test_single_token_left_boundary_blocks_only_a_dot_and_word_characters(registry):
+    """A hyphen or a bracket in front of a mononym is punctuation, not a path.
+
+    The boundary exists to stop `no.nav.zylphia.…` welding a surviving path tail
+    onto the redaction token; blocking `-` as well made a leading hyphen (a list
+    bullet, a diff marker, a compound with a preceding word broken across a line)
+    a free pass for a real name.
+    """
+    assert registry.apply("-Zylphia") == "-[~ukjent-person]"
+    assert registry.apply("(Zylphia") == "([~ukjent-person]"
+    assert registry.apply("team.Zylphia") == "team.Zylphia"
+
+
+@pytest.mark.parametrize("text", [
+    "https://x/?f=%2CAda%20Example%40nav.no",
+    "https://x/?q=fra%20Ada%20Example",
+])
+def test_multi_token_variant_matches_across_percent_encoded_punctuation(registry, text):
+    """`%2C`/`%40` around a percent-encoded name are not word characters to a
+    reader, but they are to `\\w` — `(?<!\\w)` saw the `C` of `%2C` and refused."""
+    result = registry.apply(text)
+    assert "dev-01" in result
+    assert "Ada" not in result and "Example" not in result
+
+
+def test_variant_separator_spans_at_most_one_newline(registry):
+    # One hard wrap is the same name; a blank line is a paragraph break, and
+    # welding across it joined the end of one sentence to the start of the next.
+    assert registry.apply("Ada\nExample") == "dev-01"
+    assert registry.apply("Ada\n\nExample") == "Ada\n\nExample"
 
 
 def test_exempt_label_survives_a_unicode_case_fold(registry):
@@ -224,7 +257,60 @@ def test_tld_terminated_handles_are_not_people(registry):
 
 
 def test_package_and_annotation_paths_excluded(registry):
-    text = "@org.springframework.web.bind.annotation.RequestParam og @Abac.Attr"
+    text = "@org.springframework.web.bind.annotation.RequestParam"
+    assert registry.apply(text) == text
+
+
+@pytest.mark.parametrize("text", [
+    "@lombok.Setter",
+    "@mockito.Captor",
+    "@dagger.Provides",
+    "@org.junit.Test",
+])
+def test_code_annotations_are_not_people(registry, text):
+    """A lowercase root followed by a CamelCase segment is a Java/Kotlin
+    annotation, whatever the root is — the annotation vocabulary is open-ended
+    (`@lombok.Setter`, `@dagger.Provides`) and a root allow-list cannot track it."""
+    assert registry.apply(text) == text
+
+
+@pytest.mark.parametrize("root", ["jakarta", "kotlin", "android", "net"])
+def test_package_roots_are_honoured_even_when_fully_lowercase(registry, root):
+    # No CamelCase segment here, so the annotation rule does not fire and only
+    # the root list keeps these out of the person branch.
+    text = f"@{root}.internal.pakkenavn"
+    assert registry.apply(text) == text
+
+
+@pytest.mark.parametrize("host", ["nav.no", "acme.se", "acme.dk", "acme.fi", "acme.de",
+                                  "acme.uk", "acme.eu", "acme.fr", "acme.nl",
+                                  "svc.internal", "svc.local", "svc.test", "svc.dev",
+                                  "svc.localhost"])
+def test_domain_terminated_handles_are_not_people(registry, host):
+    assert registry.apply(f"send til @{host} her") == f"send til @{host} her"
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("ping @Ola.Nordmann", "ping @person"),
+    ("ping @ola.nordmann2", "ping @person"),
+    # The three the removed "last segment <=4 alphabetic chars is a TLD"
+    # heuristic silently classified as domains — Norwegian surnames are short.
+    ("ping @ola.berg", "ping @person"),
+    ("ping @kari.moe", "ping @person"),
+    ("ping @per.aas", "ping @person"),
+])
+def test_short_surname_handles_are_people_not_domains(registry, text, expected):
+    assert registry.apply(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "np.eye@vec",          # numpy matmul, not an address
+    "A.T@B",
+    "self.w@x",
+])
+def test_matrix_multiplication_is_not_an_email(registry, text):
+    """`@` between two dotted expressions is Python's matmul operator. Requiring
+    a real domain on the right is what tells the two apart."""
     assert registry.apply(text) == text
 
 
@@ -244,11 +330,10 @@ def test_handle_shapes_that_are_not_people(registry, text):
 
 
 @pytest.mark.parametrize("text,expected", [
-    ("ping @Ola.Nordmann", "ping @person"),          # capitalised: was not matched at all
-    ("ping @ola.nordmann2", "ping @person"),         # digit inside a segment
     ("skriv til ola.nordmann@nav.no", "skriv til person@nav.no"),
+    ("skriv til ola.nordmann@firma.internal", "skriv til person@firma.internal"),
 ])
-def test_handles_and_dotted_email_locals_are_redacted(registry, text, expected):
+def test_dotted_email_locals_are_redacted(registry, text, expected):
     assert registry.apply(text) == expected
 
 
@@ -391,6 +476,33 @@ def _entries_with_variant(variant):
 def test_invalid_map_refuses_to_compile(bad_map):
     with pytest.raises(PrivacyMapMissing):
         AliasRegistry(bad_map)
+
+
+def test_two_distinct_literals_sharing_a_casefold_key_are_invalid():
+    """`Weiss` and `Weiß` casefold to the same table key but are different names.
+
+    The table is keyed on the casefold, so the second literal's replacement is
+    dropped and BOTH spellings get the first one's alias — a wrong substitution
+    that no output inspection reveals. Pure case variation of the SAME literal
+    (`Saksbehandler`/`saksbehandler`, both in MAP) is not this and must still
+    compile.
+    """
+    bad = _mutated(non_person_labels=[*MAP["non_person_labels"], "Weiss", "Weiß"])
+    with pytest.raises(PrivacyMapInvalid, match="casefold"):
+        AliasRegistry(bad)
+
+
+def test_case_only_duplicate_literals_still_compile():
+    # MAP already carries "Saksbehandler" and "saksbehandler".
+    assert AliasRegistry(MAP).apply("en Saksbehandler og en saksbehandler") == \
+        "en Saksbehandler og en saksbehandler"
+
+
+def test_hyphenated_single_token_variant_is_allowed():
+    """A hyphenated compound surname is a full name, not a bare given name; the
+    old "no whitespace, `.`, `_` or `,`" rule rejected the whole map over it."""
+    registry = AliasRegistry(_mutated(entries=_entries_with_variant("Ada-Example")))
+    assert registry.apply("skrevet av Ada-Example") == "skrevet av dev-01"
 
 
 def test_invalid_map_fails_closed_through_resolve_registry(tmp_path):

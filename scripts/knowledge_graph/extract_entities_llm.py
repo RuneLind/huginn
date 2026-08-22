@@ -27,7 +27,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from main.graph.graph_loader import get_collection_manifest, resolve_graph_output_path
-from main.privacy.alias_registry import POLICY_VERSION as PRIVACY_POLICY_VERSION, resolve_registry
+from main.privacy.alias_registry import (
+    POLICY_VERSION as PRIVACY_POLICY_VERSION, PrivacyMapMissing, resolve_registry)
 from main.utils.ollama_cli import call_ollama as call_ollama_chat
 
 
@@ -311,8 +312,21 @@ def main():
         doc_files = doc_files[:args.limit]
 
     manifest = get_collection_manifest(args.data_path, args.collection) or {}
-    aliased = resolve_registry(args.collection,
-                               (manifest.get("reader") or {}).get("basePath")) is not None
+    try:
+        # Same arming rule as the build: the manifest's privacy stamp keeps an
+        # already-aliased collection aliased even if the scope files have since
+        # drifted. Without it the extractor re-derives real names out of the
+        # collection's own documents and writes them into the graph JSON, which
+        # the API server loads at startup.
+        aliased = resolve_registry(
+            args.collection,
+            (manifest.get("reader") or {}).get("basePath"),
+            armed_by_manifest=bool(manifest.get("privacy"))) is not None
+    except PrivacyMapMissing as e:
+        # One line, exit 2: a nightly wrapper reads a traceback as a crash, and
+        # extracting without the map is the one outcome that must not happen.
+        print(f"Error: refusing to extract {args.collection} without its alias map: {e}")
+        sys.exit(2)
     cache = load_extraction_cache(cache_path, aliased)
 
     print(f"Collection: {args.collection}")

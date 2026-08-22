@@ -40,7 +40,10 @@ The checks and why each is shaped the way it is:
    prefixes, and role nouns move for reasons that have nothing to do with
    aliasing.
 6. The contextual-prefix block survives the rebuild, the privacy stamp is
-   present, and no cached prefix replayed a real name into a chunk.
+   present, no cached prefix replayed a real name into a chunk, and — with
+   `--compare` — the document and chunk counts equal the pre-alias twin's.
+   `--allow-count-drift` downgrades that last one to a WARN, for a source tree
+   that has grown since the live collection was last built.
 7. Document ids and urls (never aliased by design) contain no mapped name, matched
    as a token SEQUENCE over `[^\\w]+`-split path text so `First-Last.md` is caught.
 8. Every remaining file under the collection directory is scanned as text. A
@@ -73,7 +76,8 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from main.indexes.indexers.bm25_indexer import _tokenize  # noqa: E402
 from main.privacy.alias_registry import (  # noqa: E402
-    POLICY_VERSION, VARIANT_SEPARATOR, AliasRegistry, is_person_handle,
+    POLICY_VERSION, VARIANT_LEFT_BOUNDARY, VARIANT_RIGHT_BOUNDARY, VARIANT_SEPARATOR,
+    AliasRegistry, is_person_handle,
 )
 
 DEFAULT_COLLECTIONS_DIR = REPO_ROOT / "data" / "collections"
@@ -123,11 +127,18 @@ def build_needles(alias_map: dict) -> list:
 
 
 def needle_pattern(needles: list) -> re.Pattern:
-    """One alternation. Tokens are joined by the registry's own separator so a
-    name split across a line break, a double space or `%20` still matches."""
+    """One alternation, built with the REGISTRY's separator and boundaries.
+
+    Sharing them is the point: a form the substituter removes but the sweep
+    cannot see (a name fenced by `%2C`/`%40` in a URL query string, where `\\w`
+    lookarounds match the `C` and the `%`) would let the sweep certify a
+    collection that still carries it.
+    """
     if not needles:
         sys.exit("No needles built from the alias map — the sweep would pass vacuously.")
-    alternatives = [r"(?<!\w)" + VARIANT_SEPARATOR.join(re.escape(t) for t in n.split()) + r"(?!\w)"
+    alternatives = [VARIANT_LEFT_BOUNDARY
+                    + VARIANT_SEPARATOR.join(re.escape(t) for t in n.split())
+                    + VARIANT_RIGHT_BOUNDARY
                     for n in needles]
     return re.compile("|".join(alternatives), re.I)
 
@@ -372,7 +383,8 @@ def check_map_stamp(collections_dir, collection, alias_map):
     return not problems
 
 
-def check_manifest_and_prefixes(collections_dir, collection, compare, needle_re):
+def check_manifest_and_prefixes(collections_dir, collection, compare, needle_re,
+                                allow_count_drift=False):
     root = collections_dir / collection
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
     privacy = manifest.get("privacy")
@@ -386,8 +398,22 @@ def check_manifest_and_prefixes(collections_dir, collection, compare, needle_re)
             ok = ok and (prefix_block or {}).get("model") == expected_model
             print(f"   contextualPrefix model: {(prefix_block or {}).get('model')} "
                   f"(was {expected_model})")
+        # A rebuild that indexed a different set of documents is not a rebuild of
+        # the same collection: its extra documents were never in the pre-alias
+        # collection this sweep compares against, and a *smaller* count means the
+        # rebuild silently dropped documents (a reader pattern that stopped
+        # matching). Default is a hard failure. `--allow-count-drift` is for the
+        # one knowingly-stale case — a source tree that grew between the last
+        # build of the live collection and this rebuild — and downgrades it to a
+        # printed WARN rather than removing the line.
         for key in ("numberOfDocuments", "numberOfChunks"):
-            print(f"   {key}: {manifest.get(key)} (was {before.get(key)})")
+            new, old = manifest.get(key), before.get(key)
+            if new == old:
+                print(f"   {key}: {new} (was {old})")
+                continue
+            print(f"   {'WARN' if allow_count_drift else '!!'} {key}: {new} (was {old}) — "
+                  f"the rebuild did not index the same set of documents")
+            ok = ok and allow_count_drift
 
     if not prefix_block:
         return ok
@@ -413,6 +439,10 @@ def main() -> None:
     ap.add_argument("--collections-dir", default=str(DEFAULT_COLLECTIONS_DIR),
                     help="Verify a staged copy instead of data/collections")
     ap.add_argument("--map", default=None, help="Alias map path (default: the discovered one)")
+    ap.add_argument("--allow-count-drift", action="store_true",
+                    help="Downgrade a numberOfDocuments/numberOfChunks difference against "
+                         "--compare to a WARN. For a source tree that has grown since the "
+                         "live collection was last built.")
     args = ap.parse_args()
 
     collections_dir = Path(args.collections_dir).resolve()
@@ -443,7 +473,8 @@ def main() -> None:
         results.append(check_exemption_invariant(collections_dir, args.compare, alias_map,
                                                  exceptions, registry))
     results.append(check_manifest_and_prefixes(collections_dir, args.collection,
-                                               args.compare, needle_re))
+                                               args.compare, needle_re,
+                                               allow_count_drift=args.allow_count_drift))
 
     passed = all(results)
     # The PASS line states what it does and does NOT certify: an unqualified

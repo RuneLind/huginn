@@ -66,8 +66,21 @@ EMAIL_LOCAL_TOKEN = "person"
 # What may separate the tokens of a multi-token variant. A hard-wrapped comment
 # ("First\nLast"), a double space, a non-breaking space and the percent-encoded
 # form inside URLs are all the same name; a single literal space was not.
-VARIANT_SEPARATOR = r"(?:\s+|%20)"
+#
+# At most ONE newline, and only with horizontal space around it. `\s+` also
+# spanned a blank line, which is a paragraph break: it welded the last token of
+# one sentence to the first of the next and aliased the pair as a name.
+VARIANT_SEPARATOR = r"(?:[^\S\n]+|[^\S\n]*\n[^\S\n]*|%20)"
 _SEPARATOR_RUN = re.compile(r"(?:\s|%20)+", re.IGNORECASE)
+
+# Boundaries for a multi-token variant. `\w` alone is wrong inside a URL query
+# string: in `?f=%2CAda%20Example%40nav.no` the character before the name is the
+# `C` of `%2C` and the one after is the `%` of `%40`, so `(?<!\w)`/`(?!\w)`
+# refused a full name sitting in the clear. Exported because
+# scripts/audit/verify_aliased_collection.py must build its needles with the
+# same boundary, or the sweep certifies a form the substituter never removed.
+VARIANT_LEFT_BOUNDARY = r"(?:(?<!\w)|(?<=%20)|(?<=%2C))"
+VARIANT_RIGHT_BOUNDARY = r"(?:(?!\w)|(?=%20)|(?=%40)|(?=%2C))"
 
 _SCOPE_FILE = os.path.join(os.path.dirname(__file__), "scope.json")
 _PRIVATE_SCOPE_GLOB = "huginn-*/privacy/scope.json"
@@ -85,9 +98,22 @@ _IDENT_INNER = re.compile(r"[A-Za-z]\d{6}")
 # at all and no TLD allow-list has to know "internal". The local part is handled
 # separately by _EMAIL_LOCAL_RE, which fires only on a *dotted* local part.
 _HANDLE_RE = re.compile(r"(?<![\w.])@[a-zæøå0-9]+(?:\.[a-zæøå0-9]+)+", re.IGNORECASE)
-_EMAIL_LOCAL_RE = re.compile(r"(?<![\w.])[a-zæøå0-9]+(?:\.[a-zæøå0-9]+)+(?=@)", re.IGNORECASE)
+
+# A dotted local part only counts as an email local part when what follows the
+# `@` is a real domain: at least one dot and an alphabetic last label. Without
+# that, `@` between two dotted expressions — `np.eye@vec`, `A.T@B`, `self.w@x`,
+# i.e. Python's matmul operator, which the code-heavy corpora are full of — was
+# read as an address and the left operand was rewritten to `person`.
+_EMAIL_LOCAL_RE = re.compile(
+    r"(?<![\w.])[a-zæøå0-9]+(?:\.[a-zæøå0-9]+)+(?=@[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}\b)",
+    re.IGNORECASE)
+
+# Last labels that make a dotted handle a host rather than a person. The
+# non-public suffixes (`internal`, `local`, `test`, `dev`, `localhost`) are here
+# because internal service hostnames are what the corpora actually contain.
 _HANDLE_TLDS = frozenset({"no", "com", "org", "net", "io", "eu", "co", "uk",
-                          "se", "dk", "de", "nl", "info", "dev", "ai", "local"})
+                          "se", "dk", "fi", "de", "fr", "nl", "info", "dev",
+                          "ai", "internal", "local", "test", "localhost"})
 _HANDLE_PACKAGE_ROOTS = frozenset({"org", "com", "no", "io", "java", "jakarta",
                                    "kotlin", "android", "net"})
 
@@ -99,6 +125,12 @@ _EXEMPT, _PERSON, _REDACT = 0, 1, 2
 # Distinct from None, which is the stored value meaning "matched, leave as is".
 _UNRESOLVED = object()
 
+# A bare given name: one token, letters only. `Ada` substitutes half the corpus,
+# so it is refused. Anything with a separator, a digit, `_` or a hyphen is a full
+# name or a slug — `Nord-Hansen` is a compound surname, and rejecting it made the
+# whole map unloadable over a legitimate entry.
+_BARE_GIVEN_NAME_RE = re.compile(r"[^\W\d_]+")
+
 
 def _lookup_key(literal: str) -> str:
     """Table key: separator runs collapsed, casefolded.
@@ -107,6 +139,19 @@ def _lookup_key(literal: str) -> str:
     lower() does not, and a missed lookup used to redact an exempt role noun.
     """
     return _SEPARATOR_RUN.sub(" ", literal).casefold()
+
+
+def _shape(literal: str) -> str:
+    """Letters -> x, digits -> 9. Map literals are real names; anything this
+    module raises or logs has to stay safe to paste into a public issue."""
+    return re.sub(r"\d", "9", re.sub(r"[^\W\d_]", "x", literal))
+
+
+def _case_key(literal: str) -> str:
+    """Weaker fold, used only to tell "the same literal in another case" from
+    "a different literal". `.lower()` leaves ß alone where casefold() maps it to
+    `ss`, which is exactly the pair the collision check has to separate."""
+    return _SEPARATOR_RUN.sub(" ", literal).lower()
 
 
 class PrivacyMapMissing(RuntimeError):
@@ -128,10 +173,14 @@ def _boundaried(literal: str) -> str:
     A *slug* (one token with `.`/`_`) must not match inside a longer dotted path,
     but must match after a word character — a dotted name appears
     percent-encoded in URLs (`…%2CAda.Example%40nav.no`). A *bare token* blocks a
-    preceding `.`/`-` as well, so a mononym cannot be welded onto a surviving
-    path segment. A trailing full stop never blocks: it ends a sentence. A
-    boundary applies only on a side whose edge character is a word character
-    (`Ada Example [X]` ends in `]`).
+    preceding `.` and word character, so a mononym cannot be welded onto a
+    surviving path segment; a preceding `-` does NOT block, because a hyphen in
+    front of a name is punctuation (a list bullet, a diff marker) far more often
+    than it is a path. A *multi-token* variant uses the percent-aware boundaries,
+    since a name in a URL query string is fenced by `%2C`/`%20`/`%40` rather than
+    by non-word characters. A trailing full stop never blocks: it ends a
+    sentence. A boundary applies only on a side whose edge character is a word
+    character (`Ada Example [X]` ends in `]`).
     """
     tokens = literal.split()
     body = VARIANT_SEPARATOR.join(re.escape(t) for t in tokens) if len(tokens) > 1 \
@@ -140,16 +189,32 @@ def _boundaried(literal: str) -> str:
     if slug:
         left, right = r"(?<![.\-])", r"(?![\w\-])(?!\.\w)"
     elif len(tokens) == 1:
-        left, right = r"(?<![.\-\w])", r"(?!\w)"
+        left, right = r"(?<![.\w])", r"(?!\w)"
     else:
-        left, right = r"(?<!\w)", r"(?!\w)"
+        left, right = VARIANT_LEFT_BOUNDARY, VARIANT_RIGHT_BOUNDARY
     prefix = left if literal[:1].isalnum() or literal[:1] == "_" else ""
     suffix = right if literal[-1:].isalnum() or literal[-1:] == "_" else ""
     return f"{prefix}{body}{suffix}"
 
 
 def is_person_handle(handle: str) -> bool:
-    """True for an `@first.last` shape; False for versions, packages and domains.
+    """True for an `@first.last` shape; False for versions, code and domains.
+
+    Three exclusions, in order, and then everything left is a person:
+
+    * a purely numeric segment — `@v1.2.3` is a version, not a name;
+    * a **code annotation or package path**: a known package root
+      (`@org.junit.Test`), or a lowercase root followed by a CamelCase segment
+      (`@lombok.Setter`, `@mockito.Captor`, `@dagger.Provides`). The root list
+      alone cannot keep up — the annotation vocabulary is open-ended — and the
+      CamelCase tail is what an annotation has and a name does not;
+    * a **domain**, decided by an explicit last-label list only.
+
+    There used to be a fourth test: "last segment of at most 4 alphabetic
+    characters" also counted as a TLD shape. It is gone. Norwegian surnames are
+    short — `@ola.berg`, `@kari.moe`, `@per.aas` all read as domains under it and
+    survived into the built collection. An explicit list is the only version of
+    this rule that fails towards redaction.
 
     Shared with scripts/audit/verify_aliased_collection.py so the acceptance
     sweep counts exactly what the substituter would have redacted.
@@ -159,10 +224,12 @@ def is_person_handle(handle: str) -> bool:
         return False                                  # @v1.2.3 — a version
     lowered = [segment.lower() for segment in segments]
     if lowered[0] in _HANDLE_PACKAGE_ROOTS:
-        return False                                  # @org.junit.Test, @com.example.Foo
-    if len(segments) >= 2 and (lowered[-1] in _HANDLE_TLDS
-                               or (len(segments[-1]) <= 4 and segments[-1].isalpha())):
-        return False                                  # a domain: the last segment is a TLD shape
+        return False                                  # @org.junit.Test, @jakarta.persistence.x
+    if (len(segments) >= 2 and segments[0].islower()
+            and any(s[:1].isupper() for s in segments[1:])):
+        return False                                  # @lombok.Setter — an annotation
+    if len(segments) >= 2 and lowered[-1] in _HANDLE_TLDS:
+        return False                                  # a host: the last label is a known TLD
     return True
 
 
@@ -201,9 +268,9 @@ def _validate(map_data: dict) -> None:
             raise PrivacyMapInvalid("every entry needs an 'alias' and a 'variants' list")
         for variant in entry["variants"]:
             _require_literal(variant)
-            if not any(c.isspace() for c in variant) and not any(c in variant for c in "._,"):
-                raise PrivacyMapInvalid("an entry variant is a bare given name (no whitespace, "
-                                        "'.', '_' or ','); those are never substituted")
+            if _BARE_GIVEN_NAME_RE.fullmatch(variant):
+                raise PrivacyMapInvalid("an entry variant is a bare given name (a single "
+                                        "all-alphabetic token); those are never substituted")
     for variants in unmapped.values():
         if not isinstance(variants, list):
             raise PrivacyMapInvalid("each 'unmapped_people_variants' value must be a list")
@@ -246,17 +313,30 @@ class AliasRegistry:
 
         alternatives: list[str] = []
         seen_rank: dict[str, int] = {}
+        seen_literal: dict[str, str] = {}
         for _, rank, literal, replacement in ranked:
             key = _lookup_key(literal)
             if key in seen_rank:
+                if seen_literal[key] != _case_key(literal):
+                    # Two DIFFERENT literals collapsing onto one table key
+                    # ("Weiss" and "Weiß" both casefold to "weiss"). The table is
+                    # keyed on the casefold, so the second literal's replacement
+                    # is silently dropped and both spellings get the first one's.
+                    # Nothing downstream can see that; refuse to compile.
+                    # The key is a real name; report its SHAPE, since this
+                    # message ends up in build logs and tracebacks.
+                    raise PrivacyMapInvalid(
+                        f"two distinct literals share a casefold key (shape "
+                        f"{_shape(key)!r}); one would silently take the other's replacement")
                 # Same literal twice. Within a class this is just case variation
                 # in the map ("Saksbehandler"/"saksbehandler"); across classes it
                 # means the map's own lints let a real conflict through, so say so.
                 if seen_rank[key] != rank:
-                    logger.warning("Alias map: literal %r appears in two classes; keeping the "
-                                   "higher-precedence one", literal)
+                    logger.warning("Alias map: a literal (shape %r) appears in two classes; "
+                                   "keeping the higher-precedence one", _shape(literal))
                 continue
             seen_rank[key] = rank
+            seen_literal[key] = _case_key(literal)
             self._replacements[key] = None if rank == _EXEMPT else replacement
             alternatives.append(_boundaried(literal))
 
