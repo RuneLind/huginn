@@ -107,5 +107,35 @@
     },
     "text": "[tagged]\n\n# Tagged issue page\n\n### Ada Example - 2026-01-02T10:00:00.000+0100\n\nKommentar fra bo.tester. Ident [~Q000124] og Q000456.\n\n## Detaljer\n\nUtsendt arbeidstaker er et begrep. Bo Tester [X] svarte.",
     "url": "https://example.invalid/browse/DEMO-1"
+  },
+  "clean.md": {
+    "id": "clean.md",
+    "url": "file://<BASE>/clean.md",
+    "text": "[clean]\n\n# Rene notater\n\nIngen personnavn her. Vi følger Bo Tester-rutinen, som er et begrep og ikke en person.\n\n## Detaljer\n\nEn utsendt arbeidstaker nevnes bare som rolle. Tallene stemmer og saken er lukket.",
+    "chunks": [
+      {
+        "indexedData": "[clean]\n## Rene notater\nIngen personnavn her. Vi følger Bo Tester-rutinen, som er et begrep og ikke en person.",
+        "heading": "Rene notater"
+      },
+      {
+        "indexedData": "[clean]\n## Detaljer\nEn utsendt arbeidstaker nevnes bare som rolle. Tallene stemmer og saken er lukket.",
+        "heading": "Detaljer"
+      }
+    ]
+  },
+  "unmapped.md": {
+    "id": "unmapped.md",
+    "url": "file://<BASE>/unmapped.md",
+    "text": "[unmapped]\n\n# Ukjent avsender\n\nKari Ukjent sendte inn saken, og ukjent.kari står som kontakt.\n\n## Svar\n\nUkjent, Kari fikk svar fra Ada Example.",
+    "chunks": [
+      {
+        "indexedData": "[unmapped]\n## Ukjent avsender\nKari Ukjent sendte inn saken, og ukjent.kari står som kontakt.",
+        "heading": "Ukjent avsender"
+      },
+      {
+        "indexedData": "[unmapped]\n## Svar\nUkjent, Kari fikk svar fra Ada Example.",
+        "heading": "Svar"
+      }
+    ]
   }
 }

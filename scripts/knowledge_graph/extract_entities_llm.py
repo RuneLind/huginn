@@ -27,7 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from main.graph.graph_loader import get_collection_manifest, resolve_graph_output_path
-from main.privacy import POLICY_VERSION as PRIVACY_POLICY_VERSION
+from main.privacy.alias_registry import POLICY_VERSION as PRIVACY_POLICY_VERSION, resolve_registry
 from main.utils.ollama_cli import call_ollama as call_ollama_chat
 
 
@@ -235,6 +235,53 @@ def build_source_stamp(collection: str, data_path: str, processed_doc_count: int
     return stamp
 
 
+CACHE_POLICY_KEY = "policy_version"
+CACHE_ENTRIES_KEY = "entries"
+
+
+def load_extraction_cache(cache_path: Path, aliased: bool) -> dict:
+    """Previously extracted documents, keyed by doc id.
+
+    The cache is keyed by doc id alone, so an extraction made from PRE-alias
+    documents would be replayed after the collection is rebuilt with build-time
+    aliasing — putting real names straight back into the graph JSON. The policy
+    version gates that, but only for a collection the registry is armed for:
+    the other ~30 collections have no alias pass and their existing flat caches
+    are still valid.
+
+    The version lives in an envelope rather than a `_`-prefixed key beside the
+    entries, because a doc id may itself start with `_`.
+
+    Discarding here is in-memory only; the file keeps the pre-alias extractions
+    until scripts/audit/purge_prealias_caches.py deletes it.
+    """
+    if not cache_path.exists():
+        return {}
+    try:
+        raw = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    if isinstance(raw.get(CACHE_ENTRIES_KEY), dict):
+        entries, version = raw[CACHE_ENTRIES_KEY], raw.get(CACHE_POLICY_KEY)
+    else:
+        entries, version = raw, None            # legacy flat cache, pre-envelope
+    if not aliased or version == PRIVACY_POLICY_VERSION:
+        return entries
+    if entries:
+        print(f"Cache ignored: privacy policy version {version} != {PRIVACY_POLICY_VERSION} "
+              f"({len(entries)} stale entries)")
+    return {}
+
+
+def write_extraction_cache(cache_path: Path, cache: dict) -> None:
+    cache_path.write_text(
+        json.dumps({CACHE_POLICY_KEY: PRIVACY_POLICY_VERSION, CACHE_ENTRIES_KEY: cache},
+                   ensure_ascii=False),
+        encoding="utf-8")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Extract knowledge graph using LLM")
     parser.add_argument("--collection", required=True, help="Collection name")
@@ -263,26 +310,10 @@ def main():
     if args.limit > 0:
         doc_files = doc_files[:args.limit]
 
-    # Load cache of previously extracted documents.
-    #
-    # The cache is keyed by doc_id alone, so an extraction made from the
-    # PRE-alias documents would keep being replayed after the collection is
-    # rebuilt with build-time aliasing — putting real names straight back into
-    # the graph JSON. The privacy policy version is stored alongside the
-    # entries; a mismatch (including the absence of the key, i.e. every cache
-    # written before this change) discards the whole cache rather than
-    # silently reusing it.
-    cache = {}
-    if cache_path.exists():
-        try:
-            raw = json.loads(cache_path.read_text(encoding="utf-8"))
-        except Exception:
-            raw = {}
-        if raw.get("_policy_version") == PRIVACY_POLICY_VERSION:
-            cache = {k: v for k, v in raw.items() if not k.startswith("_")}
-        elif raw:
-            print(f"Cache ignored: privacy policy version {raw.get('_policy_version')} "
-                  f"!= {PRIVACY_POLICY_VERSION} ({len(raw)} stale entries)")
+    manifest = get_collection_manifest(args.data_path, args.collection) or {}
+    aliased = resolve_registry(args.collection,
+                               (manifest.get("reader") or {}).get("basePath")) is not None
+    cache = load_extraction_cache(cache_path, aliased)
 
     print(f"Collection: {args.collection}")
     print(f"Model: {args.model}")
@@ -343,14 +374,14 @@ def main():
             cache[doc_id] = extraction
             new_count += 1
             if new_count % 20 == 0:
-                cache_path.write_text(json.dumps({"_policy_version": PRIVACY_POLICY_VERSION, **cache}, ensure_ascii=False), encoding="utf-8")
+                write_extraction_cache(cache_path, cache)
         else:
             print("failed")
             errors += 1
 
     # Final cache write
     if new_count > 0:
-        cache_path.write_text(json.dumps({"_policy_version": PRIVACY_POLICY_VERSION, **cache}, ensure_ascii=False), encoding="utf-8")
+        write_extraction_cache(cache_path, cache)
 
     elapsed = time.time() - start_time
     cached_count = len(all_extractions) - new_count

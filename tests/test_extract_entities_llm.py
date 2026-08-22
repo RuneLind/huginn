@@ -173,3 +173,48 @@ class TestLimitDryRunPath:
         # FAISS extracted from both processed docs.
         labels = {n["label"] for n in written["nodes"]}
         assert "FAISS" in labels
+
+
+class TestExtractionCache:
+    """The graph cache is keyed by doc id alone, so a cache written from
+    PRE-alias documents replays real names into the graph JSON after a rebuild.
+    The privacy policy version gates that — but only for a collection the
+    registry is actually armed for."""
+
+    def _write(self, path, payload):
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    def test_envelope_round_trips_doc_ids_that_start_with_underscore(self, tmp_path):
+        cache_path = tmp_path / "g.cache.json"
+        entries = {"_internal/notes.md": {"entities": []}, "a.md": {"entities": []}}
+        extract_entities_llm.write_extraction_cache(cache_path, entries)
+        assert extract_entities_llm.load_extraction_cache(cache_path, aliased=True) == entries
+
+    def test_current_policy_version_is_kept(self, tmp_path):
+        cache_path = tmp_path / "g.cache.json"
+        extract_entities_llm.write_extraction_cache(cache_path, {"a.md": {"entities": []}})
+        assert extract_entities_llm.load_extraction_cache(cache_path, aliased=True)
+
+    def test_legacy_flat_cache_is_discarded_for_an_in_scope_collection(self, tmp_path, capsys):
+        cache_path = self._write(tmp_path / "g.cache.json",
+                                 {"a.md": {"entities": []}, "b.md": {"entities": []}})
+        assert extract_entities_llm.load_extraction_cache(cache_path, aliased=True) == {}
+        # off-by-one: the old sentinel-key form counted the sentinel as an entry
+        assert "2 stale" in capsys.readouterr().out
+
+    def test_legacy_flat_cache_is_kept_for_an_out_of_scope_collection(self, tmp_path):
+        entries = {"a.md": {"entities": []}, "b.md": {"entities": []}}
+        cache_path = self._write(tmp_path / "g.cache.json", entries)
+        assert extract_entities_llm.load_extraction_cache(cache_path, aliased=False) == entries
+
+    def test_wrong_policy_version_is_discarded(self, tmp_path):
+        cache_path = self._write(tmp_path / "g.cache.json",
+                                 {"policy_version": 999, "entries": {"a.md": {}}})
+        assert extract_entities_llm.load_extraction_cache(cache_path, aliased=True) == {}
+
+    def test_missing_or_unreadable_cache_is_empty(self, tmp_path):
+        assert extract_entities_llm.load_extraction_cache(tmp_path / "absent.json", aliased=True) == {}
+        broken = tmp_path / "broken.json"
+        broken.write_text("{not json", encoding="utf-8")
+        assert extract_entities_llm.load_extraction_cache(broken, aliased=True) == {}

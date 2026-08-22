@@ -52,9 +52,14 @@ FIXTURE_MAP = {
          "confirmed": True, "extra_variants": []},
     ],
     "ident_policy": "redact",
-    "non_person_labels": ["utsendt arbeidstaker"],
-    "unmapped_people": [],
-    "unmapped_people_variants": {},
+    # "Bo Tester-rutinen" contains a mapped person variant on purpose: the
+    # exemption assertions below fail if exempt labels stop winning.
+    "non_person_labels": ["utsendt arbeidstaker", "Bo Tester-rutinen"],
+    "unmapped_people": ["Kari Ukjent"],
+    "unmapped_people_variants": {
+        "Kari Ukjent": ["Kari Ukjent [X]", "Ukjent, Kari", "Kari Ukjent",
+                        "kari.ukjent", "ukjent.kari"],
+    },
     "person_redaction_token": "[~ukjent-person]",
     "retired_aliases": ["dev-99"],
 }
@@ -117,9 +122,22 @@ def test_registry_changes_every_shape_including_the_session_path():
     assert "Q000124" not in blob
     assert "dev-01" in documents["session.md"]["chunks"][0]["indexedData"]
     assert "[~person]" in documents["session.md"]["chunks"][0]["indexedData"]
-    assert "Utsendt arbeidstaker" in documents["tagged.md"]["text"]   # exempt label survives
+    # Exempt label survives, non-vacuously: it contains "Bo Tester".
+    assert "Bo Tester-rutinen" in documents["clean.md"]["text"]
+    # Unmapped person redacted rather than aliased.
+    assert documents["unmapped.md"]["text"].count("[~ukjent-person]") == 3
     # ids and urls are untouched even though the fixture path is otherwise aliased text
     assert documents["plain.md"]["id"] == "plain.md"
+
+
+def test_alias_changed_marker_tracks_whether_the_document_actually_moved():
+    """The marker drives contextual-prefix invalidation, so a false positive
+    re-prefixes a document through the LLM for nothing, and a false negative
+    replays a pre-alias prefix."""
+    documents = convert_all(alias_registry=AliasRegistry(FIXTURE_MAP))
+    assert documents["plain.md"].get("_aliasChanged") is True
+    # clean.md's only person-shaped text sits inside an exempt label.
+    assert "_aliasChanged" not in documents["clean.md"]
 
 
 # --- 2. fail-closed on both construction sites ------------------------------
@@ -168,6 +186,21 @@ def test_update_factory_arms_the_converter_when_the_map_is_present(mapped_cwd):
     assert "Ada Example" not in json.dumps(converted, ensure_ascii=False)
 
 
+def test_update_factory_re_arms_from_the_manifest_stamp_alone(mapped_cwd):
+    """The stamp outranks the scope files: a collection built aliased stays
+    aliased even after its name or basePath drops out of scope, because
+    un-aliasing half a collection on the next nightly run is the worse failure."""
+    from main.factories.update_collection_factory import _build_local_files
+    manifest = {
+        "collectionName": "some-unrelated-collection",
+        "lastModifiedDocumentTime": "2026-01-01T00:00:00",
+        "reader": {"type": "localFiles", "basePath": str(SOURCE_DOCS)},
+        "privacy": {"policy_version": 1, "map_version": 7, "aliasedAt": "2026-01-01T00:00:00+00:00"},
+    }
+    _, converter = _build_local_files(manifest)
+    assert converter.alias_registry is not None
+
+
 def test_update_factory_leaves_an_out_of_scope_collection_alone(mapped_cwd):
     from main.factories.update_collection_factory import _build_local_files
     manifest = {
@@ -192,6 +225,37 @@ def test_cli_adapter_refuses_to_build_an_in_scope_collection_without_a_map(tmp_p
     assert result.returncode != 0
     assert "PrivacyMapMissing" in result.stderr
     assert not (tmp_path / "data" / "collections" / IN_SCOPE_COLLECTION).exists()
+
+
+def test_update_adapter_records_a_failed_run_when_the_map_is_missing(tmp_path):
+    """PrivacyMapMissing is raised while the updater is being BUILT.
+
+    With construction outside the try, a nightly job that fails closed left no
+    ledger record at all — the dashboard would show the last successful run and
+    nothing to say the collection had stopped updating.
+    """
+    collections = tmp_path / "data" / "collections" / IN_SCOPE_COLLECTION
+    collections.mkdir(parents=True)
+    (collections / "manifest.json").write_text(json.dumps({
+        "collectionName": IN_SCOPE_COLLECTION,
+        "lastModifiedDocumentTime": "2026-01-01T00:00:00",
+        "reader": {"type": "localFiles", "basePath": str(SOURCE_DOCS)},
+        "indexers": [{"name": "indexer_BM25"}],
+    }), encoding="utf-8")
+    runs = tmp_path / "runs"
+
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "collection_update_cmd_adapter.py"),
+         "-collection", IN_SCOPE_COLLECTION],
+        cwd=tmp_path, capture_output=True, text=True, timeout=600,
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT), "HUGINN_RUNS_DIR": str(runs)},
+    )
+    assert result.returncode != 0
+    assert "PrivacyMapMissing" in result.stderr
+
+    records = [json.loads(line) for line
+               in (runs / f"{IN_SCOPE_COLLECTION}.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [r["status"] for r in records] == ["failed"]
 
 
 # --- 3. manifest stamp + cache invalidation ---------------------------------
@@ -238,13 +302,30 @@ def test_manifest_stamp_on_the_create_branch():
                                    "aliasedAt": "2026-01-02T03:04:05+00:00"}
 
 
-def test_manifest_stamp_on_the_update_branch():
+def _existing_manifest(**extra):
+    return {"collectionName": "col", "reader": {"type": "localFiles"},
+            "indexers": [{"name": "indexer_BM25"}], **extra}
+
+
+def test_update_branch_never_adds_a_privacy_stamp():
+    """A nightly update re-converts only documents newer than the last run.
+
+    Stamping there would assert a collection whose other 99% was built before
+    aliasing existed is clean — the stamp has to mean "this whole index was
+    built aliased", which only the create branch can promise.
+    """
     converter = FilesDocumentConverter(alias_registry=AliasRegistry(FIXTURE_MAP))
-    existing = {"collectionName": "col", "reader": {"type": "localFiles"},
-                "indexers": [{"name": "indexer_BM25"}]}
-    manifest = _manifest_content(converter, existing_manifest=existing)
-    assert manifest["privacy"]["map_version"] == 7
+    manifest = _manifest_content(converter, existing_manifest=_existing_manifest())
+    assert "privacy" not in manifest
     assert manifest["reader"] == {"type": "localFiles"}      # merge preserved
+
+
+def test_update_branch_preserves_an_existing_privacy_stamp():
+    """…and never rewrites one: the stamp is what re-arms aliasing next time."""
+    stamp = {"policy_version": 1, "map_version": 6, "aliasedAt": "2026-01-01T00:00:00+00:00"}
+    converter = FilesDocumentConverter(alias_registry=AliasRegistry(FIXTURE_MAP))
+    manifest = _manifest_content(converter, existing_manifest=_existing_manifest(privacy=stamp))
+    assert manifest["privacy"] == stamp
 
 
 def test_no_privacy_stamp_without_a_registry():
@@ -263,6 +344,20 @@ def test_contextual_cache_invalidate_doc_is_scoped_to_one_document(tmp_path):
     assert cache.get("b.md", "chunk one", "model-x") == "prefix 3"
     assert cache.get("a.md", "chunk one", "model-x") is None
     assert cache.invalidate_doc("missing.md") == 0
+
+
+def test_contextual_cache_invalidate_doc_matches_the_whole_document_id(tmp_path):
+    """`::` is the key separator, so a prefix test also eats sibling documents.
+
+    Session collections have ids like `sess-1::part-2`; invalidating `sess-1`
+    must not wipe them.
+    """
+    cache = ContextualCache(str(tmp_path / "cache.json"))
+    cache.put("a", "chunk one", "model-x", "prefix 1")
+    cache.put("a::b", "chunk one", "model-x", "prefix 2")
+
+    assert cache.invalidate_doc("a") == 1
+    assert cache.get("a::b", "chunk one", "model-x") == "prefix 2"
 
 
 class _RecordingCache:

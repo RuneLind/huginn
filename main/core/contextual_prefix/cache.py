@@ -73,9 +73,11 @@ class ContextualCache:
         the pre-alias document text — which can name a real person. Scoped to the
         one document so the rest of the collection keeps its cache.
         """
-        prefix = f"{doc_id}::"
+        # Split from the right past chunk_hash and model_id rather than testing a
+        # prefix: `::` is legal inside a doc id (session collections use it), so
+        # a prefix test on "a" would also drop "a::b"'s entries.
         with self._lock:
-            stale = [key for key in self._entries if key.startswith(prefix)]
+            stale = [key for key in self._entries if key.rsplit("::", 2)[0] == doc_id]
             for key in stale:
                 del self._entries[key]
             if stale:
