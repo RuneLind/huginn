@@ -6,27 +6,38 @@ Why a temp name: DocumentCollectionCreator.__create_collection() starts with
 collection before the first embedding is computed. We build into
 `<name>-aliased`, verify it, and only then swap.
 
-    scripts/audit/rebuild_aliased.py --collection jira-issues
-    scripts/audit/rebuild_aliased.py --collection jira-issues --swap
+    .venv/bin/python scripts/audit/rebuild_aliased.py --collection jira-issues
+    .venv/bin/python scripts/audit/rebuild_aliased.py --collection jira-issues --swap
 
 The build reuses the existing manifest verbatim — reader block, indexers and
 contextual-prefix model — with two deliberate edits:
 
-* the contextual-prefix cache is pointed at the REAL collection's cache file
-  (`data/contextual_caches/<name>.json`), because the temp collection name would
-  otherwise start from an empty cache and re-prefix every chunk through the LLM;
+* the create adapter's `--contextual-cache` is pointed at the REAL collection's
+  cache file (`data/contextual_caches/<name>.json`), because the temp collection
+  name would otherwise start from an empty cache and re-prefix every chunk
+  through the LLM;
 * an absolute `basePath` is rewritten relative to the repo root. An absolute path
   is a distributor fingerprint (it carries the builder's home directory) and this
   whole campaign is about making the built collection copyable.
 
+Both build and swap refuse to proceed unless the rebuilt manifest carries a
+privacy stamp matching the CURRENT map and policy version, and unless its reader
+block reproduces the source's. Those two checks are the difference between "the
+swap moved an aliased index into place" and "the swap moved whatever happened to
+be there" — a scope file edited between build and swap, or an `includePatterns`
+list quietly dropped, produce a collection that looks fine on disk.
+
 `--swap` is a separate, explicit step: two renames plus a reload of the running
-server, with the pre-alias collection kept as `<name>-prealias-<date>`.
+server, with the pre-alias collection parked under `data/prealias/<name>-<date>`
+— outside `data/collections/`, so a server started with a glob does not serve it
+and the audit sweep does not scan it as live.
 
 The temp name is not in main/privacy/scope.json's collection list, and does not
 need to be: the scope also matches on the reader's basePath, which the temp build
 shares with the real collection. That is what arms aliasing for `<name>-aliased`.
 """
 import argparse
+import glob
 import json
 import os
 import shutil
@@ -38,7 +49,13 @@ from datetime import date
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
+
+from main.privacy.alias_registry import POLICY_VERSION, AliasRegistry  # noqa: E402
+
 COLLECTIONS_DIR = REPO_ROOT / "data" / "collections"
+PREALIAS_DIR = REPO_ROOT / "data" / "prealias"
+MAP_GLOB = "huginn-*/privacy/aliases.json"
 
 
 def load_manifest(name: str) -> dict:
@@ -46,6 +63,13 @@ def load_manifest(name: str) -> dict:
     if not path.exists():
         sys.exit(f"No such collection: {name} ({path} missing)")
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def current_map_version() -> int:
+    maps = sorted(glob.glob(str(REPO_ROOT / MAP_GLOB)))
+    if len(maps) != 1:
+        sys.exit(f"Expected exactly one alias map ({MAP_GLOB}), found {len(maps)}")
+    return AliasRegistry.load(maps[0]).map_version
 
 
 def relative_base_path(base_path: str) -> str:
@@ -59,37 +83,91 @@ def relative_base_path(base_path: str) -> str:
         return base_path
 
 
-def build(name: str, temp_name: str, workers: int) -> None:
-    manifest = load_manifest(name)
-    reader = manifest["reader"]
-    if reader.get("type") != "localFiles":
-        sys.exit(f"{name}: only localFiles collections can be rebuilt this way (got {reader.get('type')})")
+def parking_path(name: str) -> Path:
+    return PREALIAS_DIR / f"{name}-{date.today().isoformat()}"
 
+
+def stamp_mismatch(manifest: dict, policy_version: int, map_version) -> str | None:
+    """Why this manifest is not a build of the current map, or None."""
+    stamp = manifest.get("privacy")
+    if not stamp:
+        return "no privacy stamp — this build did not alias anything"
+    if stamp.get("policy_version") != policy_version:
+        return f"policy_version {stamp.get('policy_version')} != {policy_version}"
+    if stamp.get("map_version") != map_version:
+        return f"map_version {stamp.get('map_version')} != {map_version}"
+    return None
+
+
+def reader_mismatch(source_reader: dict, built_reader: dict) -> str | None:
+    """Why the rebuilt reader block differs from the source's, or None.
+
+    basePath is compared after normalization (the rebuild deliberately rewrites
+    an absolute path); everything else must be reproduced exactly, because a
+    dropped excludePattern indexes documents the live collection never had.
+    """
+    def normalized(reader):
+        out = dict(reader)
+        if out.get("basePath"):
+            out["basePath"] = str((REPO_ROOT / out["basePath"]).resolve())
+        return out
+
+    expected, actual = normalized(source_reader), normalized(built_reader)
+    differing = sorted(k for k in set(expected) | set(actual)
+                       if expected.get(k) != actual.get(k))
+    if differing:
+        return f"reader block differs on {differing}"
+    return None
+
+
+def build_command(manifest: dict, name: str, temp_name: str, workers: int) -> list:
+    """The create-adapter argv for this rebuild.
+
+    Empty list values are omitted rather than passed: `-indexers` with no values
+    is an argparse error, and `-includePatterns` with none would read nothing.
+    """
+    reader = manifest["reader"]
     contextual_model = (manifest.get("contextualPrefix") or {}).get("model", "none")
     cmd = [
         sys.executable, "files_collection_create_cmd_adapter.py",
         "-collection", temp_name,
         "-basePath", relative_base_path(reader["basePath"]),
-        "-includePatterns", *reader.get("includePatterns", [".*"]),
-        "-indexers", *[i["name"] for i in manifest["indexers"]],
+        "-includePatterns", *(reader.get("includePatterns") or [".*"]),
         "--contextual-model", contextual_model,
         # The real collection's cache, not the temp name's: unchanged chunks must
         # keep hitting, or a rebuild re-generates thousands of prefixes.
         "--contextual-cache", f"./data/contextual_caches/{name}.json",
         "--contextual-workers", str(workers),
     ]
-    exclude_patterns = reader.get("excludePatterns", [])
+    indexers = [i["name"] for i in (manifest.get("indexers") or [])]
+    if indexers:
+        cmd += ["-indexers", *indexers]
+    exclude_patterns = reader.get("excludePatterns") or []
     if exclude_patterns:
         cmd += ["-excludePatterns", *exclude_patterns]
     if reader.get("failFast"):
         cmd.append("-failFast")
+    return cmd
 
+
+def build(name: str, temp_name: str, workers: int) -> None:
+    manifest = load_manifest(name)
+    reader = manifest["reader"]
+    if reader.get("type") != "localFiles":
+        sys.exit(f"{name}: only localFiles collections can be rebuilt this way (got {reader.get('type')})")
+
+    cmd = build_command(manifest, name, temp_name, workers)
     print("+", " ".join(cmd), flush=True)
     subprocess.run(cmd, cwd=REPO_ROOT, check=True)
 
-    # The temp collection records its own name; the swap makes it the real one.
     temp_manifest_path = COLLECTIONS_DIR / temp_name / "manifest.json"
     temp_manifest = json.loads(temp_manifest_path.read_text(encoding="utf-8"))
+    for problem in (stamp_mismatch(temp_manifest, POLICY_VERSION, current_map_version()),
+                    reader_mismatch(reader, temp_manifest.get("reader", {}))):
+        if problem:
+            sys.exit(f"{temp_name}: {problem}. Refusing to leave a build that cannot be swapped.")
+
+    # The temp collection records its own name; the swap makes it the real one.
     temp_manifest["collectionName"] = name
     temp_manifest_path.write_text(json.dumps(temp_manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\n{temp_name}: {temp_manifest['numberOfDocuments']} docs, "
@@ -101,20 +179,33 @@ def swap(name: str, temp_name: str, api_base: str) -> None:
     aliased = COLLECTIONS_DIR / temp_name
     if not aliased.exists():
         sys.exit(f"Nothing to swap: {aliased} does not exist. Build first.")
-    parked = COLLECTIONS_DIR / f"{name}-prealias-{date.today().isoformat()}"
+
+    # Re-checked here, not just after the build: the map or the scope files may
+    # have moved in between, and this is the last point before the live
+    # collection is replaced.
+    problem = stamp_mismatch(json.loads((aliased / "manifest.json").read_text(encoding="utf-8")),
+                             POLICY_VERSION, current_map_version())
+    if problem:
+        sys.exit(f"{temp_name}: {problem}. Refusing to swap it over {name}.")
+
+    parked = parking_path(name)
     if parked.exists():
         sys.exit(f"Refusing to overwrite an existing parked collection: {parked}")
+    parked.parent.mkdir(parents=True, exist_ok=True)
 
     shutil.move(str(live), str(parked))
     shutil.move(str(aliased), str(live))
-    print(f"swapped: {name} -> {parked.name}, {temp_name} -> {name}")
+    print(f"swapped: {name} -> {parked}, {temp_name} -> {name}")
 
     request = urllib.request.Request(f"{api_base}/api/collections/{name}/reload", method="POST")
     try:
         with urllib.request.urlopen(request, timeout=120) as response:
             print("reload:", response.read().decode())
     except (urllib.error.URLError, OSError) as e:
-        print(f"reload failed ({e}); restart the API server to pick up {name}")
+        # Non-zero: the swap succeeded but the running server is still serving
+        # the pre-alias index from memory, which is exactly the state the
+        # campaign must not silently end in.
+        sys.exit(f"reload failed ({e}); the swap is done — restart the API server to pick up {name}")
 
 
 def main() -> None:

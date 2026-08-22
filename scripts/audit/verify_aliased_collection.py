@@ -4,17 +4,26 @@
 Run against `<name>-aliased` before swapping it in, and against the live
 collection afterwards.
 
-    scripts/audit/verify_aliased_collection.py --collection jira-issues-aliased
-    scripts/audit/verify_aliased_collection.py --collection jira-issues-aliased \
+    .venv/bin/python scripts/audit/verify_aliased_collection.py --collection jira-issues-aliased
+    .venv/bin/python scripts/audit/verify_aliased_collection.py --collection jira-issues-aliased \
         --compare jira-issues        # adds the exempt-label / ident-exception invariant
+
+`--collections-dir` verifies a staged copy instead of `data/collections`, and
+`--map` pins the alias map (both default to the live ones). Every path is rooted
+at the repo, never at the caller's CWD.
 
 The checks and why each is shaped the way it is:
 
+0. The map itself: the manifest's privacy stamp must name the SAME map and
+   policy version this run is verifying with, and the map must have at least
+   MIN_MAP_ENTRIES entries. A truncated or decoy map certifies everything.
 1. Every entry variant, every unmapped-person variant, and every token permutation
    of every mapped name: zero hits in the **decoded** strings of documents/**,
    both index-mapping files and the manifest. Decoding is not a nicety — scanning
    the raw file bytes reports a JSON `\\n` escape before a redacted birth number
-   as `n000000`-shaped tokens, i.e. 285 phantom "idents" on jira-issues.
+   as `n000000`-shaped tokens, i.e. 285 phantom "idents" on jira-issues. Needle
+   tokens are joined by the registry's own separator pattern, so a name broken
+   across a line, doubled space or `%20` is caught.
 2. BM25 corpus tokens: each needle is tokenized the way the indexer tokenizes and
    the corpus is searched for that consecutive token sequence. A byte-grep of the
    pickle is vacuous — `ada example` matches zero bytes while both tokens sit
@@ -23,7 +32,7 @@ The checks and why each is shaped the way it is:
    initial tokenizes to `['ola', 'k']`) are reported separately instead of
    counted: they collide with ordinary prose and say nothing about names.
 3. Ident-shaped tokens outside the exceptions file: zero.
-4. Dotted handles left after the TLD/package exclusions: zero.
+4. Dotted handles left after the version/package/domain exclusions: zero.
 5. The exemption invariant, checked EXACTLY: apply the registry to the pre-alias
    collection's own decoded text and compare counts before and after. Comparing
    the two built collections instead would measure build drift — a rebuilt
@@ -32,7 +41,21 @@ The checks and why each is shaped the way it is:
    aliasing.
 6. The contextual-prefix block survives the rebuild, the privacy stamp is
    present, and no cached prefix replayed a real name into a chunk.
-7. Document ids and urls (never aliased by design) contain no mapped name.
+7. Document ids and urls (never aliased by design) contain no mapped name, matched
+   as a token SEQUENCE over `[^\\w]+`-split path text so `First-Last.md` is caught.
+8. Every remaining file under the collection directory is scanned as text. A
+   `.bak` file or an unrecognised binary is a failure in itself: the sweep can
+   only certify what it has read, and a stray `.txt` under `documents/` or a
+   forgotten `indexes/index_info.json` used to be invisible to it.
+
+SCOPE. This sweep certifies that no *listed* variant, ident or dotted handle
+survives. It deliberately does NOT cover bare given names: 74 of them remain in
+the corpus (the map's `bare_given_name_residual`), a documented campaign
+decision (9,002 occurrences), because substituting a bare given name corrupts far
+more prose than it protects. 9 of the 40 unmapped people are single-token
+mononyms, and all 9 tokenize to one BM25 token — no discriminative sequence — so
+check 2 cannot see them either. Check 1 covers them in the decoded text, which is
+the check that matters for a copied collection.
 
 Real names are read from the gitignored map and never printed.
 """
@@ -49,17 +72,26 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from main.indexes.indexers.bm25_indexer import _tokenize  # noqa: E402
-from main.privacy.alias_registry import AliasRegistry  # noqa: E402
+from main.privacy.alias_registry import (  # noqa: E402
+    POLICY_VERSION, VARIANT_SEPARATOR, AliasRegistry, is_person_handle,
+)
 
-COLLECTIONS_DIR = REPO_ROOT / "data" / "collections"
+DEFAULT_COLLECTIONS_DIR = REPO_ROOT / "data" / "collections"
 MAP_GLOB = "huginn-*/privacy/aliases.json"
 EXCEPTIONS_GLOB = "huginn-*/privacy/ident_exceptions.json"
 
+# The real map has 90 entries. A floor rejects a truncated or decoy map before it
+# can certify a collection it knows almost no names from.
+MIN_MAP_ENTRIES = 50
+
 IDENT_RE = re.compile(r"(?i)(?<!\w)[a-z]\d{6}(?!\w)")
-HANDLE_RE = re.compile(r"@[a-zæøå]+(?:\.[a-zæøå]+)+")
-TLDS = {"no", "com", "org", "net", "io", "eu", "co", "uk", "se", "dk", "de", "nl",
-        "info", "dev", "ai", "local"}
-PACKAGE_ROOTS = {"org", "com", "no", "io", "java"}
+HANDLE_RE = re.compile(r"(?<![\w.])@[a-zæøå0-9]+(?:\.[a-zæøå0-9]+)+", re.IGNORECASE)
+WORD_SPLIT_RE = re.compile(r"[^\w]+")
+
+JSON_ARTIFACTS = ("indexes/index_document_mapping.json",
+                  "indexes/reverse_index_document_mapping.json",
+                  "manifest.json")
+BM25_INDEX = "indexes/indexer_BM25/indexer"
 
 
 def sanitize(text: str) -> str:
@@ -90,6 +122,34 @@ def build_needles(alias_map: dict) -> list:
     return sorted({n for n in needles if n and n.lower() not in exempt}, key=len, reverse=True)
 
 
+def needle_pattern(needles: list) -> re.Pattern:
+    """One alternation. Tokens are joined by the registry's own separator so a
+    name split across a line break, a double space or `%20` still matches."""
+    if not needles:
+        sys.exit("No needles built from the alias map — the sweep would pass vacuously.")
+    alternatives = [r"(?<!\w)" + VARIANT_SEPARATOR.join(re.escape(t) for t in n.split()) + r"(?!\w)"
+                    for n in needles]
+    return re.compile("|".join(alternatives), re.I)
+
+
+def token_sequences(needles: list) -> dict:
+    """Needle -> its `[^\\w]+`-split token tuple, for path-shaped text."""
+    sequences = {}
+    for needle in needles:
+        tokens = tuple(t.lower() for t in WORD_SPLIT_RE.split(needle) if t)
+        if tokens:
+            sequences.setdefault(tokens, needle)
+    return sequences
+
+
+def contains_sequence(tokens, sequences) -> bool:
+    for position in range(len(tokens)):
+        for length in {len(s) for s in sequences}:
+            if tuple(tokens[position:position + length]) in sequences:
+                return True
+    return False
+
+
 def walk_strings(value):
     """Every string in a decoded JSON structure, keys included."""
     if isinstance(value, str):
@@ -103,58 +163,104 @@ def walk_strings(value):
             yield from walk_strings(item)
 
 
-def collection_artifacts(collection: str):
-    """Yield (label, decoded JSON) for every artifact that can leak a name."""
-    root = COLLECTIONS_DIR / collection
-    for path in sorted((root / "documents").rglob("*.json")):
-        yield "documents", json.loads(path.read_text(encoding="utf-8"))
-    for name in ("indexes/index_document_mapping.json",
-                 "indexes/reverse_index_document_mapping.json",
-                 "manifest.json"):
-        path = root / name
-        if path.exists():
-            yield name, json.loads(path.read_text(encoding="utf-8"))
+def classify(relative: Path) -> str:
+    """What kind of artifact a file under the collection root is."""
+    posix = relative.as_posix()
+    if posix.endswith(".bak"):
+        return "bak"
+    if posix.startswith("documents/") and posix.endswith(".json"):
+        return "json"
+    if posix in JSON_ARTIFACTS:
+        return "json"
+    if posix == BM25_INDEX:
+        return "bm25"          # check 2 reads this one
+    if re.fullmatch(r"indexes/indexer_[^/]+/indexer", posix):
+        return "vectors"
+    return "other"
 
 
-def documents_of(collection: str):
-    for path in sorted((COLLECTIONS_DIR / collection / "documents").rglob("*.json")):
-        yield json.loads(path.read_text(encoding="utf-8"))
+def scan_vectors(path: Path) -> bool:
+    """A vector index is allowed to be a bare ndarray and nothing else."""
+    try:
+        payload = pickle.loads(path.read_bytes())
+    except Exception as e:
+        print(f"   !! {path.name}: not loadable ({type(e).__name__})")
+        return False
+    if type(payload).__module__.startswith("numpy") and not list(walk_strings(payload)):
+        return True
+    print(f"   !! {path.name}: vector index is not a bare ndarray ({type(payload)})")
+    return False
 
 
-def check_decoded_artifacts(collection, needle_re, exceptions):
-    """Checks 1, 3, 4 and 7, over decoded strings."""
+def collection_files(root: Path):
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            yield path, classify(path.relative_to(root))
+
+
+def check_artifacts(root, needle_re, sequences, exceptions):
+    """Checks 1, 3, 4, 7 and 8, over every file in the collection directory."""
     per_artifact, idents, handles = Counter(), Counter(), Counter()
-    id_url_hits, scanned = [], 0
+    id_url_hits, unreadable, scanned = [], [], 0
 
-    for label, payload in collection_artifacts(collection):
-        scanned += 1
-        for text in walk_strings(payload):
-            hits = needle_re.findall(text)
-            if hits:
-                per_artifact[label] += len(hits)
-                if per_artifact[label] <= 3:
-                    print(f"   !! {label}: {[sanitize(h) for h in hits[:3]]}")
-            for token in IDENT_RE.findall(text):
-                if token.lower() not in exceptions:
-                    idents[token] += 1
-            for match in HANDLE_RE.finditer(text):
-                segments = match.group(0)[1:].split(".")
-                if segments[-1] in TLDS or (len(segments) >= 3 and segments[0] in PACKAGE_ROOTS):
-                    continue
+    def scan_text(label, text):
+        hits = needle_re.findall(text)
+        if hits:
+            per_artifact[label] += len(hits)
+            if per_artifact[label] <= 3:
+                print(f"   !! {label}: {[sanitize(h) for h in hits[:3]]}")
+        for token in IDENT_RE.findall(text):
+            if token.lower() not in exceptions:
+                idents[token] += 1
+        for match in HANDLE_RE.finditer(text):
+            if is_person_handle(match.group(0)):
                 handles[match.group(0)] += 1
-        if label == "documents":
-            for field in ("id", "url"):
-                if needle_re.search(payload.get(field, "")):
-                    id_url_hits.append(sanitize(payload[field]))
 
-    print(f"1. person forms in {scanned} decoded artifacts: {sum(per_artifact.values())} "
+    for path, kind in collection_files(root):
+        relative = path.relative_to(root).as_posix()
+        label = "documents" if relative.startswith("documents/") else relative
+        if kind == "bak":
+            unreadable.append(relative)
+            continue
+        if kind == "bm25":
+            continue
+        if kind == "vectors":
+            if not scan_vectors(path):
+                unreadable.append(relative)
+            scanned += 1
+            continue
+        scanned += 1
+        if kind == "json":
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            for text in walk_strings(payload):
+                scan_text(label, text)
+            if relative.startswith("documents/"):
+                for field in ("id", "url"):
+                    value = payload.get(field) or ""
+                    tokens = [t.lower() for t in WORD_SPLIT_RE.split(value) if t]
+                    if contains_sequence(tokens, sequences):
+                        id_url_hits.append(sanitize(value))
+            continue
+        try:
+            scan_text(label, path.read_text(encoding="utf-8"))
+        except (UnicodeDecodeError, OSError):
+            unreadable.append(relative)
+
+    print(f"1. person forms in {scanned} scanned files: {sum(per_artifact.values())} "
           f"({dict(per_artifact) or 'clean'})")
     print(f"3. non-exempt ident tokens: {sum(idents.values())} "
           f"{dict(list(idents.items())[:10]) if idents else ''}")
     print(f"4. dotted handles after exclusions: {sum(handles.values())} "
           f"{[sanitize(h) for h in handles] or ''}")
     print(f"7. ids/urls containing a mapped name: {len(id_url_hits)} {id_url_hits[:3]}")
-    return not (per_artifact or idents or handles or id_url_hits)
+    print(f"8. files the sweep could not certify (.bak / unreadable): "
+          f"{len(unreadable)} {unreadable[:5]}")
+    return not (per_artifact or idents or handles or id_url_hits or unreadable)
+
+
+def documents_of(root: Path):
+    for path in sorted((root / "documents").rglob("*.json")):
+        yield json.loads(path.read_text(encoding="utf-8"))
 
 
 def _discriminative(tokens) -> bool:
@@ -170,8 +276,8 @@ def _discriminative(tokens) -> bool:
             and sum(len(t) for t in tokens) >= 8)
 
 
-def check_bm25(collection, needles, compare=None):
-    path = COLLECTIONS_DIR / collection / "indexes" / "indexer_BM25" / "indexer"
+def check_bm25(collections_dir, collection, needles, compare=None):
+    path = collections_dir / collection / BM25_INDEX
     if not path.exists():
         print("2. BM25: no index, skipped")
         return True
@@ -183,14 +289,15 @@ def check_bm25(collection, needles, compare=None):
             continue
         (sequences if _discriminative(tokens) else weak).setdefault(tokens, needle)
 
+    by_first, weak_by_first = {}, {}
+    for tokens in sequences:
+        by_first.setdefault(tokens[0], []).append(tokens)
+    for tokens in weak:
+        weak_by_first.setdefault(tokens[0], []).append(tokens)
+
     def count(target):
-        with open(COLLECTIONS_DIR / target / "indexes" / "indexer_BM25" / "indexer", "rb") as f:
+        with open(collections_dir / target / BM25_INDEX, "rb") as f:
             corpus = pickle.load(f)["corpus_tokens"]
-        by_first, weak_by_first = {}, {}
-        for tokens in sequences:
-            by_first.setdefault(tokens[0], []).append(tokens)
-        for tokens in weak:
-            weak_by_first.setdefault(tokens[0], []).append(tokens)
         strong_hits, weak_hits = Counter(), 0
         for doc_tokens in corpus:
             for position, token in enumerate(doc_tokens):
@@ -215,42 +322,65 @@ def check_bm25(collection, needles, compare=None):
     return not hits
 
 
-def check_exemption_invariant(compare, alias_map, exceptions, registry):
+def check_exemption_invariant(collections_dir, compare, alias_map, exceptions, registry):
     """Check 5: aliasing must not move a single exempt label or exception token.
 
     Exact, because both sides are the SAME text: the pre-alias collection's own
-    decoded documents, before and after `registry.apply`.
+    decoded documents, before and after `registry.apply`. One alternation and a
+    Counter over `finditer`, i.e. two passes over the corpus rather than ~130.
     """
     before_text = []
-    for document in documents_of(compare):
+    for document in documents_of(collections_dir / compare):
         before_text.extend(walk_strings(document))
     joined_before = "\n".join(before_text)
     joined_after = registry.apply(joined_before)
 
-    def count(text, term):
-        return len(re.findall(r"(?<!\w)" + re.escape(term) + r"(?!\w)", text, re.I))
+    terms = sorted({*alias_map["non_person_labels"], *exceptions}, key=len, reverse=True)
+    pattern = re.compile("|".join(r"(?<!\w)" + re.escape(t) + r"(?!\w)" for t in terms), re.I)
 
-    moved = [(sanitize(label), count(joined_before, label), count(joined_after, label))
-             for label in alias_map["non_person_labels"]
-             if count(joined_before, label) != count(joined_after, label)]
+    def counts(text):
+        return Counter(m.group(0).lower() for m in pattern.finditer(text))
+
+    before, after = counts(joined_before), counts(joined_after)
+    exception_keys = {t.lower() for t in exceptions}
+    moved = [(sanitize(term), before[term], after[term])
+             for term in sorted(set(before) | set(after))
+             if before[term] != after[term] and term not in exception_keys]
+    ident_moved = [(term, before[term], after[term])
+                   for term in sorted(exception_keys)
+                   if before[term] != after[term]]
     print(f"5. non_person_labels whose count aliasing changed (over {len(joined_before)} "
           f"chars of {compare}): {len(moved)} {moved[:5]}")
-
-    ident_moved = [(token, count(joined_before, token), count(joined_after, token))
-                   for token in sorted(exceptions)
-                   if count(joined_before, token) != count(joined_after, token)]
     print(f"3b. ident exceptions whose count aliasing changed: {len(ident_moved)} {ident_moved}")
     return not (moved or ident_moved)
 
 
-def check_manifest_and_prefixes(collection, compare, needle_re):
-    manifest = json.loads((COLLECTIONS_DIR / collection / "manifest.json").read_text(encoding="utf-8"))
+def check_map_stamp(collections_dir, collection, alias_map):
+    """Check 0: this sweep and this build must be talking about the same map."""
+    entries = len(alias_map["entries"])
+    manifest = json.loads((collections_dir / collection / "manifest.json").read_text(encoding="utf-8"))
+    stamp = manifest.get("privacy") or {}
+    problems = []
+    if entries < MIN_MAP_ENTRIES:
+        problems.append(f"map has {entries} entries, below the {MIN_MAP_ENTRIES} floor")
+    if stamp.get("map_version") != alias_map.get("version"):
+        problems.append(f"manifest map_version {stamp.get('map_version')} != {alias_map.get('version')}")
+    if stamp.get("policy_version") != POLICY_VERSION:
+        problems.append(f"manifest policy_version {stamp.get('policy_version')} != {POLICY_VERSION}")
+    print(f"0. map/stamp agreement ({entries} entries, map v{alias_map.get('version')}, "
+          f"policy v{POLICY_VERSION}): {'; '.join(problems) or 'ok'}")
+    return not problems
+
+
+def check_manifest_and_prefixes(collections_dir, collection, compare, needle_re):
+    root = collections_dir / collection
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
     privacy = manifest.get("privacy")
     prefix_block = manifest.get("contextualPrefix")
     ok = privacy is not None
     print(f"6. privacy stamp: {privacy}")
     if compare:
-        before = json.loads((COLLECTIONS_DIR / compare / "manifest.json").read_text(encoding="utf-8"))
+        before = json.loads((collections_dir / compare / "manifest.json").read_text(encoding="utf-8"))
         expected_model = (before.get("contextualPrefix") or {}).get("model")
         if expected_model:
             ok = ok and (prefix_block or {}).get("model") == expected_model
@@ -262,7 +392,7 @@ def check_manifest_and_prefixes(collection, compare, needle_re):
     if not prefix_block:
         return ok
     prefixed, dirty = 0, 0
-    for document in documents_of(collection):
+    for document in documents_of(root):
         for chunk in document.get("chunks", []):
             prefix = chunk.get("contextualPrefix")
             if not prefix:
@@ -280,31 +410,47 @@ def main() -> None:
     ap.add_argument("--collection", required=True)
     ap.add_argument("--compare", default=None,
                     help="Pre-alias collection, for the exemption invariant and the BM25 control")
+    ap.add_argument("--collections-dir", default=str(DEFAULT_COLLECTIONS_DIR),
+                    help="Verify a staged copy instead of data/collections")
+    ap.add_argument("--map", default=None, help="Alias map path (default: the discovered one)")
     args = ap.parse_args()
 
-    map_paths = sorted(REPO_ROOT.glob(MAP_GLOB))
-    if not map_paths:
-        sys.exit(f"No alias map found ({MAP_GLOB})")
-    alias_map = json.loads(map_paths[0].read_text(encoding="utf-8"))
-    registry = AliasRegistry.load(str(map_paths[0]))
+    collections_dir = Path(args.collections_dir).resolve()
+    if args.map:
+        map_path = Path(args.map)
+    else:
+        map_paths = sorted(REPO_ROOT.glob(MAP_GLOB))
+        if len(map_paths) != 1:
+            sys.exit(f"Expected exactly one alias map ({MAP_GLOB}), found {len(map_paths)}")
+        map_path = map_paths[0]
+    alias_map = json.loads(map_path.read_text(encoding="utf-8"))
+    registry = AliasRegistry.load(str(map_path))
 
     exceptions = set()
     for path in sorted(REPO_ROOT.glob(EXCEPTIONS_GLOB)):
         exceptions |= {t.lower() for t in json.loads(path.read_text(encoding="utf-8"))["tokens"]}
 
     needles = build_needles(alias_map)
-    needle_re = re.compile("|".join(r"(?<!\w)" + re.escape(n) + r"(?!\w)" for n in needles), re.I)
+    needle_re = needle_pattern(needles)
+    sequences = token_sequences(needles)
     print(f"collection: {args.collection}  needles: {len(needles)}  "
           f"ident exceptions: {len(exceptions)}\n")
 
-    results = [check_decoded_artifacts(args.collection, needle_re, exceptions),
-               check_bm25(args.collection, needles, compare=args.compare)]
+    results = [check_map_stamp(collections_dir, args.collection, alias_map),
+               check_artifacts(collections_dir / args.collection, needle_re, sequences, exceptions),
+               check_bm25(collections_dir, args.collection, needles, compare=args.compare)]
     if args.compare:
-        results.append(check_exemption_invariant(args.compare, alias_map, exceptions, registry))
-    results.append(check_manifest_and_prefixes(args.collection, args.compare, needle_re))
+        results.append(check_exemption_invariant(collections_dir, args.compare, alias_map,
+                                                 exceptions, registry))
+    results.append(check_manifest_and_prefixes(collections_dir, args.collection,
+                                               args.compare, needle_re))
 
-    print("\nRESULT:", "PASS" if all(results) else "FAIL")
-    sys.exit(0 if all(results) else 1)
+    passed = all(results)
+    # The PASS line states what it does and does NOT certify: an unqualified
+    # "PASS" would read as "no real name survives", which is not what was checked.
+    print("\nRESULT: PASS — no listed variant / ident / handle; bare given names are "
+          "out of scope (map `bare_given_name_residual`)" if passed else "\nRESULT: FAIL")
+    sys.exit(0 if passed else 1)
 
 
 if __name__ == "__main__":

@@ -19,41 +19,49 @@ alone on purpose. The rebuild invalidates exactly the documents the aliasing
 changed, per document — wiping the file would re-prefix every chunk through the
 LLM instead of the handful that actually moved.
 
-    scripts/audit/purge_prealias_caches.py --dry-run
-    scripts/audit/purge_prealias_caches.py
+    .venv/bin/python scripts/audit/purge_prealias_caches.py --dry-run
+    .venv/bin/python scripts/audit/purge_prealias_caches.py
 """
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-from main.privacy.alias_registry import load_scope  # noqa: E402
+from main.privacy.alias_registry import PrivacyMapMissing, load_scope, resolve_registry  # noqa: E402
 
+COLLECTIONS_DIR = REPO_ROOT / "data" / "collections"
 CONTEXTUAL_CACHES = REPO_ROOT / "data" / "contextual_caches"
 GRAPH_CACHE_GLOBS = ["huginn-*/scripts/knowledge_graph/*_llm_graph.cache.json",
                      "scripts/knowledge_graph/*_llm_graph.cache.json"]
 
 
 def in_scope_collections() -> set:
-    """Collections in privacy scope: named in a scope file, or sharing a scoped basePath."""
-    named, base_paths = load_scope()
-    collections = set(named)
-    for manifest_path in (REPO_ROOT / "data" / "collections").glob("*/manifest.json"):
+    """Collections the BUILD would alias — asked of resolve_registry, not reimplemented.
+
+    A second copy of the scope rules is a second thing to keep in sync, and the
+    consequence of drift here is a pre-alias cache left in place for a
+    collection that is in fact aliased.
+    """
+    named, _ = load_scope()
+    candidates = named | {p.parent.name for p in COLLECTIONS_DIR.glob("*/manifest.json")}
+    collections = set()
+    for name in sorted(candidates):
+        manifest_path = COLLECTIONS_DIR / name / "manifest.json"
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            continue
-        base_path = manifest.get("reader", {}).get("basePath")
-        if not base_path:
-            continue
-        resolved = Path(base_path)
-        if not resolved.is_absolute():
-            resolved = REPO_ROOT / base_path
-        if str(resolved.resolve()) in base_paths:
-            collections.add(manifest_path.parent.name)
+            manifest = {}
+        try:
+            armed = resolve_registry(name, (manifest.get("reader") or {}).get("basePath"),
+                                     armed_by_manifest=bool(manifest.get("privacy"))) is not None
+        except PrivacyMapMissing:
+            armed = True          # in scope; the map being unloadable does not unscope it
+        if armed:
+            collections.add(name)
     return collections
 
 
@@ -64,7 +72,7 @@ def actively_prefixed(collection: str) -> bool:
     its own manifest note), so its prefix cache can never be invalidated by a
     rebuild — it is exactly as dormant as a collection with no prefix block.
     """
-    manifest_path = REPO_ROOT / "data" / "collections" / collection / "manifest.json"
+    manifest_path = COLLECTIONS_DIR / collection / "manifest.json"
     if not manifest_path.exists():
         return False
     try:
@@ -80,6 +88,11 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
+
+    # Relative basePaths in a manifest resolve against the process CWD, the same
+    # way FilesDocumentReader and resolve_registry read them; launchd and a
+    # caller in another directory would otherwise get a different scope answer.
+    os.chdir(REPO_ROOT)
 
     collections = in_scope_collections()
     print(f"in-scope collections ({len(collections)}): {', '.join(sorted(collections))}\n")

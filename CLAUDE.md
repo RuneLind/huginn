@@ -151,9 +151,19 @@ map stays local.
 - `main/privacy/alias_registry.py` compiles the map into one regex pass:
   mapped people → their alias (`dev-06`), unmapped people → `[~ukjent-person]`,
   role nouns / test users / countries → left alone, `[A-Za-z]\d{6}` idents (bare
-  or wrapped as `[~Q000124]`) → `[~person]`, and any leftover dotted handle →
-  `@person`. `id` and `url` are never rewritten — they are the join keys to the
+  or wrapped as `[~Q000124]`) → `[~person]`. A second pass turns any leftover
+  dotted handle into `@person` and a dotted email *local part* into `person@`,
+  leaving domains, `@org.junit.Test`-style package paths and `@v1.2.3` versions
+  alone. `id` and `url` are never rewritten — they are the join keys to the
   source file and the index mapping.
+- Multi-token variants match across **any** whitespace run or `%20`, so a name
+  broken across a line or percent-encoded in a URL still matches; bare
+  single-token variants additionally block a preceding `.`/`-`, so a mononym
+  cannot be welded onto a surviving dotted path segment.
+- **The map is validated at compile time** and a bad one refuses to build
+  (`PrivacyMapInvalid`, a `PrivacyMapMissing`): blank literals, zero entries, an
+  entry variant that is a bare given name, schema drift. Two discovered maps are
+  `ambiguous` rather than first-wins.
 - **Scope** is `main/privacy/scope.json` (public collection names + public source
   dirs) plus an optional private `huginn-*/privacy/scope.json` for the paths that
   are not public — the same glob convention as `graph_routing.json`. Matching is
@@ -165,22 +175,35 @@ map stays local.
   collection folder. A clone with no private sub-repos simply builds nothing
   in scope.
 - The manifest gets a `privacy: {policy_version, map_version, aliasedAt}` stamp on
-  both the create and the update branch. That stamp also re-arms aliasing on
-  update even if the scope files drift.
-- **Rebuilding:** `scripts/audit/rebuild_aliased.py --collection <name>` builds into
-  `<name>-aliased` (the create path deletes the target folder first, so never build
-  in place), reusing the existing manifest's reader, indexers and contextual-prefix
-  model and pointing `--contextual-cache` at the REAL collection's cache. `--swap`
-  parks the live one as `<name>-prealias-<date>` and reloads the server.
-- **Verify:** `scripts/audit/verify_aliased_collection.py --collection <name>-aliased
-  --compare <name>`. It decodes JSON rather than grepping bytes, and checks the BM25
-  token list separately — a byte-grep of the pickle finds nothing while both name
-  tokens sit adjacent in `corpus_tokens`.
-- **Derived caches carry pre-alias text.** `scripts/audit/purge_prealias_caches.py`
-  retires them (LLM graph caches deleted, dormant contextual caches renamed to
-  `.pre-alias.bak`). The contextual cache of an actively-prefixed collection is
-  kept on purpose: the pipeline invalidates exactly the documents aliasing changed
-  (`ContextualCache.invalidate_doc`), instead of re-prefixing every chunk.
+  the **create branch only** — it asserts the whole index was built aliased, which
+  a windowed nightly update (which re-converts only recent documents) cannot
+  promise. The update branch preserves whatever stamp is already there and never
+  adds one; that stamp is also what re-arms aliasing even if the scope files drift.
+- **Rebuilding:** `.venv/bin/python scripts/audit/rebuild_aliased.py --collection
+  <name>` builds into `<name>-aliased` (the create path deletes the target folder
+  first, so never build in place), reusing the existing manifest's reader, indexers
+  and contextual-prefix model, and passing the create adapter a `--contextual-cache`
+  pointing at the REAL collection's cache. The build refuses to finish unless the
+  new manifest's privacy stamp matches the current map/policy version and its
+  reader block reproduces the source's. `--swap` re-checks the stamp, parks the
+  live one under `data/prealias/<name>-<date>` (**outside** `data/collections/`, so
+  no server glob serves it) and reloads the server — a failed reload exits non-zero.
+- **Verify:** `.venv/bin/python scripts/audit/verify_aliased_collection.py
+  --collection <name>-aliased --compare <name>` (`--collections-dir` verifies a
+  staged copy, `--map` pins the map). It decodes JSON rather than grepping bytes,
+  checks the BM25 token list separately — a byte-grep of the pickle finds nothing
+  while both name tokens sit adjacent in `corpus_tokens` — and scans **every** file
+  under the collection dir, failing on a `.bak` or an unrecognised binary rather
+  than skipping it. Bare given names are explicitly out of scope (see the module
+  docstring).
+- **Derived caches carry pre-alias text.**
+  `.venv/bin/python scripts/audit/purge_prealias_caches.py` retires them (LLM graph
+  caches deleted, dormant contextual caches renamed to `.pre-alias.bak`). The
+  extractor's own policy check only discards a stale cache **in memory** — the file
+  keeps the pre-alias extractions until this script removes it. The contextual cache
+  of an actively-prefixed collection is kept on purpose: the pipeline invalidates
+  exactly the documents aliasing changed (`ContextualCache.invalidate_doc`), instead
+  of re-prefixing every chunk.
 
 ## LLM entity extraction (knowledge graph)
 
@@ -192,10 +215,13 @@ uv run scripts/knowledge_graph/extract_entities_llm.py --collection <collection-
 ```
 
 - Requires Ollama running locally with `qwen3.6:35b-a3b-coding-nvfp4` (or pass `--model`)
-- Incremental: uses a `.cache.json` file, safe to stop and resume. The cache is
-  stamped with the privacy `policy_version`; a cache written before build-time
-  aliasing (or under an older policy) is discarded wholesale rather than replaying
-  pre-alias extractions — real names would go straight back into the graph JSON.
+- Incremental: uses a `.cache.json` file, safe to stop and resume. It is written as
+  `{"policy_version": N, "entries": {...}}` — an envelope, not a sentinel key beside
+  the doc ids, because a doc id may itself start with `_`. For a collection the
+  privacy registry arms, a cache under a different (or absent) policy version is
+  discarded **in memory** rather than replaying pre-alias extractions; deleting the
+  file is `purge_prealias_caches.py`'s job. Out-of-scope collections load their
+  legacy flat cache unchanged.
 - Output routing (no private collection names live in this public repo):
   1. `--output <path>` always wins.
   2. Else a `graph_routing.json` in one of the private sub-repo dirs (`huginn-*/scripts/knowledge_graph/`) or `./scripts/knowledge_graph/`. Each routing file either lists owned collections (`{"collections": [...]}`) or is the catch-all (`{"default": true}`). A listed collection writes into that file's dir; unlisted collections go to the `default` dir.

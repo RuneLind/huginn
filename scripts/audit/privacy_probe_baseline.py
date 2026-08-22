@@ -11,7 +11,7 @@ Real names are read from the gitignored map at runtime and written to the
 gitignored output file; nothing about a real person is ever printed to stdout or
 stored in this repo.
 
-    scripts/audit/privacy_probe_baseline.py     # writes beside the discovered map
+    .venv/bin/python scripts/audit/privacy_probe_baseline.py     # writes beside the discovered map
 """
 import argparse
 import json
@@ -48,21 +48,35 @@ def pick_probes(map_data: dict, corpus: str, size: int) -> list[dict]:
                        "requireFullName": entry.get("require_full_name", False)})
     scored.sort(key=lambda p: (-p["hits"], p["alias"]))
 
-    picked, by_role = [], {}
+    picked, by_role, chosen = [], {}, set()
+
+    def take(probe):
+        if probe["alias"] not in chosen:
+            chosen.add(probe["alias"])
+            picked.append(probe)
+
     for probe in scored:                       # round 1: spread over roles
         if len(by_role.get(probe["role"], [])) < max(1, size // 3):
             by_role.setdefault(probe["role"], []).append(probe)
-            picked.append(probe)
+            take(probe)
     for probe in scored:                       # round 2: fill up
         if len(picked) >= size:
             break
-        if probe not in picked:
-            picked.append(probe)
+        take(probe)
+
+    # Both required shapes are collected BEFORE truncating, and the truncation
+    # happens once: appending them one at a time cut the first one back off,
+    # which silently produced a baseline with no require_full_name probe at all.
+    required = []
     for requirement in (lambda p: p["requireFullName"], lambda p: p["bracketHits"] > 0):
-        if not any(requirement(p) for p in picked):
-            extra = next((p for p in scored if requirement(p) and p not in picked), None)
-            if extra:
-                picked = picked[:size - 1] + [extra]
+        if any(requirement(p) for p in picked) or any(requirement(p) for p in required):
+            continue
+        extra = next((p for p in scored if requirement(p) and p["alias"] not in chosen), None)
+        if extra:
+            chosen.add(extra["alias"])
+            required.append(extra)
+    if required:
+        picked = picked[:max(0, size - len(required))] + required
     return picked[:size]
 
 
