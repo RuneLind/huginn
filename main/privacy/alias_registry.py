@@ -18,8 +18,8 @@ handle pass:
   (d) NAV idents              -> "[~person]"              "[~Q000124]" and bare
                                                           "Q000124"; the wrapper is
                                                           consumed with the token.
-  (e) dotted handles          -> "@person"                only what (a)/(b) did not
-                                                          already claim.
+  (e) dotted handles and      -> "@person" / "person@"    only what (a)/(b) did not
+      dotted email locals                                 already claim.
 
 (a)-(d) share ONE compiled alternation sorted longest-first, which is what makes
 (c) win over any shorter overlapping person variant: at a given position the
@@ -61,6 +61,13 @@ ALIAS_CHANGED_KEY = "_aliasChanged"
 
 IDENT_TOKEN = "[~person]"
 HANDLE_TOKEN = "@person"
+EMAIL_LOCAL_TOKEN = "person"
+
+# What may separate the tokens of a multi-token variant. A hard-wrapped comment
+# ("First\nLast"), a double space, a non-breaking space and the percent-encoded
+# form inside URLs are all the same name; a single literal space was not.
+VARIANT_SEPARATOR = r"(?:\s+|%20)"
+_SEPARATOR_RUN = re.compile(r"(?:\s|%20)+", re.IGNORECASE)
 
 _SCOPE_FILE = os.path.join(os.path.dirname(__file__), "scope.json")
 _PRIVATE_SCOPE_GLOB = "huginn-*/privacy/scope.json"
@@ -73,18 +80,33 @@ _PRIVATE_IDENT_EXCEPTIONS_GLOB = "huginn-*/privacy/ident_exceptions.json"
 _IDENT_ALTERNATIVE = r"\[~\s*[A-Za-z]\d{6}\s*\]|(?<![\w])[A-Za-z]\d{6}(?![\w])"
 _IDENT_INNER = re.compile(r"[A-Za-z]\d{6}")
 
-# Lowercase-only on purpose: it makes the "annotation path" exclusion free
-# (`@Abac.Attr` never matches at all) and every mapped slug variant is lowercase
-# too, so a capitalised handle is still caught case-insensitively by pass 1.
-_HANDLE_RE = re.compile(r"@[a-zæøå]+(?:\.[a-zæøå]+)+")
+# `(?<![\w.])` is what keeps an email's own domain out: in "ola@firma.internal"
+# the `@` is preceded by a word character, so the domain never enters this pass
+# at all and no TLD allow-list has to know "internal". The local part is handled
+# separately by _EMAIL_LOCAL_RE, which fires only on a *dotted* local part.
+_HANDLE_RE = re.compile(r"(?<![\w.])@[a-zæøå0-9]+(?:\.[a-zæøå0-9]+)+", re.IGNORECASE)
+_EMAIL_LOCAL_RE = re.compile(r"(?<![\w.])[a-zæøå0-9]+(?:\.[a-zæøå0-9]+)+(?=@)", re.IGNORECASE)
 _HANDLE_TLDS = frozenset({"no", "com", "org", "net", "io", "eu", "co", "uk",
                           "se", "dk", "de", "nl", "info", "dev", "ai", "local"})
-_HANDLE_PACKAGE_ROOTS = frozenset({"org", "com", "no", "io", "java"})
+_HANDLE_PACKAGE_ROOTS = frozenset({"org", "com", "no", "io", "java", "jakarta",
+                                   "kotlin", "android", "net"})
 
 # Class precedence inside the alternation for equal-length literals. Exempt
 # beats person beats redaction: exempting a role noun is safe, redacting one
 # corrupts the corpus.
 _EXEMPT, _PERSON, _REDACT = 0, 1, 2
+
+# Distinct from None, which is the stored value meaning "matched, leave as is".
+_UNRESOLVED = object()
+
+
+def _lookup_key(literal: str) -> str:
+    """Table key: separator runs collapsed, casefolded.
+
+    casefold() rather than lower() because IGNORECASE folds `ſ` onto `s` while
+    lower() does not, and a missed lookup used to redact an exempt role noun.
+    """
+    return _SEPARATOR_RUN.sub(" ", literal).casefold()
 
 
 class PrivacyMapMissing(RuntimeError):
@@ -96,53 +118,118 @@ class PrivacyMapMissing(RuntimeError):
     """
 
 
+class PrivacyMapInvalid(PrivacyMapMissing):
+    """A map that loaded but would substitute wrongly. Same fail-closed effect."""
+
+
 def _boundaried(literal: str) -> str:
-    r"""Escape `literal` and wrap it in the right word boundaries.
+    r"""Escape `literal` and wrap it in the boundaries its shape needs.
 
-    Two regimes, because the variants are two different shapes:
-
-    * A *slug* — a single token containing `.` or `_` ("ada.example",
-      "ada_example") — must not match a *longer* dotted path: `ada.example` is
-      not the person in `ada.example.no` or `no.nav.ada.example`, and matching
-      there would weld a surviving surname onto an alias. So a `.` followed by
-      another path segment blocks on the right, and a preceding `.` blocks on
-      the left. A `.` that ends a sentence ("Kommentar fra ada.example.") must
-      NOT block — that one left a real slug unaliased.
-      On its left a slug does not demand a non-word character either: a dotted
-      full name shows up percent-encoded inside URLs
-      ("…%2CAda.Example%40nav.no"), where the preceding character is the `C` of
-      `%2C`, and a `\w` lookbehind there left a real full name in the clear.
-      Several dotted name-tokens cannot plausibly be the tail of another word.
-    * Everything else — anything with whitespace ("Ada Example", "Example, Ada",
-      "Ada Example [X]", "Ada K. Example") and every bare single token
-      ("Zylphia", "case-owner", "srvtestbruker") — gets plain `\w` boundaries.
-      A trailing full stop must NOT block those: it is a sentence end, and
-      blocking it left an unmapped mononym unredacted at the end of a sentence.
-
-    The boundary is only applied on a side whose edge character is a word
-    character; `Ada Example [X]` ends in `]`, and demanding a non-word character
-    after it would fail on `[X]and` and leave a real name in the clear.
+    A *slug* (one token with `.`/`_`) must not match inside a longer dotted path,
+    but must match after a word character — a dotted name appears
+    percent-encoded in URLs (`…%2CAda.Example%40nav.no`). A *bare token* blocks a
+    preceding `.`/`-` as well, so a mononym cannot be welded onto a surviving
+    path segment. A trailing full stop never blocks: it ends a sentence. A
+    boundary applies only on a side whose edge character is a word character
+    (`Ada Example [X]` ends in `]`).
     """
-    body = re.escape(literal)
-    slug = ("." in literal or "_" in literal) and not any(c.isspace() for c in literal)
-    left = r"(?<![.\-])" if slug else r"(?<!\w)"
-    right = r"(?![\w\-])(?!\.\w)" if slug else r"(?!\w)"
+    tokens = literal.split()
+    body = VARIANT_SEPARATOR.join(re.escape(t) for t in tokens) if len(tokens) > 1 \
+        else re.escape(literal)
+    slug = ("." in literal or "_" in literal) and len(tokens) == 1
+    if slug:
+        left, right = r"(?<![.\-])", r"(?![\w\-])(?!\.\w)"
+    elif len(tokens) == 1:
+        left, right = r"(?<![.\-\w])", r"(?!\w)"
+    else:
+        left, right = r"(?<!\w)", r"(?!\w)"
     prefix = left if literal[:1].isalnum() or literal[:1] == "_" else ""
     suffix = right if literal[-1:].isalnum() or literal[-1:] == "_" else ""
     return f"{prefix}{body}{suffix}"
 
 
+def is_person_handle(handle: str) -> bool:
+    """True for an `@first.last` shape; False for versions, packages and domains.
+
+    Shared with scripts/audit/verify_aliased_collection.py so the acceptance
+    sweep counts exactly what the substituter would have redacted.
+    """
+    segments = handle.lstrip("@").split(".")
+    if any(segment.isdigit() for segment in segments):
+        return False                                  # @v1.2.3 — a version
+    lowered = [segment.lower() for segment in segments]
+    if lowered[0] in _HANDLE_PACKAGE_ROOTS:
+        return False                                  # @org.junit.Test, @com.example.Foo
+    if len(segments) >= 2 and (lowered[-1] in _HANDLE_TLDS
+                               or (len(segments[-1]) <= 4 and segments[-1].isalpha())):
+        return False                                  # a domain: the last segment is a TLD shape
+    return True
+
+
+def _substitute_email_local(match: re.Match) -> str:
+    local = match.group(0)
+    segments = local.split(".")
+    if segments[0].lower() in _HANDLE_PACKAGE_ROOTS or any(s.isdigit() for s in segments):
+        return local
+    return EMAIL_LOCAL_TOKEN
+
+
+def _substitute_handle(match: re.Match) -> str:
+    handle = match.group(0)
+    return HANDLE_TOKEN if is_person_handle(handle) else handle
+
+
+def _validate(map_data: dict) -> None:
+    """Refuse a map that would substitute wrongly, before anything is compiled.
+
+    The private map has its own lint; this is the runtime backstop for the ways
+    a hand-edited or truncated map fails *silently* rather than loudly.
+    """
+    entries = map_data.get("entries")
+    if not isinstance(entries, list) or not entries:
+        raise PrivacyMapInvalid("alias map has no entries; refusing to build a stamped index")
+    unmapped = map_data.get("unmapped_people_variants", {})
+    if not isinstance(unmapped, dict):
+        raise PrivacyMapInvalid("'unmapped_people_variants' must be an object keyed by name")
+    labels = map_data.get("non_person_labels", [])
+    if not isinstance(labels, list):
+        raise PrivacyMapInvalid("'non_person_labels' must be a list")
+
+    for entry in entries:
+        if (not isinstance(entry, dict) or not entry.get("alias")
+                or not isinstance(entry.get("variants"), list)):
+            raise PrivacyMapInvalid("every entry needs an 'alias' and a 'variants' list")
+        for variant in entry["variants"]:
+            _require_literal(variant)
+            if not any(c.isspace() for c in variant) and not any(c in variant for c in "._,"):
+                raise PrivacyMapInvalid("an entry variant is a bare given name (no whitespace, "
+                                        "'.', '_' or ','); those are never substituted")
+    for variants in unmapped.values():
+        if not isinstance(variants, list):
+            raise PrivacyMapInvalid("each 'unmapped_people_variants' value must be a list")
+        for variant in variants:
+            _require_literal(variant)
+    for label in labels:
+        _require_literal(label)
+
+
+def _require_literal(value) -> None:
+    # A blank alternative matches at every position and swallows the corpus.
+    if not isinstance(value, str) or not value.strip():
+        raise PrivacyMapInvalid("blank or non-string literal in the alias map")
+
+
 class AliasRegistry:
     """Compiled substituter for one alias map."""
 
-    def __init__(self, map_data: dict, ident_exceptions=(), source_path: str | None = None):
-        self.policy_version = POLICY_VERSION
+    def __init__(self, map_data: dict, ident_exceptions=()):
+        _validate(map_data)
         self.map_version = map_data.get("version")
-        self.source_path = source_path
         self.redaction_token = map_data.get("person_redaction_token") or "[~ukjent-person]"
         self._ident_exceptions = {t.lower() for t in ident_exceptions}
+        self._warned_unresolved = False
 
-        # literal (lowercased) -> replacement, or None meaning "leave as is"
+        # normalized literal -> replacement, or None meaning "leave as is"
         self._replacements: dict[str, str | None] = {}
         ranked: list[tuple[int, int, str, str]] = []
 
@@ -160,7 +247,7 @@ class AliasRegistry:
         alternatives: list[str] = []
         seen_rank: dict[str, int] = {}
         for _, rank, literal, replacement in ranked:
-            key = literal.lower()
+            key = _lookup_key(literal)
             if key in seen_rank:
                 # Same literal twice. Within a class this is just case variation
                 # in the map ("Saksbehandler"/"saksbehandler"); across classes it
@@ -182,61 +269,68 @@ class AliasRegistry:
     def load(cls, path: str, ident_exceptions_path: str | None = None) -> "AliasRegistry":
         with open(path, "r", encoding="utf-8") as f:
             map_data = json.load(f)
-        if not isinstance(map_data.get("entries"), list):
-            raise ValueError(f"Alias map {path} has no 'entries' list")
-        return cls(map_data, ident_exceptions=_load_ident_exceptions(ident_exceptions_path), source_path=path)
+        return cls(map_data, ident_exceptions=_load_ident_exceptions(ident_exceptions_path))
 
     # --- substitution ------------------------------------------------------
 
     def _substitute(self, match: re.Match) -> str:
         matched = match.group(0)
-        key = matched.lower()
-        if key in self._replacements:
-            replacement = self._replacements[key]
+        replacement = self._replacements.get(_lookup_key(matched), _UNRESOLVED)
+        if replacement is not _UNRESOLVED:
             return matched if replacement is None else replacement
-        # Not a literal => the ident alternative fired.
         inner = _IDENT_INNER.search(matched)
         if inner is None:
-            # Unreachable for this corpus: it needs a character whose str.lower()
-            # disagrees with the regex's IGNORECASE fold (dotted I and friends).
-            # Redact rather than pass it through — a leak is worse than a scar.
-            logger.warning("Alias map: matched text did not resolve to a literal or an ident")
-            return self.redaction_token
+            # Needs a character whose casefold disagrees with the regex's
+            # IGNORECASE fold (dotless ı and friends). Pass it through: the map
+            # says nothing about this text, and redacting it would invent a
+            # person claim about an ordinary word.
+            if not self._warned_unresolved:
+                self._warned_unresolved = True
+                logger.warning("Alias map: a match did not resolve to a literal or an ident; "
+                               "left unchanged")
+            return matched
         if inner.group(0).lower() in self._ident_exceptions:
             return matched
         return IDENT_TOKEN
-
-    def _substitute_handle(self, match: re.Match) -> str:
-        segments = match.group(0)[1:].split(".")
-        if segments[-1] in _HANDLE_TLDS:
-            return match.group(0)          # an email domain, not a handle
-        if len(segments) >= 3 and segments[0] in _HANDLE_PACKAGE_ROOTS:
-            return match.group(0)          # org.springframework.… and friends
-        return HANDLE_TOKEN
 
     def apply(self, text: str) -> str:
         if not text:
             return text
         substituted = self._pattern.sub(self._substitute, text)
-        return _HANDLE_RE.sub(self._substitute_handle, substituted)
+        substituted = _EMAIL_LOCAL_RE.sub(_substitute_email_local, substituted)
+        return _HANDLE_RE.sub(_substitute_handle, substituted)
+
+    def _apply_value(self, value):
+        """Alias any JSON value; returns (value, changed). Dict KEYS are left alone.
+
+        Metadata is arbitrary JSON — the Jira reader puts lists of comment dicts
+        there — so the walk has to be recursive rather than str / list-of-str.
+        """
+        if isinstance(value, str):
+            new_value = self.apply(value)
+            return new_value, new_value != value
+        if isinstance(value, list):
+            changed = False
+            out = []
+            for item in value:
+                new_item, item_changed = self._apply_value(item)
+                out.append(new_item)
+                changed |= item_changed
+            return (out if changed else value), changed
+        if isinstance(value, dict):
+            changed = False
+            for key, item in value.items():
+                new_item, item_changed = self._apply_value(item)
+                if item_changed:
+                    value[key] = new_item
+                    changed = True
+            return value, changed
+        return value, False
 
     def _apply_metadata(self, metadata) -> bool:
-        """Alias string and list-of-string metadata values in place."""
         if not isinstance(metadata, dict):
             return False
-        changed = False
-        for key, value in metadata.items():
-            if isinstance(value, str):
-                new_value = self.apply(value)
-                if new_value != value:
-                    metadata[key] = new_value
-                    changed = True
-            elif isinstance(value, list) and all(isinstance(v, str) for v in value):
-                new_value = [self.apply(v) for v in value]
-                if new_value != value:
-                    metadata[key] = new_value
-                    changed = True
-        return changed
+        return self._apply_value(metadata)[1]
 
     def apply_document(self, converted_document: dict) -> bool:
         """Alias a converted document in place. Returns True if anything changed.
@@ -269,7 +363,7 @@ class AliasRegistry:
 
     def manifest_stamp(self, aliased_at=None) -> dict:
         return {
-            "policy_version": self.policy_version,
+            "policy_version": POLICY_VERSION,
             "map_version": self.map_version,
             "aliasedAt": (aliased_at or datetime.now(timezone.utc)).isoformat(),
         }
@@ -349,6 +443,14 @@ def resolve_registry(collection_name, base_path, armed_by_manifest: bool = False
         return None
 
     candidates = [map_path] if map_path else sorted(glob.glob(_PRIVATE_MAP_GLOB))
+    if len(candidates) > 1:
+        # Picking the first would make which map applies depend on directory
+        # order — a silently different substitution, which is the one failure
+        # mode this module cannot afford.
+        raise PrivacyMapMissing(
+            f"Collection {collection_name!r} is in privacy scope but the alias map is "
+            f"ambiguous: {len(candidates)} files match {_PRIVATE_MAP_GLOB}. Pass an explicit "
+            f"map, or keep exactly one.")
     for candidate in candidates:
         if not candidate or not os.path.exists(candidate):
             continue
@@ -360,7 +462,7 @@ def resolve_registry(collection_name, base_path, armed_by_manifest: bool = False
                 f"{candidate} could not be loaded: {e}"
             ) from e
         logger.info("Privacy: aliasing %s from %s (map v%s, policy v%s)",
-                    collection_name, candidate, registry.map_version, registry.policy_version)
+                    collection_name, candidate, registry.map_version, POLICY_VERSION)
         return registry
 
     raise PrivacyMapMissing(

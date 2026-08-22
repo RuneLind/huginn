@@ -16,7 +16,7 @@ from main.sources.files.files_document_converter import FilesDocumentConverter
 from main.sources.notion.notion_document_reader import NotionDocumentReader
 from main.sources.notion.notion_document_converter import NotionDocumentConverter
 from main.indexes.indexer_factory import load_indexer
-from main.privacy import resolve_registry
+from main.privacy.alias_registry import resolve_registry
 from main.core.documents_collection_creator import DocumentCollectionCreator, OPERATION_TYPE
 from main.core.contextual_prefix import ChunkPrefixer, ContextualCache, make_backend
 

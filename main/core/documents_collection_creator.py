@@ -5,7 +5,7 @@ from enum import Enum
 import numpy as np
 import logging
 
-from ..privacy import ALIAS_CHANGED_KEY
+from ..privacy.alias_registry import ALIAS_CHANGED_KEY
 from ..utils.progress_bar import wrap_generator_with_progress_bar
 from ..utils.progress_bar import wrap_iterator_with_progress_bar
 from ..utils.performance import log_execution_duration
@@ -370,7 +370,6 @@ class DocumentCollectionCreator:
 
         contextual_prefix_block = self.__build_contextual_prefix_block(existing_manifest)
         embedding_block = self.__embedding_metadata()
-        privacy_block = self.__privacy_block(update_time)
 
         if existing_manifest:
             merged = { **existing_manifest,
@@ -386,8 +385,11 @@ class DocumentCollectionCreator:
                 pass
             if embedding_block:
                 merged["embedding"] = embedding_block
-            if privacy_block:
-                merged["privacy"] = privacy_block
+            # No privacy stamp on the update branch. An update re-converts only
+            # documents newer than the last run, so stamping here would claim a
+            # collection whose bulk predates aliasing was built clean. Whatever
+            # stamp the existing manifest carries is preserved by the merge, and
+            # that is what re-arms aliasing next time.
             return merged
 
         manifest = {
@@ -403,6 +405,7 @@ class DocumentCollectionCreator:
             manifest["contextualPrefix"] = contextual_prefix_block
         if embedding_block:
             manifest["embedding"] = embedding_block
+        privacy_block = self.__privacy_block(update_time)
         if privacy_block:
             manifest["privacy"] = privacy_block
         return manifest
@@ -410,6 +413,7 @@ class DocumentCollectionCreator:
     def __privacy_block(self, update_time):
         """Record that this build aliased people, and under which policy/map.
 
+        Create branch only — it asserts that the WHOLE index was built aliased.
         Also what re-arms aliasing on the next update: the update factory reads
         this key back, so a collection stays aliased even if the scope files drift.
         """

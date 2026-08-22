@@ -50,12 +50,18 @@ MAP = {
         # Overlaps the *start* of a mapped person variant and is longer than the
         # bare surname; longest-first must let it win.
         "Tester, Bo og andre",
+        # Contains a mapped person variant outright, so the exemption tests
+        # below fail if exempt labels ever stop entering the alternation.
+        "Bo Tester-rutinen",
         "srvtestbruker",
+        "Sikkerhet",
     ],
-    "unmapped_people": ["Kari Ukjent", "Zylphia"],
+    "unmapped_people": ["Kari Ukjent", "Zylphia Quorndal", "Zylphia"],
     "unmapped_people_variants": {
         "Kari Ukjent": ["Kari Ukjent [X]", "Ukjent, Kari", "Kari Ukjent",
                         "kari.ukjent", "kari_ukjent", "ukjent.kari", "ukjent_kari"],
+        "Zylphia Quorndal": ["Zylphia Quorndal [X]", "Quorndal, Zylphia",
+                             "Zylphia Quorndal", "zylphia.quorndal", "quorndal.zylphia"],
         "Zylphia": ["Zylphia [X]", "Zylphia"],
     },
     "person_redaction_token": "[~ukjent-person]",
@@ -128,7 +134,10 @@ def test_unmapped_person_is_redacted_not_aliased(registry):
 
 
 def test_non_person_label_is_exempt(registry):
-    text = "En utsendt arbeidstaker og en saksbehandler, jf. Saksbehandler."
+    # Non-vacuous on purpose: "Bo Tester-rutinen" CONTAINS a mapped person
+    # variant, so dropping exempt labels from the alternation aliases inside it.
+    text = ("En utsendt arbeidstaker og en saksbehandler følger "
+            "Bo Tester-rutinen, jf. Saksbehandler.")
     assert registry.apply(text) == text
 
 
@@ -139,6 +148,37 @@ def test_non_person_label_wins_over_shorter_overlapping_person_variant(registry)
 
 def test_word_boundaries_do_not_eat_substrings(registry):
     assert registry.apply("srvtestbrukerbruker") == "srvtestbrukerbruker"
+
+
+@pytest.mark.parametrize("separator", ["\n", "  ", "\t", " ", " \n  ", "%20"])
+def test_multi_token_variant_matches_across_any_whitespace_run(registry, separator):
+    # A single literal space between the tokens was the only form that matched;
+    # a hard-wrapped comment, a double space or a percent-encoded URL left the
+    # full name in the clear.
+    assert registry.apply(f"av Ada{separator}Example her") == "av dev-01 her"
+
+
+def test_bare_token_variant_is_not_welded_onto_a_dotted_path(registry):
+    # The slug alternative `zylphia.quorndal` is blocked by the preceding dot;
+    # without the same left boundary on the bare token the engine falls through
+    # to `Zylphia` and produces "no.nav.[~ukjent-person].quorndal.Klasse".
+    assert registry.apply("no.nav.zylphia.quorndal.Klasse") == "no.nav.zylphia.quorndal.Klasse"
+    assert registry.apply("pakke-Zylphia") == "pakke-Zylphia"
+    # …but a sentence boundary still redacts (the case the left boundary must not eat).
+    assert registry.apply("Jeg sjekket med Zylphia") == "Jeg sjekket med [~ukjent-person]"
+
+
+def test_exempt_label_survives_a_unicode_case_fold(registry):
+    # `ſ` matches `s` under IGNORECASE but str.lower() leaves it alone, so a
+    # lower()-keyed replacement table missed the label and redacted a role noun.
+    assert registry.apply("en ſaksbehandler skrev") == "en ſaksbehandler skrev"
+
+
+def test_unresolvable_match_is_left_alone_rather_than_redacted(registry):
+    # Dotless ı matches `i` under IGNORECASE and casefold() does not fold it, so
+    # the lookup misses. Passing the text through is the only safe direction:
+    # redacting turns an unknown word into a person claim.
+    assert registry.apply("Sıkkerhet er viktig") == "Sıkkerhet er viktig"
 
 
 # --- idents -----------------------------------------------------------------
@@ -152,7 +192,11 @@ def test_wrapped_ident_consumes_the_wrapper(registry):
 
 
 def test_ident_exception_token_untouched(registry):
+    # `f000111` is deliberately NOT part of any non_person_label: if it were, the
+    # exempt-label alternative would keep it whole and the assertion would say
+    # nothing about the ident-exception mechanism it is here to pin.
     assert registry.apply("commit: f000111") == "commit: f000111"
+    assert "f000111" not in " ".join(MAP["non_person_labels"])
     assert registry.apply("Testbruker Q000456 er opprettet") == "Testbruker Q000456 er opprettet"
 
 
@@ -186,6 +230,26 @@ def test_package_and_annotation_paths_excluded(registry):
 
 def test_versions_are_not_handles(registry):
     assert registry.apply("pakke@1.0.0") == "pakke@1.0.0"
+    assert registry.apply("bruk @v1.2.3 taggen") == "bruk @v1.2.3 taggen"
+
+
+@pytest.mark.parametrize("text", [
+    "@org.junit.Test",                       # two-segment package path, was redacted
+    "@com.example.Foo",
+    "@nav.no",
+    "kontakt ola@firma.internal her",        # unknown TLD, and @ is preceded by \w
+])
+def test_handle_shapes_that_are_not_people(registry, text):
+    assert registry.apply(text) == text
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("ping @Ola.Nordmann", "ping @person"),          # capitalised: was not matched at all
+    ("ping @ola.nordmann2", "ping @person"),         # digit inside a segment
+    ("skriv til ola.nordmann@nav.no", "skriv til person@nav.no"),
+])
+def test_handles_and_dotted_email_locals_are_redacted(registry, text, expected):
+    assert registry.apply(text) == expected
 
 
 # --- apply_document ---------------------------------------------------------
@@ -234,6 +298,44 @@ def test_apply_document_reports_no_change_for_clean_text(registry):
     assert registry.apply_document(document) is False
 
 
+def test_apply_document_walks_nested_metadata(registry):
+    """Metadata is arbitrary JSON, not just str and list-of-str.
+
+    The all-str list guard skipped a mixed list wholesale, and neither a nested
+    dict nor a list of dicts was ever visited — the Jira reader puts comment
+    dicts there.
+    """
+    document = {
+        "id": "a.md", "url": "file://a.md", "text": "ingenting",
+        "metadata": {
+            "mixed": ["Ada Example", 7, None, "Bo Tester"],
+            "comments": [{"author": "Ada Example", "score": 3}],
+            "nested": {"owner": {"name": "Bo Tester"}, "count": 2},
+            "Ada Example": "Bo Tester",
+        },
+        "chunks": [],
+    }
+    assert registry.apply_document(document) is True
+    metadata = document["metadata"]
+    assert metadata["mixed"] == ["dev-01", 7, None, "fag-01"]
+    assert metadata["comments"] == [{"author": "dev-01", "score": 3}]
+    assert metadata["nested"] == {"owner": {"name": "fag-01"}, "count": 2}
+    # keys are join keys for downstream consumers; values only
+    assert metadata["Ada Example"] == "fag-01"
+
+
+@pytest.mark.parametrize("text", [
+    "Ada Example og Bo Tester og Kari Ukjent",
+    "Ident [~Q000124] og Q000124 og f000111",
+    "ping @ola.nordmann.example og ola.nordmann@nav.no",
+    "dev-01 fag-01 [~person] [~ukjent-person] @person",
+    "no.nav.zylphia.quorndal.Klasse og en saksbehandler",
+])
+def test_apply_is_idempotent(registry, text):
+    once = registry.apply(text)
+    assert registry.apply(once) == once
+
+
 def test_manifest_stamp(registry):
     stamp = registry.manifest_stamp()
     assert stamp["policy_version"] == 1
@@ -256,6 +358,56 @@ def test_load_reads_ident_exceptions_file(map_file, tmp_path):
     exceptions.write_text(json.dumps({"version": 1, "tokens": ["f000111"]}), encoding="utf-8")
     registry = AliasRegistry.load(str(map_file), ident_exceptions_path=str(exceptions))
     assert registry.apply("commit: f000111") == "commit: f000111"
+
+
+def _mutated(**changes):
+    data = json.loads(json.dumps(MAP))
+    for key, value in changes.items():
+        data[key] = value
+    return data
+
+
+def _entries_with_variant(variant):
+    entries = json.loads(json.dumps(MAP["entries"]))
+    entries[0]["variants"].append(variant)
+    return entries
+
+
+@pytest.mark.parametrize("bad_map", [
+    # (i) blank literals: an empty alternative matches at every position.
+    _mutated(entries=_entries_with_variant("")),
+    _mutated(entries=_entries_with_variant("   ")),
+    _mutated(non_person_labels=[*MAP["non_person_labels"], ""]),
+    _mutated(unmapped_people_variants={**MAP["unmapped_people_variants"], "X": [""]}),
+    # (ii) an emptied map must not build a stamped, name-free-looking index.
+    _mutated(entries=[]),
+    # (iii) a bare given name as an entry variant substitutes half the corpus.
+    _mutated(entries=_entries_with_variant("Ada")),
+    # (iv) schema drift, caught as a privacy failure rather than AttributeError.
+    _mutated(unmapped_people_variants=["Kari Ukjent"]),
+    _mutated(entries=[{"alias": "dev-01"}]),
+    _mutated(entries=[{"variants": ["Ada Example"]}]),
+])
+def test_invalid_map_refuses_to_compile(bad_map):
+    with pytest.raises(PrivacyMapMissing):
+        AliasRegistry(bad_map)
+
+
+def test_invalid_map_fails_closed_through_resolve_registry(tmp_path):
+    path = tmp_path / "aliases.json"
+    path.write_text(json.dumps(_mutated(entries=[])), encoding="utf-8")
+    with pytest.raises(PrivacyMapMissing):
+        resolve_registry("jira-issues", None, map_path=str(path))
+
+
+def test_two_discovered_maps_are_ambiguous_rather_than_first_wins(tmp_path, monkeypatch):
+    for name in ("huginn-a", "huginn-b"):
+        privacy = tmp_path / name / "privacy"
+        privacy.mkdir(parents=True)
+        (privacy / "aliases.json").write_text(json.dumps(MAP), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(PrivacyMapMissing, match="ambiguous"):
+        resolve_registry("jira-issues", None)
 
 
 def test_out_of_scope_collection_returns_none(tmp_path):

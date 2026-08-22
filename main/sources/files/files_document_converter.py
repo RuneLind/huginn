@@ -1,7 +1,7 @@
 import os
 import re
 
-from main.privacy import ALIAS_CHANGED_KEY
+from main.privacy.alias_registry import ALIAS_CHANGED_KEY
 from main.sources.files.markdown_heading_splitter import MarkdownHeadingSplitter
 from main.sources.files.session_markdown_splitter import SessionMarkdownSplitter
 from main.utils.frontmatter import parse_tags, read_frontmatter, strip_frontmatter

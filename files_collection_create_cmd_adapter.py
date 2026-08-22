@@ -5,7 +5,7 @@ from main.utils.logger import setup_root_logger
 from main.sources.files.files_document_reader import FilesDocumentReader
 from main.sources.files.files_document_converter import FilesDocumentConverter
 from main.factories.create_collection_factory import create_collection_creator
-from main.privacy import resolve_registry
+from main.privacy.alias_registry import resolve_registry
 
 setup_root_logger()
 
