@@ -306,7 +306,14 @@ class NeedleScanner:
             # start with the word (a literal opening with punctuation) falls back
             # to a full scan rather than to a wrong answer.
             anchorable = all(n.lower().startswith(word) for n in group)
-            self._patterns.append((word, pattern, anchorable))
+            # The anchor regex uses the SAME case fold as the needle pattern
+            # (re.IGNORECASE), so a text spelling the bucket word with `ı`, `ſ`
+            # or `İ` is found where the pattern would match it; `str.lower()`
+            # folds differently and once hid such hits (see _iter).
+            # Zero-width lookahead so overlapping occurrences (`adada` holds
+            # `ada` at 0 AND 2) each become an anchor, like the old find() loop.
+            word_re = re.compile("(?=" + re.escape(word) + ")", re.IGNORECASE)
+            self._patterns.append((word_re, pattern, anchorable))
 
     @property
     def buckets(self) -> int:
@@ -316,46 +323,24 @@ class NeedleScanner:
         """Every match in `text`, bucketed where that is sound and in full where
         it is not.
 
-        Both the bucket filter (`word in lowered`) and the anchor
-        (`lowered.find(word)` used as an offset into `text`) assume that
-        ``str.lower()`` maps every character to exactly one character. `İ`
-        (U+0130) is the ONE character in Unicode for which it does not — it
-        lowercases to `i` plus a combining dot — so one of them anywhere in a
-        file shifted every later anchor by one position, `pattern.match` was
-        tried against the wrong offset, and a mapped name sitting in the clear
-        after it was certified as absent. A silent PASS, from a Turkish place
-        name in a document.
-
-        `len(lowered) != len(text)` detects exactly that case and nothing else:
-        no character lowercases to *zero* characters, so equal lengths means
-        every character mapped one-to-one and the offsets are exact. When the
-        lengths differ the buckets are abandoned for that text and the full
-        alternation runs — the buckets are only ever an optimisation of it.
-
-        KNOWN RESIDUAL, unfixed: `re.IGNORECASE` also folds `ı`, `ſ`, `µ` and a
-        dozen Greek/Cyrillic variants onto another letter where ``str.lower()``
-        does not, so a needle spelled `i…` matches a text spelled `ı…` that the
-        `word in lowered` filter then rejects. It needs the two spellings to
-        meet, and pinning it costs either a hardcoded fold table or the fast
-        path; it is recorded here rather than papered over.
+        Bucket membership and anchors come from a case-insensitive literal
+        regex run over the ORIGINAL text — never from `text.lower()`. Two
+        silent-PASS bugs lived in the lowered-copy approach: `İ` (U+0130)
+        lowercases to two characters and shifted every later anchor offset, and
+        `re.IGNORECASE` folds `ı`, `ſ`, `µ` and a dozen Greek/Cyrillic variants
+        onto letters that `str.lower()` leaves alone, so the filter rejected a
+        bucket whose pattern matched. Using the same fold as the pattern for
+        the filter makes the buckets a pure optimisation of the alternation.
         """
-        lowered = text.lower()
-        if len(lowered) != len(text):
-            for _, pattern, _ in self._patterns:
-                yield from pattern.finditer(text)
-            return
-        for word, pattern, anchorable in self._patterns:
-            if word not in lowered:
-                continue
+        for word_re, pattern, anchorable in self._patterns:
             if not anchorable:
-                yield from pattern.finditer(text)
+                if word_re.search(text):
+                    yield from pattern.finditer(text)
                 continue
-            start = lowered.find(word)
-            while start != -1:
-                match = pattern.match(text, start)
+            for anchor in word_re.finditer(text):
+                match = pattern.match(text, anchor.start())
                 if match:
                     yield match
-                start = lowered.find(word, start + 1)
 
     def findall(self, text: str) -> list:
         return [match.group(0) for match in self._iter(text)]

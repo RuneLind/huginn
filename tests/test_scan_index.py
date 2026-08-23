@@ -845,3 +845,20 @@ def test_a_tracked_candidates_path_is_still_refused(monkeypatch):
     with pytest.raises(SystemExit) as excinfo:
         cli.candidates_destination("scan_out.json", "demo")
     assert "REFUSED" in str(excinfo.value.code)
+
+
+def test_a_dotless_i_in_the_text_does_not_hide_a_needle_the_pattern_matches():
+    """`re.IGNORECASE` folds `ı` (U+0131) onto `i` — the needle alternation
+    matches `ıda Example00` — but `str.lower()` leaves `ı` alone, so a bucket
+    filter built on `word in text.lower()` rejected the bucket before the
+    pattern ever ran. The bucket test must use the SAME fold as the pattern."""
+    scanner = index_scan.NeedleScanner(["Ida Example00"])
+    full = index_scan.needle_pattern(["Ida Example00"])
+    assert full.search("skrevet av ıda Example00") is not None
+    assert scanner.findall("skrevet av ıda Example00") == ["ıda Example00"]
+    assert scanner.findall("ſikker: Ida Example00 og ıda Example00") == ["Ida Example00", "ıda Example00"]
+
+
+def test_overlapping_occurrences_of_the_bucket_word_are_all_anchors():
+    scanner = index_scan.NeedleScanner(["Ada Example00"])
+    assert scanner.findall("adAda Example00") == ["Ada Example00"]
