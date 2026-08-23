@@ -223,6 +223,18 @@ map stays local.
   reader block reproduces the source's. `--swap` re-checks the stamp, parks the
   live one under `data/prealias/<name>-<date>` (**outside** `data/collections/`, so
   no server glob serves it) and reloads the server — a failed reload exits non-zero.
+  - **The build also rewrites the mapping's `documentPath` prefixes**
+    (`<name>-aliased/documents/…` → `<name>/documents/…`, temp file +
+    `os.replace`), because the swap renames the *directory* and nothing else
+    repoints those paths. Without it `_get_chunk_texts` reads nothing, the
+    cross-encoder scores empty strings as uniform noise and the confidence
+    filter drops every result: perfect retrieval, empty answers, no error
+    anywhere. All three live collections shipped that way. The mapping is the
+    only built artifact holding the collection name (the reverse mapping is
+    keyed by document id, `index_info.json` is a counter, the manifest's
+    `collectionName` is rewritten separately) — but `--swap` re-derives that
+    rather than trusting it, refusing on **any** `indexes/` JSON still spelling
+    the temp name.
 - **The distribution gate** is `main/privacy/index_scan.py`, driven by
   `.venv/bin/python scripts/audit/scan_index.py --collection <name>` (add
   `--compare <name>` for the pre-alias twin invariants, `--collections-dir` for a
@@ -294,6 +306,14 @@ map stays local.
     categories are **never** wired into `PiiSanitizer.sanitize` — that is the
     live Jira ingest write path, where a false positive mangles a stored
     document irreversibly.
+  - **Check 12** is the only one that walks the *join* rather than the content:
+    every `documentPath` in `index_document_mapping.json` must start with
+    `<collectionName>/documents/` and resolve to a file that exists. Every other
+    check reads `documents/*.json` directly and is structurally blind to an index
+    that no longer points at them — which is why the swap bug above passed a
+    clean gate at every scan for weeks. Its detail carries the offending path
+    *prefix* (a collection directory name) and counts, never a path: a document
+    filename is a document id, and ids are never aliased.
   - Bare given names standing alone stay out of scope (the map's
     `bare_given_name_residual`, a documented campaign decision).
 - **Packaging is the only hand-off path.** `.venv/bin/python
@@ -373,17 +393,11 @@ map stays local.
     `GraphSearchAugmenter` takes the same registry (`alias_registry=`) and every
     string it contributes is de-aliased. A request that touches no aliased
     collection passes `None` and is byte-identical to before.
-  - **Alias pin.** `dev-06` is opaque to the cross-encoder: measured live, every
-    candidate scored as uniform noise (0.00095) and `apply_confidence_filtering`
-    then dropped all of them, though BM25 had retrieved the right documents. So
-    between `rerank` and `apply_title_boost`, chunks whose text carries a queried
-    alias token (token-boundary match, pattern derived from the registry's alias
-    set — never `[~person]`/`@person`/`[~ukjent-person]`, which mean "someone")
-    are moved in front of the CE ranking in RRF order at
-    `min(best_ce, LOW_CONFIDENCE_THRESHOLD - 0.05)`, so they survive the noise
-    filter without flagging `lowConfidence`. Trace stage `aliasPin`; the response
-    gains `aliasPinned: <n>` **only** when it fired (the response shape is a
-    pinned contract).
+  - **An alias query needs nothing else.** `fag-01` reranks and scores normally
+    (measured live on the repaired indexes: 5 results, best 0.958). The "the
+    cross-encoder scores every candidate as uniform noise" reading was a
+    *symptom* of the swap bug below — `_get_chunk_texts` was reading nothing, so
+    the CE was scoring empty strings. The hot path is unchanged by this seam.
 
 ## LLM entity extraction (knowledge graph)
 

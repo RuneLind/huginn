@@ -1,6 +1,6 @@
-"""Query-side half of build-time aliasing: de-alias seam + alias pin.
+"""Query-side half of build-time aliasing: the de-alias seam.
 
-Four things this file pins:
+Three things this file pins:
 
 1. ``dealias_query`` rewrites a typed real name into the alias the index holds,
    is idempotent, and is a no-op without a registry.
@@ -8,32 +8,25 @@ Four things this file pins:
    aliased collection in alias space and an out-of-scope one in name space.
 3. Nothing that persists or echoes — trace ``query.raw``, the query log,
    ``retryHints``, ``corrective.queriesTried`` — ever carries the typed name.
-4. The alias pin rescues an exact alias-token hit that the cross-encoder scores
-   as noise, and stays completely out of the way otherwise.
 
 Invented names only; the real map is never read here.
 """
 import json
 
-import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import MagicMock
 
 from knowledge_api_server import app
-from main.core.documents_collection_searcher import DocumentCollectionSearcher
-from main.core.search_pipeline import run_search_request, search_and_shape
+from main.core.search_pipeline import search_and_shape
 from main.core.search_trace import create_trace
 from main.graph.graph_search_augmenter import GraphSearchAugmenter
 from main.privacy import alias_registry as alias_registry_module
 from main.privacy.alias_registry import AliasRegistry
 from main.privacy.query_privacy import (
-    alias_token_pattern,
-    alias_tokens_in,
     dealias_query,
     dealias_value,
     first_armed_registry,
-    text_contains_any_token,
     unaliased_expansion_twin,
 )
 from main.runtime.knowledge_store import KnowledgeStore, get_store
@@ -76,41 +69,6 @@ class TestDealiasQuery:
         assert first_armed_registry({"a": None, "b": registry, "c": None}) is registry
         assert first_armed_registry({"a": None}) is None
         assert first_armed_registry({}) is None
-
-
-class TestAliasTokenPattern:
-
-    def test_matches_the_alias_vocabulary(self, registry):
-        pattern = alias_token_pattern(registry)
-        assert pattern.findall(f"se {ALIAS} og {OTHER_ALIAS}") == [ALIAS, OTHER_ALIAS]
-
-    def test_never_matches_the_redaction_tokens(self, registry):
-        # They mean "someone", not someone in particular: thousands of chunks
-        # carry them, so pinning on one would promote pure noise.
-        pattern = alias_token_pattern(registry)
-        assert pattern.findall("[~person] @person [~ukjent-person]") == []
-
-    def test_prefixes_come_from_the_map_not_a_hardcoded_list(self):
-        other = AliasRegistry({**FIXTURE_MAP, "entries": [
-            {"alias": "zz-07", "name": "Cy Sample", "variants": ["Cy Sample"]},
-        ]})
-        pattern = alias_token_pattern(other)
-        assert pattern.search("zz-07")
-        assert pattern.search(ALIAS) is None
-
-    def test_a_longer_number_is_a_different_token(self, registry):
-        """Token equality, not substring: a query for dev-01 must not match a
-        chunk that only mentions dev-011."""
-        pattern = alias_token_pattern(registry)
-        assert alias_tokens_in("se dev-011", pattern) == {"dev-011"}
-        assert text_contains_any_token("se dev-011", {ALIAS}, pattern) is False
-        assert text_contains_any_token(f"se {ALIAS}.", {ALIAS}, pattern) is True
-
-    def test_none_registry_has_no_pattern(self):
-        assert alias_token_pattern(None) is None
-
-    def test_pattern_is_cached_on_the_registry(self, registry):
-        assert alias_token_pattern(registry) is alias_token_pattern(registry)
 
 
 class TestUnaliasedExpansionTwin:
@@ -191,58 +149,11 @@ class TestPerCollectionQueryText:
             alias_registries={"plain": None},
         )
         assert plain.calls[0]["query"] == f"{NAME} sak"
-        assert "alias_pattern" not in plain.calls[0]
 
     def test_no_registries_at_all_changes_nothing(self):
         plain = _FakeSearcher()
         _shape(target_searchers={"plain": plain}, query="q", title_boost_query="q")
         assert plain.calls[0]["query"] == "q"
-        assert "alias_pattern" not in plain.calls[0]
-
-    def test_armed_collection_gets_the_alias_pattern(self, registry):
-        armed = _FakeSearcher()
-        _shape(
-            target_searchers={"armed": armed},
-            query=ALIAS,
-            title_boost_query=ALIAS,
-            alias_registries={"armed": registry},
-        )
-        assert armed.calls[0]["alias_pattern"].search(ALIAS)
-
-    def test_alias_pinned_counts_are_summed_onto_the_response(self, registry):
-        raw = {"results": [], "reranked": True, "aliasPinned": 2}
-        response = run_search_request(
-            {"a": _FakeSearcher(raw), "b": _FakeSearcher(raw)},
-            raw_query=ALIAS,
-            search_query=ALIAS,
-            augmenter=GraphSearchAugmenter(None),
-            detected_entities=[],
-            graph_answer=None,
-            trace=create_trace(False),
-            search_kwargs=_search_kwargs(),
-            shape_kwargs=dict(limit=10),
-            min_relevance=None,
-            corrective_mode="off",
-            alias_registries={"a": registry, "b": registry},
-        )
-        assert response["aliasPinned"] == 4
-
-    def test_no_alias_pinned_key_when_nothing_was_pinned(self, registry):
-        response = run_search_request(
-            {"a": _FakeSearcher()},
-            raw_query=ALIAS,
-            search_query=ALIAS,
-            augmenter=GraphSearchAugmenter(None),
-            detected_entities=[],
-            graph_answer=None,
-            trace=create_trace(False),
-            search_kwargs=_search_kwargs(),
-            shape_kwargs=dict(limit=10),
-            min_relevance=None,
-            corrective_mode="off",
-            alias_registries={"a": registry},
-        )
-        assert "aliasPinned" not in response
 
 
 # --- 3. nothing that persists or echoes carries the name --------------------
@@ -321,136 +232,7 @@ class TestNoNameEscapesTheRequest:
         assert record["query"] == NAME
 
 
-# --- 4. the alias pin at the reranker seam ----------------------------------
-
-CHUNK_TEXTS = {
-    "doc-A": ["saksgang og vedtak", "frister i saken"],
-    "doc-B": [f"{OTHER_ALIAS} eier rutinen"],   # the only exact alias hit
-}
-
-# What the live cross-encoder does with an opaque token: every candidate scores
-# as the same near-zero noise (measured 0.00095), which
-# search_policy.apply_confidence_filtering then drops wholesale.
-CE_NOISE = -0.00095
-
-
-def _noise_reranker():
-    reranker = MagicMock()
-
-    def rerank(query, scores, indexes, chunk_texts, top_k, return_ce_scores=False):
-        ranked = list(indexes[0])[:top_k]
-        out = (np.array([[CE_NOISE] * len(ranked)], dtype=np.float32),
-               np.array([ranked], dtype=np.int64))
-        return (*out, [(int(c), -CE_NOISE) for c in ranked]) if return_ce_scores else out
-
-    reranker.rerank.side_effect = rerank
-    return reranker
-
-
-def _alias_searcher(reranker):
-    mapping, documents = {}, {}
-    chunk_id = 0
-    for doc_id, chunks in CHUNK_TEXTS.items():
-        documents[doc_id] = {"id": doc_id, "text": " ".join(chunks),
-                             "chunks": [{"indexedData": c} for c in chunks]}
-        for chunk_number in range(len(chunks)):
-            mapping[str(chunk_id)] = {
-                "documentId": doc_id,
-                "documentUrl": f"http://example.com/{doc_id}",
-                "documentPath": f"col/documents/{doc_id}.json",
-                "chunkNumber": chunk_number,
-            }
-            chunk_id += 1
-
-    persister = MagicMock()
-
-    def read_text(path):
-        if "index_document_mapping" in path:
-            return json.dumps(mapping)
-        for doc_id, document in documents.items():
-            if doc_id in path:
-                return json.dumps(document)
-        raise FileNotFoundError(path)
-
-    persister.read_text_file.side_effect = read_text
-
-    indexer = MagicMock()
-    indexer.get_name.return_value = "test_indexer"
-    indexer.supports_breakdown = False
-    indexer.search.return_value = (
-        # RRF order: the alias chunk is retrieved LAST but is the exact hit.
-        np.array([[0.5, 1.0, 1.5]], dtype=np.float32),
-        np.array([[0, 1, 2]], dtype=np.int64),
-    )
-    return DocumentCollectionSearcher(collection_name="col", indexer=indexer,
-                                      persister=persister, reranker=reranker)
-
-
-class TestAliasPin:
-
-    def test_without_the_pin_a_noise_scoring_ce_empties_the_result_set(self):
-        """The bug the pin exists for, pinned as a test."""
-        result = _alias_searcher(_noise_reranker()).search(
-            OTHER_ALIAS, max_number_of_chunks=3)
-        assert result["results"] == []
-        assert "aliasPinned" not in result
-
-    def test_the_pin_keeps_the_exact_alias_hit(self, registry):
-        result = _alias_searcher(_noise_reranker()).search(
-            OTHER_ALIAS, max_number_of_chunks=3,
-            alias_pattern=alias_token_pattern(registry))
-        assert [doc["id"] for doc in result["results"]] == ["doc-B"]
-        assert result["aliasPinned"] == 1
-        # Scored below the low-confidence band, so the response is not flagged.
-        assert "lowConfidence" not in result
-        assert result["results"][0]["matchedChunks"][0]["score"] == pytest.approx(-0.15)
-
-    def test_pin_is_absent_when_the_query_has_no_alias_token(self, registry):
-        result = _alias_searcher(_noise_reranker()).search(
-            "vedtak og frister", max_number_of_chunks=3,
-            alias_pattern=alias_token_pattern(registry))
-        assert "aliasPinned" not in result
-
-    def test_pin_is_absent_when_no_chunk_carries_the_queried_alias(self, registry):
-        result = _alias_searcher(_noise_reranker()).search(
-            ALIAS, max_number_of_chunks=3,   # dev-01 is in no chunk; fag-01 is
-            alias_pattern=alias_token_pattern(registry))
-        assert "aliasPinned" not in result
-
-    def test_pin_does_not_run_without_the_reranker(self, registry):
-        result = _alias_searcher(_noise_reranker()).search(
-            OTHER_ALIAS, max_number_of_chunks=3, skip_reranker=True,
-            alias_pattern=alias_token_pattern(registry))
-        assert "aliasPinned" not in result
-        assert result["reranked"] is False
-
-    def test_trace_records_the_pinned_chunk(self, registry):
-        trace = create_trace(True)
-        _alias_searcher(_noise_reranker()).search(
-            OTHER_ALIAS, max_number_of_chunks=3, trace=trace,
-            alias_pattern=alias_token_pattern(registry))
-        stages = [c["stages"] for c in trace.to_dict()["collections"][0]["candidates"]
-                  if "aliasPin" in c["stages"]]
-        assert len(stages) == 1
-        assert stages[0]["aliasPin"]["rank"] == 0
-        assert stages[0]["aliasPin"]["score"] == pytest.approx(-0.15)
-
-    def test_a_confident_ce_ranking_keeps_its_best_score(self, registry):
-        """The synthetic score is min(best CE, band): a strong CE hit is not
-        weakened by the pin, only reordered."""
-        reranker = MagicMock()
-        reranker.rerank.return_value = (
-            np.array([[-0.9, -0.8, -0.7]], dtype=np.float32),
-            np.array([[0, 1, 2]], dtype=np.int64),
-        )
-        result = _alias_searcher(reranker).search(
-            OTHER_ALIAS, max_number_of_chunks=3,
-            alias_pattern=alias_token_pattern(registry))
-        assert result["results"][0]["id"] == "doc-B"
-        assert result["results"][0]["matchedChunks"][0]["score"] == pytest.approx(-0.9)
-
-
-# --- 5. the store resolves, degrades and re-resolves ------------------------
+# --- 4. the store resolves, degrades and re-resolves ------------------------
 
 class TestStoreRegistryResolution:
 
@@ -499,7 +281,7 @@ class TestStoreRegistryResolution:
         assert store.get_alias_registries() == {"a": registry}
 
 
-# --- 6. the pre-alias knowledge graph -------------------------------------
+# --- 5. the pre-alias knowledge graph -------------------------------------
 
 class _FakeGraph:
     """A graph extracted before the corpus was aliased: its labels are names."""

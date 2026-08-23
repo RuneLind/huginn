@@ -12,7 +12,7 @@ from main.core.search_response_formatter import (
     run_corrective_search,
     shape_search_results,
 )
-from main.privacy.query_privacy import alias_token_pattern, dealias_query
+from main.privacy.query_privacy import dealias_query
 
 
 def _collection_text(text, unaliased_text, registry):
@@ -76,18 +76,12 @@ def search_and_shape(
     per_collection = []
     for coll_name, searcher in target_searchers.items():
         registry = registries.get(coll_name)
-        extra = {}
-        if registry is not None:
-            # Lets the searcher pin exact alias-token hits past a cross-encoder
-            # that scores opaque tokens as uniform noise.
-            extra["alias_pattern"] = alias_token_pattern(registry)
         search_result = searcher.search(
             _collection_text(query, unaliased_query, registry),
             trace=trace,
             title_boost_query=_collection_text(
                 title_boost_query, unaliased_title_boost_query, registry),
             **search_kwargs,
-            **extra,
         )
         per_collection.append((coll_name, search_result))
 
@@ -212,9 +206,6 @@ def run_search_request(
         response["graph_answer"] = graph_answer
     if any_low_confidence:
         response["lowConfidence"] = True
-    alias_pinned = sum(sr.get("aliasPinned", 0) for _, sr in per_collection)
-    if alias_pinned:
-        response["aliasPinned"] = alias_pinned
     log_search_request(
         collections=target_searchers.keys(),
         query=raw_query,

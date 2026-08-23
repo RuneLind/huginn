@@ -18,6 +18,29 @@ import rebuild_aliased  # noqa: E402
 STAMP = {"policy_version": 1, "map_version": 7, "aliasedAt": "2026-01-02T00:00:00+00:00"}
 
 
+def _mapping(prefix, ids=("a.md", "b.md")):
+    return {str(n): {"documentId": doc_id,
+                     "documentUrl": f"file://./src/{doc_id}",
+                     "documentPath": f"{prefix}/documents/{doc_id}.json",
+                     "chunkNumber": 0}
+            for n, doc_id in enumerate(ids)}
+
+
+def _write_index_artifacts(collection_dir: Path, prefix: str):
+    indexes = collection_dir / "indexes"
+    indexes.mkdir(parents=True, exist_ok=True)
+    (indexes / "index_document_mapping.json").write_text(
+        json.dumps(_mapping(prefix), indent=2), encoding="utf-8")
+    (indexes / "reverse_index_document_mapping.json").write_text(
+        json.dumps({"a.md": [0], "b.md": [1]}), encoding="utf-8")
+    (indexes / "index_info.json").write_text(json.dumps({"lastIndexItemId": 1}),
+                                             encoding="utf-8")
+    (indexes / "indexer_BM25").mkdir(exist_ok=True)
+    # A binary artifact next to the JSON: the sweep must not try to decode it.
+    (indexes / "indexer_BM25" / "indexer").write_bytes(b"\x80\x04\x95\xff\xfe")
+    return indexes
+
+
 class TestStampCheck:
     def test_matching_stamp_passes(self):
         assert rebuild_aliased.stamp_mismatch({"privacy": STAMP}, 1, 7) is None
@@ -114,6 +137,9 @@ class TestGuardsAreActuallyCalled:
             (collections / name).mkdir(parents=True)
             (collections / name / "manifest.json").write_text(json.dumps(manifest),
                                                               encoding="utf-8")
+        # A real build always leaves these; build() rewrites the mapping's
+        # documentPath prefixes and refuses if any survive.
+        _write_index_artifacts(collections / "demo-aliased", "demo-aliased")
         monkeypatch.setattr(rebuild_aliased, "COLLECTIONS_DIR", collections)
         monkeypatch.setattr(rebuild_aliased, "PREALIAS_DIR", tmp_path / "prealias")
         monkeypatch.setattr(rebuild_aliased, "current_map_version", lambda: 7)
@@ -148,3 +174,123 @@ class TestGuardsAreActuallyCalled:
         # Nothing moved: the live collection is still where it was.
         assert (collections / "demo" / "manifest.json").exists()
         assert not (tmp_path / "prealias").exists()
+
+
+class TestDocumentPathRewrite:
+    """The bug this exists for: `swap()` renames the directory, but every
+    `documentPath` in the mapping still said `<name>-aliased/documents/…`, so
+    after the swap the searcher read no chunk text at all — retrieval worked and
+    every result was scored on an empty string."""
+
+    def test_every_document_path_is_repointed_at_the_real_name(self, tmp_path):
+        built = tmp_path / "demo-aliased"
+        indexes = _write_index_artifacts(built, "demo-aliased")
+        rewritten = rebuild_aliased.rewrite_document_paths(built, "demo-aliased", "demo")
+        mapping = json.loads((indexes / "index_document_mapping.json").read_text(encoding="utf-8"))
+        assert rewritten == 2
+        assert [e["documentPath"] for e in mapping.values()] == [
+            "demo/documents/a.md.json", "demo/documents/b.md.json"]
+        # Only the prefix moves; ids and urls are the join keys to the source.
+        assert mapping["0"]["documentId"] == "a.md"
+        assert mapping["0"]["documentUrl"] == "file://./src/a.md"
+
+    def test_the_rewrite_leaves_no_partial_file_behind(self, tmp_path):
+        built = tmp_path / "demo-aliased"
+        indexes = _write_index_artifacts(built, "demo-aliased")
+        rebuild_aliased.rewrite_document_paths(built, "demo-aliased", "demo")
+        assert sorted(p.name for p in indexes.iterdir()) == [
+            "index_document_mapping.json", "index_info.json", "indexer_BM25",
+            "reverse_index_document_mapping.json"]
+
+    def test_an_already_rewritten_mapping_is_untouched(self, tmp_path):
+        built = tmp_path / "demo-aliased"
+        indexes = _write_index_artifacts(built, "demo")
+        before = (indexes / "index_document_mapping.json").read_text(encoding="utf-8")
+        assert rebuild_aliased.rewrite_document_paths(built, "demo-aliased", "demo") == 0
+        assert (indexes / "index_document_mapping.json").read_text(encoding="utf-8") == before
+
+    def test_stale_sweep_is_clean_after_the_rewrite(self, tmp_path):
+        built = tmp_path / "demo-aliased"
+        _write_index_artifacts(built, "demo-aliased")
+        assert rebuild_aliased.stale_temp_paths(built, "demo-aliased")
+        rebuild_aliased.rewrite_document_paths(built, "demo-aliased", "demo")
+        assert rebuild_aliased.stale_temp_paths(built, "demo-aliased") == []
+
+    def test_stale_sweep_names_any_indexes_json_not_just_the_mapping(self, tmp_path):
+        """The sweep re-derives what holds the temp name instead of trusting the
+        one-file list the rewrite works from."""
+        built = tmp_path / "demo-aliased"
+        indexes = _write_index_artifacts(built, "demo")
+        (indexes / "something_else.json").write_text(
+            json.dumps({"path": "demo-aliased/documents/a.md.json"}), encoding="utf-8")
+        assert rebuild_aliased.stale_temp_paths(built, "demo-aliased") == [
+            "indexes/something_else.json"]
+
+
+class TestSwapRefusesAStalePrefix:
+
+    def _built(self, tmp_path, monkeypatch, prefix):
+        collections = tmp_path / "collections"
+        for name in ("demo", "demo-aliased"):
+            (collections / name).mkdir(parents=True)
+            (collections / name / "manifest.json").write_text(
+                json.dumps({"reader": {"type": "localFiles", "basePath": "./data/sources/demo"},
+                            "numberOfDocuments": 2, "numberOfChunks": 2, "privacy": STAMP}),
+                encoding="utf-8")
+        _write_index_artifacts(collections / "demo-aliased", prefix)
+        monkeypatch.setattr(rebuild_aliased, "COLLECTIONS_DIR", collections)
+        monkeypatch.setattr(rebuild_aliased, "PREALIAS_DIR", tmp_path / "prealias")
+        monkeypatch.setattr(rebuild_aliased, "current_map_version", lambda: 7)
+        return collections
+
+    def test_swap_refuses_a_mapping_that_still_carries_the_temp_prefix(
+            self, tmp_path, monkeypatch):
+        collections = self._built(tmp_path, monkeypatch, "demo-aliased")
+        with pytest.raises(SystemExit) as excinfo:
+            rebuild_aliased.swap("demo", "demo-aliased", "http://127.0.0.1:8321")
+        assert excinfo.value.code
+        # Nothing moved: a swap that would have served empty chunk texts.
+        assert (collections / "demo" / "manifest.json").exists()
+        assert not (tmp_path / "prealias").exists()
+
+    def test_swap_proceeds_once_the_prefix_is_the_real_name(self, tmp_path, monkeypatch):
+        collections = self._built(tmp_path, monkeypatch, "demo")
+        reloaded = []
+        monkeypatch.setattr(rebuild_aliased.urllib.request, "urlopen",
+                            lambda request, timeout=None: reloaded.append(request) or _NullResponse())
+        rebuild_aliased.swap("demo", "demo-aliased", "http://127.0.0.1:8321")
+        assert not (collections / "demo-aliased").exists()
+        assert (collections / "demo" / "indexes" / "index_document_mapping.json").exists()
+        assert reloaded
+
+
+class _NullResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return b'{"status":"reloaded"}'
+
+
+def test_build_rewrites_the_document_paths_it_just_built(tmp_path, monkeypatch):
+    collections = tmp_path / "collections"
+    (collections / "demo").mkdir(parents=True)
+    (collections / "demo" / "manifest.json").write_text(
+        json.dumps({"reader": {"type": "localFiles", "basePath": "./data/sources/demo"}}),
+        encoding="utf-8")
+    (collections / "demo-aliased").mkdir(parents=True)
+    (collections / "demo-aliased" / "manifest.json").write_text(
+        json.dumps({"reader": {"type": "localFiles", "basePath": "./data/sources/demo"},
+                    "numberOfDocuments": 2, "numberOfChunks": 2, "privacy": STAMP}),
+        encoding="utf-8")
+    _write_index_artifacts(collections / "demo-aliased", "demo-aliased")
+    monkeypatch.setattr(rebuild_aliased, "COLLECTIONS_DIR", collections)
+    monkeypatch.setattr(rebuild_aliased, "current_map_version", lambda: 7)
+    monkeypatch.setattr(rebuild_aliased.subprocess, "run", lambda *a, **k: None)
+
+    rebuild_aliased.build("demo", "demo-aliased", 1)
+
+    assert rebuild_aliased.stale_temp_paths(collections / "demo-aliased", "demo-aliased") == []

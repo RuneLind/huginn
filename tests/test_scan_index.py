@@ -71,7 +71,7 @@ def _map(entry_count=index_scan.MIN_MAP_ENTRIES):
 
 def _write_collection(root, name, *, documents, stamp=GOOD_STAMP,
                       documents_count=None, chunks_count=None, drop_chunk_count=False,
-                      bm25_texts=None):
+                      bm25_texts=None, mapping_prefix=None, mapping_files=None):
     """A minimal on-disk collection the gate can walk end to end."""
     collection = root / name
     (collection / "documents").mkdir(parents=True)
@@ -93,11 +93,18 @@ def _write_collection(root, name, *, documents, stamp=GOOD_STAMP,
         manifest["privacy"] = stamp
     (collection / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
-    mapping = {str(i): d["id"] for i, d in enumerate(documents)}
+    # The real entry shape: check 12 reads documentPath out of it, and the
+    # searcher resolves that path against the collections directory.
+    prefix = name if mapping_prefix is None else mapping_prefix
+    files = mapping_files or [f"doc{i}.json" for i in range(len(documents))]
+    mapping = {str(i): {"documentId": d["id"], "documentUrl": d["url"],
+                        "documentPath": f"{prefix}/documents/{files[i]}",
+                        "chunkNumber": 0}
+               for i, d in enumerate(documents)}
     (collection / "indexes" / "index_document_mapping.json").write_text(
         json.dumps(mapping), encoding="utf-8")
     (collection / "indexes" / "reverse_index_document_mapping.json").write_text(
-        json.dumps({v: k for k, v in mapping.items()}), encoding="utf-8")
+        json.dumps({d["id"]: [i] for i, d in enumerate(documents)}), encoding="utf-8")
 
     corpus = ([_tokenize(d["text"]) for d in documents] if bm25_texts is None
               else [_tokenize(t) for t in bm25_texts])
@@ -423,6 +430,71 @@ def test_an_advisory_category_does_not_fail_the_scan(tmp_path, map_file):
     check = _scan(tmp_path, map_file).check("sensitive_tokens")
     assert check.passed is True
     assert "telefon" in check.notes[0]
+
+
+# --- check 12: the mapping resolves to readable documents --------------------
+
+def test_a_stale_document_path_prefix_fails_the_scan(tmp_path, map_file):
+    """The bug this check exists for.
+
+    `rebuild_aliased.py --swap` renamed `<name>-aliased` to `<name>` but left
+    every `documentPath` spelling the temp name, so the searcher read no chunk
+    text at all: the cross-encoder scored empty strings as uniform noise and the
+    confidence filter dropped every result. All three live collections passed
+    every other check in that state, at every scan since the first swap.
+    """
+    _write_collection(tmp_path, "demo-aliased", documents=[_clean_document(0)],
+                      mapping_prefix="demo-aliased-aliased")
+    check = _scan(tmp_path, map_file).check("document_paths")
+    assert check.passed is False
+    assert check.count == 1
+
+
+def test_a_document_path_pointing_at_a_missing_file_fails_the_scan(tmp_path, map_file):
+    """The prefix alone is not enough: a pruned or renamed document leaves an
+    entry that resolves to nothing, with the same silent-empty-chunk result."""
+    _write_collection(tmp_path, "demo-aliased", documents=[_clean_document(0)],
+                      mapping_files=["gone.json"])
+    check = _scan(tmp_path, map_file).check("document_paths")
+    assert check.passed is False
+    assert check.count == 1
+
+
+def test_a_consistent_mapping_passes(tmp_path, map_file):
+    check = _scan(tmp_path, map_file).check("document_paths")
+    assert check is not None
+    _write_collection(tmp_path, "ok-aliased", documents=[_clean_document(0), _clean_document(1)])
+    ok = index_scan.scan_collection(tmp_path / "ok-aliased", map_file).check("document_paths")
+    assert ok.passed is True
+    assert ok.count == 0
+
+
+def test_the_check_detail_never_carries_a_document_id(tmp_path, map_file):
+    """A document filename IS a document id, and ids are never aliased — that is
+    the whole reason check 7 exists. The detail and notes are printed and go
+    into --json-report, so they carry the wrong PREFIX and counts, nothing else.
+    """
+    _write_collection(tmp_path, "demo-aliased",
+                      documents=[_document(0, "dev-01 skrev dette.")],
+                      mapping_files=["Ada Example00.md.json"])
+    check = _scan(tmp_path, map_file).check("document_paths")
+    assert check.passed is False
+    printed = " ".join([check.detail, *check.notes])
+    assert "Ada" not in printed and "Example00" not in printed
+
+
+def test_a_missing_mapping_is_a_failure_rather_than_a_traceback(tmp_path, map_file):
+    collection = _write_collection(tmp_path, "demo-aliased", documents=[_clean_document(0)])
+    (collection / "indexes" / "index_document_mapping.json").unlink()
+    check = _scan(tmp_path, map_file).check("document_paths")
+    assert check.passed is False
+
+
+def test_the_packager_stamp_records_the_new_check(tmp_path, map_file):
+    """`scanChecks` is every KNOWN check, so a stamp cannot silently omit one."""
+    _write_collection(tmp_path, "demo-aliased", documents=[_clean_document(0)])
+    summary = _scan(tmp_path, map_file).check_summary()
+    assert summary["document_paths"] == {"passed": True, "count": 0, "ran": True}
 
 
 # --- counts against the pre-alias twin --------------------------------------

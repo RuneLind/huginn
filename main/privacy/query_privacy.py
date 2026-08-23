@@ -1,41 +1,23 @@
 """Query-side half of build-time people aliasing.
 
 The index is aliased at build time (``alias_registry``), so a served in-scope
-collection contains ``dev-06`` where the source said a person's name. That
-leaves two query-time problems, and this module is the one place both are
-solved:
+collection contains ``dev-06`` where the source said a person's name. A real
+name typed into the search box must therefore never reach the parts of the
+request that persist or echo: the trace's ``query.raw``, the query log,
+``retryHints`` (``detectedEntities`` / ``narrowerQuery`` / ``broaderQuery``),
+``corrective.queriesTried``. Running the query through the *same* substituter
+the build used turns it into the alias the index actually holds, which fixes
+retrieval and the echo in one move. ``apply`` is idempotent — an already
+aliased query is unchanged — so the seam is safe to apply more than once.
 
-1. **A real name typed into the search box.** It must never reach the parts of
-   the request that persist or echo: the trace's ``query.raw``, the query log,
-   ``retryHints`` (``detectedEntities`` / ``narrowerQuery`` / ``broaderQuery``),
-   ``corrective.queriesTried``. Running the query through the *same* substituter
-   the build used turns it into the alias the index actually holds, which fixes
-   retrieval and the echo in one move. ``apply`` is idempotent — an already
-   aliased query is unchanged — so the seam is safe to apply more than once.
-
-2. **An alias token typed into the search box.** ``dev-06`` is an opaque string
-   to a cross-encoder: measured on the live index, ``BAAI/bge-reranker-v2-m3``
-   scores every candidate for such a query as uniform noise (0.00095), and
-   ``search_policy.apply_confidence_filtering`` then drops all of them — BM25
-   retrieved the right documents and the reranker threw them away. An exact
-   alias-token hit in a chunk is lexical evidence the cross-encoder structurally
-   cannot weigh, so the searcher pins those chunks ahead of the CE ranking. The
-   pattern is derived from the registry's own alias vocabulary, never hardcoded.
-
-Only the ``<prefix>-<number>`` alias vocabulary is pinnable. ``[~person]``,
-``@person`` and ``[~ukjent-person]`` are redaction tokens, not identities:
-they appear in thousands of chunks and mean "someone", so pinning on them would
-promote noise.
+Retrieval on an alias token itself needs nothing extra here: measured on the
+repaired live indexes, an alias query reranks and scores normally (``fag-01``:
+5 results, best 0.958). An earlier revision of this module pinned alias-token
+hits past the cross-encoder because every candidate scored as uniform noise —
+that was a symptom of unreadable chunk texts after a rebuild swap, not of the
+cross-encoder. See ``scripts/audit/rebuild_aliased.py`` and check 12 in
+``main/privacy/index_scan.py``, which is what catches it now.
 """
-import re
-
-# One alias: a letters-only role prefix, a hyphen, digits ("dev-06", "fag-01").
-# Anything else in the map's alias column simply contributes no prefix.
-_ALIAS_SHAPE = re.compile(r"^([^\W\d_]+)-\d+$")
-
-# Cached compiled pattern, hung on the registry: the alias set is fixed for a
-# registry's lifetime, and the searcher would otherwise recompile per search.
-_PATTERN_ATTR = "_query_alias_pattern"
 
 
 def dealias_query(query, registry):
@@ -101,51 +83,3 @@ def unaliased_expansion_twin(raw_query, public_query, expanded_public_query):
     if expanded_public_query and expanded_public_query.startswith(public_query):
         return raw_query + expanded_public_query[len(public_query):]
     return raw_query
-
-
-def alias_token_pattern(registry):
-    """A ``\\b(?:dev|fag|pers)-\\d+\\b`` matcher built from the registry's aliases.
-
-    ``None`` when the registry is ``None`` or its aliases yield no usable
-    prefix, which the searcher reads as "no pin possible".
-    """
-    if registry is None:
-        return None
-    cached = getattr(registry, _PATTERN_ATTR, False)
-    if cached is not False:
-        return cached
-    prefixes = set()
-    for alias in getattr(registry, "aliases", ()) or ():
-        match = _ALIAS_SHAPE.match(alias)
-        if match:
-            prefixes.add(match.group(1).lower())
-    pattern = None
-    if prefixes:
-        pattern = re.compile(
-            r"\b(?:" + "|".join(re.escape(p) for p in sorted(prefixes)) + r")-\d+\b",
-            re.IGNORECASE,
-        )
-    try:
-        setattr(registry, _PATTERN_ATTR, pattern)
-    except AttributeError:  # a stand-in object that refuses attributes
-        pass
-    return pattern
-
-
-def alias_tokens_in(text, pattern):
-    """Lower-cased alias tokens present in ``text`` (empty set when none)."""
-    if not pattern or not text:
-        return set()
-    return {token.lower() for token in pattern.findall(text)}
-
-
-def text_contains_any_token(text, tokens, pattern):
-    """True when ``text`` carries one of ``tokens`` as a whole alias token.
-
-    Matched through the same alias pattern rather than a substring test, so
-    ``dev-1`` never matches inside ``dev-10`` and a chunk mentioning some other
-    person's alias is not counted.
-    """
-    if not tokens or not text:
-        return False
-    return bool(alias_tokens_in(text, pattern) & tokens)

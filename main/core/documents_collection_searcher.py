@@ -3,12 +3,8 @@ import json
 import logging
 import time
 
-import numpy as np
-
 from main.core import search_policy
-from main.core.search_response_formatter import LOW_CONFIDENCE_THRESHOLD
 from main.core.search_trace import NULL_TRACE
-from main.privacy.query_privacy import alias_tokens_in, text_contains_any_token
 from main.utils.filename import title_from_doc_path
 from main.utils.performance import delta_ms
 
@@ -61,52 +57,6 @@ def deduplicate_document(doc_id, doc_url, text_provider, seen_urls, seen_text_ha
     return False
 
 
-# How far below LOW_CONFIDENCE_THRESHOLD a pinned chunk is scored. It has to
-# clear NOISE_THRESHOLD (or apply_confidence_filtering drops the very documents
-# the pin exists to keep) and it must not read as low confidence (an exact alias
-# hit is the most confident lexical evidence there is), so it sits strictly
-# below the low-confidence band rather than on its boundary.
-ALIAS_PIN_MARGIN = 0.05
-
-
-def pin_alias_matches(query_tokens, alias_pattern, candidate_ids, chunk_texts,
-                      scores, indexes, limit):
-    """Promote chunks that literally contain a queried alias token.
-
-    An alias ("dev-06") is an opaque string to a cross-encoder: measured on the
-    live index, every candidate for such a query scored as uniform noise and the
-    confidence filter then dropped all of them, even though BM25 had retrieved
-    exactly the right documents. An exact alias-token hit is lexical evidence a
-    cross-encoder structurally cannot weigh, so it goes in front of the CE
-    ranking instead of being averaged into it.
-
-    ``candidate_ids``/``chunk_texts`` are the *pre-truncation* fetch_k candidates
-    (a pinned chunk is usually one the CE cut). Pinned chunks keep their RRF
-    order and all take one synthetic score; the CE ranking follows, minus
-    duplicates, and the whole thing is truncated to ``limit``.
-
-    Returns ``(scores, indexes, pinned_ids)`` — unchanged inputs and an empty
-    list when nothing matches.
-    """
-    exact = [cid for cid, text in zip(candidate_ids, chunk_texts)
-             if text_contains_any_token(text, query_tokens, alias_pattern)]
-    if not exact:
-        return scores, indexes, []
-
-    # scores are sorted ascending (lower = better), so [0] is the CE's best.
-    best_ce = float(scores[0][0]) if len(scores[0]) else 0.0
-    pin_score = min(best_ce, LOW_CONFIDENCE_THRESHOLD - ALIAS_PIN_MARGIN)
-
-    pinned = set(exact)
-    tail = [(float(s), int(i)) for s, i in zip(scores[0], indexes[0]) if int(i) not in pinned]
-    combined = [(pin_score, int(cid)) for cid in exact] + tail
-    combined = combined[:limit]
-
-    new_scores = np.array([[s for s, _ in combined]], dtype=scores.dtype)
-    new_indexes = np.array([[i for _, i in combined]], dtype=indexes.dtype)
-    return new_scores, new_indexes, [cid for _, cid in combined[:len(exact)]]
-
-
 class DocumentCollectionSearcher:
     def __init__(self, collection_name, indexer, persister, reranker=None):
         self.collection_name = collection_name
@@ -130,18 +80,13 @@ class DocumentCollectionSearcher:
                include_matched_chunks_content=False,
                skip_reranker=False,
                trace=None,
-               title_boost_query=None,
-               alias_pattern=None):
+               title_boost_query=None):
         """Search the collection.
 
         title_boost_query: query string used for title-boost token matching.
             Defaults to `text`. Pass the raw user query when `text` is graph-expanded
             so title-boost doesn't reward documents whose titles happen to overlap
             with expansion terms instead of the user's actual intent.
-        alias_pattern: compiled alias-token matcher for a privacy-aliased
-            collection (``query_privacy.alias_token_pattern``), or None. Enables
-            the alias pin at the reranker seam; ignored when the reranker does
-            not run (there is then no CE ranking to correct).
         """
         t_start = time.monotonic()
         self._doc_cache = {}
@@ -177,11 +122,7 @@ class DocumentCollectionSearcher:
             scores, indexes = self.indexer.search(text, fetch_k)
         t_index = time.monotonic()
 
-        alias_pinned = []
         if use_reranker:
-            # Captured before rerank: it truncates to effective_chunks, and the
-            # alias pin's whole point is to reach candidates the CE cut.
-            candidate_ids = [int(cid) for cid in indexes[0]]
             chunk_texts = self._get_chunk_texts(indexes)
             t_chunks = time.monotonic()
             if coll_trace.enabled:
@@ -192,15 +133,6 @@ class DocumentCollectionSearcher:
                     coll_trace.record_stage("ce", chunk_id=chunk_id, rank=rank, score=ce_score)
             else:
                 scores, indexes = self.reranker.rerank(text, scores, indexes, chunk_texts, effective_chunks)
-            query_alias_tokens = alias_tokens_in(text, alias_pattern)
-            if query_alias_tokens:
-                scores, indexes, alias_pinned = pin_alias_matches(
-                    query_alias_tokens, alias_pattern, candidate_ids, chunk_texts,
-                    scores, indexes, effective_chunks,
-                )
-                for rank, chunk_id in enumerate(alias_pinned):
-                    coll_trace.record_stage("aliasPin", chunk_id=chunk_id, rank=rank,
-                                            score=float(scores[0][rank]))
             t_rerank = time.monotonic()
             logger.info(
                 f"Search '{self.collection_name}' ({len(chunk_texts)} candidates): "
@@ -230,9 +162,6 @@ class DocumentCollectionSearcher:
             "results": results,
             "reranked": use_reranker,
         }
-        if alias_pinned:
-            # Only when it fired: the response shape is a pinned contract.
-            response["aliasPinned"] = len(alias_pinned)
 
         results_before_filter = len(results)
         if use_reranker and results:
