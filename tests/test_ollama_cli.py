@@ -161,9 +161,26 @@ class TestDefaultModelPropagation:
     contextual-prefix backend pin their own, because their caches are keyed by
     document id rather than by model — swapping under them silently produces a
     hybrid graph mixing two models' output (docs/knowledge-graph-when-to-use-
-    what.md). Asserted structurally, never against a model name literal: pinning
-    the string here would make every model bump a two-file change for no gain.
+    what.md).
+
+    The propagation assertions are deliberately RELATIONAL (`== DEFAULT_MODEL`),
+    so they keep holding across a model bump. That leaves the constant's own
+    value unguarded — every one of them passes if it silently reverts — so
+    `test_the_default_model_is_the_one_the_campaign_chose` pins it separately.
+    A bump then costs one line here, which is the right price: choosing the
+    machine's general-purpose model is a decision worth restating out loud.
     """
+
+    def test_the_default_model_is_the_one_the_campaign_chose(self):
+        """The one assertion that is allowed to name a model.
+
+        Without it the constant can be reverted with the whole suite green: the
+        propagation tests compare things TO DEFAULT_MODEL, and the extractor
+        test only requires it to DIFFER, so all four hold at any value. Pinned
+        because moving it was a deliberate deliverable (the A/B is in the PR
+        that introduced this line), not an incidental default.
+        """
+        assert DEFAULT_MODEL == "qwen3.8:27b-mlx"
 
     def test_the_tagging_scripts_inherit_it(self):
         from scripts.tagging import discover_tags, tag_documents
