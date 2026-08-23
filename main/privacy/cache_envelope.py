@@ -86,7 +86,7 @@ def write_envelope(path, metadata: dict, entries: dict) -> None:
     """Write ``{**metadata, "entries": entries}`` atomically, under the lock."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps({**metadata, ENTRIES_KEY: entries}, ensure_ascii=False, indent=2)
+    payload = json.dumps({**metadata, ENTRIES_KEY: entries}, ensure_ascii=False, separators=(',', ':'))
     with _locked(path):
         temp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
         try:

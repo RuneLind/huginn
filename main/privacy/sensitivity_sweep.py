@@ -313,7 +313,9 @@ class ReferenceClassifier:
                           if isinstance(name, str) and name.strip()}
 
     def _is_alias(self, text: str) -> bool:
-        return bool(self._alias_re and self._alias_re.search(text))
+        # Whole-candidate match: a span that merely CONTAINS an alias
+        # (`Ola Nordmann (dev-06)`) is not the substituter working.
+        return bool(self._alias_re and self._alias_re.fullmatch(text.strip()))
 
     def _is_token_fragment(self, lowered: str) -> bool:
         return any(lowered != token and lowered in token for token in self._token_text)
@@ -433,7 +435,8 @@ def report_path(collection: str, *, mode: str, limit: int = 0) -> Path:
     packaging gate reads. The gate distinguishes them by content too
     (:func:`is_full_report`); the filename is what stops the overwrite.
     """
-    stamp = datetime.now(timezone.utc).date().isoformat()
+    # Date AND time: a same-day re-run must not overwrite a report that refused.
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
     suffix = f"-limit{limit}" if limit and limit > 0 else ""
     return report_dirs()[0] / f"{REPORT_PREFIX}{collection}_{stamp}_{mode}{suffix}.json"
 
@@ -499,6 +502,12 @@ def latest_report(collection: str, dirs=None):
     found = _reports(collection, dirs)
     if not found:
         return None
+    # A full report that could not read its answers is not evidence and must
+    # not supersede an older readable one — least of all a refusing one.
+    for path, payload in reversed(found):
+        if is_full_report(payload) and answers_are_readable(
+                payload.get("windows"), payload.get("parseFailures")):
+            return path, payload, True
     for path, payload in reversed(found):
         if is_full_report(payload):
             return path, payload, True
@@ -582,6 +591,13 @@ def sweep_gate(collection: str, manifest: dict, dirs=None, *, map_version=None,
                         f"the collection at lastModifiedDocumentTime {swept}, and it is now "
                         f"{current} — a clean verdict about text that has since changed "
                         f"certifies nothing. Re-run it")
+    roles = (payload.get("counts") or {}).get(ROLE, 0)
+    if isinstance(roles, int) and roles > 0:
+        # The model's own `role` label is the one place it can downgrade a
+        # person without blocking; a clean verdict with role phrases is a read.
+        return "warn", (f"the local sensitivity sweep ({path.name}, {coverage} documents) is "
+                        f"clean but the model labelled {roles} reference(s) as role phrases — "
+                        f"read them before shipping")
     return "pass", f"local sensitivity sweep {path.name}: clean ({coverage} documents)"
 
 

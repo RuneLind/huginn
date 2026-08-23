@@ -1023,3 +1023,31 @@ class TestCli:
         run = IndexingRunLedger(runs_dir=str(cli_workspace / "runs")).recent(
             sweep.LEDGER_COLLECTION)[-1]
         assert run["status"] == "degraded"
+
+
+# --- orchestrator inline round: an unreadable run must not supersede a refusal ---
+
+class TestRefusalsSurviveLaterNoise:
+    def test_an_unreadable_newer_report_does_not_supersede_a_refusing_one(self, tmp_path):
+        _report(tmp_path, "demo", generated_at="2026-08-20T00:00:00Z",
+                name="sweep_demo_2026-08-20T000000Z_baseline.json", unknownCount=2)
+        _report(tmp_path, "demo", generated_at="2026-08-21T00:00:00Z",
+                name="sweep_demo_2026-08-21T000000Z_baseline.json",
+                unknownCount=0, windows=4, parseFailures=4)
+        status, message = _gate(tmp_path)
+        assert status == "refuse" and "2 unknown" in message
+
+    def test_the_report_name_carries_a_time_so_a_same_day_rerun_cannot_overwrite(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(sweep, "report_dirs", lambda: [tmp_path])
+        name = sweep.report_path("demo", mode="baseline").name
+        assert "T" in name and name.endswith("Z_baseline.json")
+
+    def test_a_span_that_merely_contains_an_alias_is_still_a_person(self, classifier):
+        doc = "Skrevet av Ola Nordmann (dev-01) i dag."
+        assert classifier.classify("Ola Nordmann (dev-01)", doc) == sweep.UNKNOWN_PERSON
+        assert classifier.classify("Dev-01", doc.replace("dev-01", "Dev-01")) == sweep.ALIAS
+
+    def test_a_clean_full_report_with_role_phrases_warns(self, tmp_path):
+        _report(tmp_path, "demo", counts={sweep.ROLE: 2})
+        status, message = _gate(tmp_path)
+        assert status == "warn" and "role" in message
