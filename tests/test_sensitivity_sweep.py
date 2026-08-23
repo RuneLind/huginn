@@ -1051,3 +1051,191 @@ class TestRefusalsSurviveLaterNoise:
         _report(tmp_path, "demo", counts={sweep.ROLE: 2})
         status, message = _gate(tmp_path)
         assert status == "warn" and "role" in message
+
+
+@pytest.fixture
+def run_classifier():
+    """A map whose residual register is populated.
+
+    The compound rule accepts a part only via the RESIDUAL register (or an alias
+    / exempt label), never via `given_names` — see `_part_bucket` and
+    `test_inverted_surname_given_is_not_absorbed_as_a_run`. The bare `_map()`
+    has no `bare_given_name_residual`, so a run built from it accounts for
+    nothing; these tests need the register the live map actually carries.
+    """
+    data = _map()
+    data["bare_given_name_residual"] = {"Ada": 12, "Zylphia": 8}
+    return sweep.ReferenceClassifier(AliasRegistry(data), data,
+                                     allowed_bigrams={"bo kommune sentrum"})
+
+# --- compound runs of already-known names (2026-08-23 triage) ----------------
+# 12 of the 44 unknown-person strings that campaign triaged were ONE reference
+# naming several people at once — a Confluence attribution cell, a Jira comment.
+# Every other test in the classifier is a whole-candidate lookup, so a run
+# matched nothing and blocked the packaging gate on people the map had already
+# adjudicated. See ReferenceClassifier._compound_of_known.
+
+# NB: a two-part COMMA-only run is deliberately absent — it is ambiguous with
+# `Surname, Given` and is refused; see test_two_parts_joined_only_by_a_comma...
+@pytest.mark.parametrize("candidate", [
+    "Ada/Zylphia", "Ada og Zylphia", "Zylphia/ Ada",
+    "Ada, Ada og Zylphia", "Ada & Zylphia", "Ada + Zylphia",
+])
+def test_compound_of_known_names_is_residual_not_unknown(run_classifier, candidate):
+    assert run_classifier.classify(candidate, candidate) == sweep.MAPPED_RESIDUAL
+
+
+@pytest.mark.parametrize("candidate", ["Ada/Ukjentsen", "Ukjentsen og Ada"])
+def test_compound_with_an_unknown_part_still_blocks(run_classifier, candidate):
+    """The property that makes the rule safe: it narrows what counts as news,
+    it does not stop the sweep noticing news."""
+    assert run_classifier.classify(candidate, candidate) == sweep.UNKNOWN_PERSON
+
+
+def test_two_token_name_is_not_split_on_whitespace(run_classifier):
+    """`Ada Zylphia` must not decompose just because both tokens are given names.
+
+    Splitting on whitespace would make any full name whose parts are both known
+    given names disappear — the same failure the gazetteer's concatenation test
+    exists to prevent.
+    """
+    assert run_classifier.classify("Ada Zylphia", "Ada Zylphia") == sweep.UNKNOWN_PERSON
+
+
+def test_trailing_punctuation_does_not_make_a_known_name_unknown(classifier):
+    """A corpus cell marking an uncertain attribution ends in a question mark."""
+    assert classifier.classify("Ada?", "Ada?") == sweep.MAPPED_RESIDUAL
+
+
+def test_genitive_of_a_known_name_is_residual(run_classifier):
+    assert run_classifier.classify("Adas", "Adas") == sweep.MAPPED_RESIDUAL
+
+
+def test_genitive_rule_cannot_absorb_an_unknown_person(run_classifier):
+    """The stem must itself be known — `Ukjentsens` is a genitive of nothing."""
+    assert run_classifier.classify("Ukjentsens", "Ukjentsens") == sweep.UNKNOWN_PERSON
+
+
+# --- review round 2: the holes an adversarial pass found ---------------------
+
+@pytest.mark.parametrize("candidate", ["Example00, Ada", "Example00,Ada"])
+def test_inverted_surname_given_is_not_absorbed_as_a_run(run_classifier, candidate):
+    """THE critical one. A comma separates a list AND inverts a single name.
+
+    `Surname, Given` is ONE person, and a surname token is very often also some
+    other entry's given name — measured at 105 of 291 in the live map. If a part
+    could be accepted merely for being a known given name, an unknown person
+    written in the standard sort order would decompose into two "known" halves
+    and stop blocking the packaging gate. `_part_bucket` therefore never consults
+    `given_names`.
+    """
+    assert run_classifier.classify(candidate, candidate) == sweep.UNKNOWN_PERSON
+
+
+@pytest.mark.parametrize("candidate", [
+    "[~ukjent-person]/Ada", "Ada og [~ukjent-person]",
+])
+def test_bracketed_redaction_token_in_a_run_is_recognised(run_classifier, candidate):
+    """The strip set eats brackets, so the alias test must see the RAW part.
+
+    An aliased collection's attribution cells are exactly alias/redaction-token
+    mixtures — the shape this rule exists for.
+    """
+    assert run_classifier.classify(candidate, candidate) == sweep.MAPPED_RESIDUAL
+
+
+@pytest.mark.parametrize("candidate", ["Ada og saksbehandler", "Adas"])
+def test_role_kind_survives_the_new_rules(run_classifier, candidate):
+    """`sweep_gate` warns on role phrases; a run must not delete that warning."""
+    assert run_classifier.classify(candidate, candidate, kind="role") == sweep.ROLE
+
+
+def test_run_of_only_exempt_labels_is_dropped_not_counted(classifier):
+    """A lone exempt label drops; a pair of them must not inflate the residual
+    count that triage reads."""
+    assert classifier.classify("saksbehandler/saksbehandler",
+                               "saksbehandler/saksbehandler") is None
+
+
+def test_uppercase_separator_word_still_splits(run_classifier):
+    assert run_classifier.classify("Ada OG Zylphia", "Ada OG Zylphia") == sweep.MAPPED_RESIDUAL
+
+
+@pytest.mark.parametrize("candidate", ["Ada; Zylphia", "Ada | Zylphia"])
+def test_semicolon_and_pipe_are_separators(run_classifier, candidate):
+    """`|` is the Confluence table cell separator; `;` a common list separator."""
+    assert run_classifier.classify(candidate, candidate) == sweep.MAPPED_RESIDUAL
+
+
+def test_a_multi_token_unknown_part_still_blocks(run_classifier):
+    """Every other negative case uses a single-token unknown."""
+    assert run_classifier.classify("Ada/Ukjent Nyansatt", "Ada/Ukjent Nyansatt") == sweep.UNKNOWN_PERSON
+
+
+@pytest.mark.parametrize("candidate", [",,,", "///", "og og og"])
+def test_degenerate_separator_only_input_is_not_a_run(run_classifier, candidate):
+    """With no surviving parts there is nothing accounted for, so it blocks."""
+    assert run_classifier.classify(candidate, candidate) == sweep.UNKNOWN_PERSON
+
+
+def test_single_part_is_not_a_run(classifier):
+    """The len(parts) < 2 guard: one accounted part is not a compound, and must
+    reach the normal single-candidate path rather than the run rule."""
+    assert classifier.classify("Zylphia?", "Zylphia?") == sweep.MAPPED_RESIDUAL
+
+
+def test_edge_punctuation_on_an_exempt_label_still_drops(classifier):
+    assert classifier.classify("saksbehandler?", "saksbehandler?") is None
+
+
+def test_genitive_is_punctuation_stripped(run_classifier):
+    """`Adas?` and `Adas` must agree — the genitive path gets `bare` too."""
+    assert run_classifier.classify("Adas?", "Adas?") == sweep.MAPPED_RESIDUAL
+
+
+def test_genitive_length_guard_holds(classifier):
+    """A stem shorter than the minimum is not a genitive of anything."""
+    assert classifier.classify("as", "as") is None
+
+
+# --- review round 3: holes the verify pass found in round 2's fixes ---------
+
+def test_genitive_does_not_reach_given_names(run_classifier):
+    """`<any entry's given name> + s` must NOT be accounted for.
+
+    Round 2 closed the inverted-name hole in `_part_bucket` but left `_is_genitive`
+    consulting `given_names`, so one trailing character walked straight back
+    through it: `Berg, Ada` blocked while `Bergs, Ada` did not. Norwegian
+    surnames ending in -s are common, which is exactly the population involved.
+    """
+    # `Example00` is an entry surname; no residual key ends in it.
+    assert run_classifier.classify("Example00s", "Example00s") == sweep.UNKNOWN_PERSON
+    assert run_classifier.classify("Example00s, Ada", "Example00s, Ada") == sweep.UNKNOWN_PERSON
+
+
+@pytest.mark.parametrize("candidate", ["Ada, Zylphia", "Zylphia, Ada", "Ada,Zylphia"])
+def test_two_parts_joined_only_by_a_comma_are_refused(run_classifier, candidate):
+    """Ambiguous with `Surname, Given`, so refused even when BOTH parts are known.
+
+    Residual keys are themselves given names, so the round-2 narrowing did not
+    close the inversion case — it only shrank the population. No real attribution
+    run in the triage had this shape: they used a slash, `og`, or three or more
+    parts.
+    """
+    assert run_classifier.classify(candidate, candidate) == sweep.UNKNOWN_PERSON
+
+
+@pytest.mark.parametrize("candidate", [
+    "Ada, Zylphia og Ada",      # three parts -> a list, not an inversion
+    "Ada/Zylphia",              # a slash is never a name inversion
+    "Ada og Zylphia",
+])
+def test_the_comma_refusal_does_not_catch_real_runs(run_classifier, candidate):
+    assert run_classifier.classify(candidate, candidate) == sweep.MAPPED_RESIDUAL
+
+
+def test_run_of_only_aliases_buckets_as_alias(run_classifier):
+    """The substituter working — not a residual, which would inflate the count
+    triage reads and understate the `alias` line in the report."""
+    doc = "x dev-01/dev-02 x"
+    assert run_classifier.classify("dev-01/dev-02", doc) == sweep.ALIAS
