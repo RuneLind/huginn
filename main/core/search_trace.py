@@ -17,7 +17,10 @@ from main.utils.performance import delta_ms
 
 SCHEMA_VERSION = 1
 
-VALID_STAGES = ("faiss", "bm25", "rrf", "ce", "final")
+# "aliasPin" sits between "ce" and "final": a chunk carrying an alias token the
+# query asked for, promoted past a cross-encoder that cannot score an opaque
+# token (main/privacy/query_privacy.py).
+VALID_STAGES = ("faiss", "bm25", "rrf", "ce", "aliasPin", "final")
 VALID_DROP_REASONS = ("noise", "dedup", "missingDoc", "perDocCap", "metadataFilter")
 
 

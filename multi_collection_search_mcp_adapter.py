@@ -40,14 +40,22 @@ setup_root_logger()
 TRACE_DEFAULT = env_bool(TRACE_DEFAULT_ENV)
 
 
-def register_collection_tools(mcp, searchers, augmenter, **tool_kwargs):
-    """Register one MCP search tool per collection on the given FastMCP instance."""
+def register_collection_tools(mcp, searchers, augmenter, alias_registries=None, **tool_kwargs):
+    """Register one MCP search tool per collection on the given FastMCP instance.
+
+    ``alias_registries`` maps collection name -> AliasRegistry|None, so a
+    privacy-aliased collection's tool de-aliases the query (see
+    ``main/privacy/query_privacy.py``).
+    """
+    registries = alias_registries or {}
     for collection_name, searcher in searchers.items():
         tool_description = (
             f"Search in {collection_name} collection using vector search. "
             "Each document contains 'url' field - always include it in responses when citing information."
         )
-        search_fn = build_search_tool_fn(searcher, collection_name, augmenter, **tool_kwargs)
+        search_fn = build_search_tool_fn(
+            searcher, collection_name, augmenter,
+            alias_registry=registries.get(collection_name), **tool_kwargs)
         mcp.tool(name=f"search_{collection_name}", description=tool_description)(search_fn)
 
 
@@ -79,6 +87,7 @@ def main():
         mcp,
         searchers,
         augmenter,
+        alias_registries=store.get_alias_registries(),
         max_number_of_chunks=args['maxNumberOfChunks'],
         max_number_of_documents=args['maxNumberOfDocuments'],
         include_full_text=args['includeFullText'],

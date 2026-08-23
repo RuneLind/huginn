@@ -346,6 +346,44 @@ map stays local.
   of an actively-prefixed collection is kept on purpose: the pipeline invalidates
   exactly the documents aliasing changed (`ContextualCache.invalidate_doc`), instead
   of re-prefixing every chunk.
+- **Query seam** (`main/privacy/query_privacy.py`). An aliased index cannot be
+  searched by name, and a typed name must not come back out, so the query is
+  rewritten with the **same** substituter — `dealias_query(q, registry)`, which is
+  `registry.apply` and therefore idempotent. `KnowledgeStore` resolves one
+  registry per served collection at load and at `POST
+  /api/collections/{name}/reload` (`store.alias_registries`); a missing map here
+  **logs one error and serves the collection unaliased for querying** — the index
+  on disk is already clean, and only *indexing* may fail closed.
+  - Rewritten **per collection**, inside `search_pipeline.search_and_shape`, so a
+    mixed request searches an aliased collection in alias space and an
+    out-of-scope one in name space (the common case: `/api/search` with no
+    `collection` hits all 30+). The `title_boost_query` follows the same split.
+  - If **any** targeted collection is armed, the request's *shared* text — trace
+    `query.raw`, the query log, `augment_query`, `retryHints`
+    (`detectedEntities`/`narrowerQuery`/`broaderQuery`), `corrective.queriesTried`
+    — is the de-aliased one. That is the whole point: a real name must not
+    persist or echo. Graph augmentation runs once, on the de-aliased text; the
+    name-space twin handed to out-of-scope collections is that same expansion
+    suffix on the raw query.
+  - **The knowledge graph is a pre-alias artifact** — its `*_llm_graph.json`
+    files were extracted before the corpus was aliased, so node labels,
+    expansion terms and entity contexts still spell people by name, and they
+    reach `retryHints.relatedTerms`, `graph_answer`, `graph_context` and the
+    trace's expansion. Measured: 24 leaked terms across the 10-probe sweep. So
+    `GraphSearchAugmenter` takes the same registry (`alias_registry=`) and every
+    string it contributes is de-aliased. A request that touches no aliased
+    collection passes `None` and is byte-identical to before.
+  - **Alias pin.** `dev-06` is opaque to the cross-encoder: measured live, every
+    candidate scored as uniform noise (0.00095) and `apply_confidence_filtering`
+    then dropped all of them, though BM25 had retrieved the right documents. So
+    between `rerank` and `apply_title_boost`, chunks whose text carries a queried
+    alias token (token-boundary match, pattern derived from the registry's alias
+    set — never `[~person]`/`@person`/`[~ukjent-person]`, which mean "someone")
+    are moved in front of the CE ranking in RRF order at
+    `min(best_ce, LOW_CONFIDENCE_THRESHOLD - 0.05)`, so they survive the noise
+    filter without flagging `lowConfidence`. Trace stage `aliasPin`; the response
+    gains `aliasPinned: <n>` **only** when it fired (the response shape is a
+    pinned contract).
 
 ## LLM entity extraction (knowledge graph)
 

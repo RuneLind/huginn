@@ -381,6 +381,15 @@ class AliasRegistry:
         self._ident_exceptions = {t.lower() for t in ident_exceptions}
         self._warned_unresolved = False
 
+        # The alias vocabulary itself ("dev-06", "fag-01"), i.e. the tokens a
+        # *query* may legitimately contain once a collection is aliased. Read by
+        # main/privacy/query_privacy.py to build the alias-token pattern the
+        # searcher pins on; derived from the map rather than hardcoded, because
+        # the role prefixes are a property of the map and grow with it.
+        self.aliases = frozenset(
+            entry["alias"] for entry in map_data.get("entries", []) if entry.get("alias")
+        )
+
         # normalized literal -> replacement, or None meaning "leave as is"
         self._replacements: dict[str, str | None] = {}
         ranked: list[tuple[int, int, str, str]] = []

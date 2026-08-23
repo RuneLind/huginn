@@ -18,6 +18,7 @@ graph is ``None``.
 import re
 
 from main.core.search_trace import SearchTrace
+from main.privacy.query_privacy import dealias_value
 
 
 _CONJUNCTION_SPLITS = (" versus ", " vs. ", " vs ", " and ", " og ", " & ")
@@ -126,8 +127,18 @@ class GraphSearchAugmenter:
     RETRY_TERM_LIMIT = 8
     GRAPH_CONTEXT_KEY = "graph_context"
 
-    def __init__(self, graph):
+    def __init__(self, graph, alias_registry=None):
         self.graph = graph
+        # The graph JSONs were extracted from the corpus BEFORE it was aliased,
+        # so their labels, expansion terms and entity contexts still spell people
+        # by name. When the request touches a privacy-aliased collection, every
+        # string this class contributes to the response or the trace goes through
+        # the same substituter first. None (the default, and every request that
+        # touches no aliased collection) leaves all of it exactly as before.
+        self.alias_registry = alias_registry
+
+    def _public(self, value):
+        return dealias_value(value, self.alias_registry)
 
     def augment_query(self, q: str, trace: SearchTrace):
         """Detect entities, build expansion, fetch graph answer.
@@ -146,17 +157,18 @@ class GraphSearchAugmenter:
             trace.add_detected_entity(
                 entity_id=eid,
                 entity_type=node.get("type", ""),
-                label=node.get("label", ""),
+                label=self._public(node.get("label", "")),
                 matched_span=span,
             )
 
         if not detected_entities:
             return q, None, []
 
-        graph_answer = self.graph.answer_graph_query(detected_entities, q)
+        graph_answer = self._public(self.graph.answer_graph_query(detected_entities, q))
         trace.set_graph_answered(graph_answer is not None)
 
-        expansion_terms = self.graph.get_expansion_terms(detected_entities)[: self.EXPANSION_TERM_LIMIT]
+        expansion_terms = self._public(
+            self.graph.get_expansion_terms(detected_entities)[: self.EXPANSION_TERM_LIMIT])
         if expansion_terms:
             search_q = q + " " + " ".join(expansion_terms)
             trace.set_expansion(search_q, expansion_terms)
@@ -181,7 +193,8 @@ class GraphSearchAugmenter:
                 if ctx:
                     contexts.append(ctx)
             if contexts:
-                r[self.GRAPH_CONTEXT_KEY] = contexts[: self.CONTEXT_PER_RESULT_LIMIT]
+                r[self.GRAPH_CONTEXT_KEY] = self._public(
+                    contexts[: self.CONTEXT_PER_RESULT_LIMIT])
 
     def get_retry_hints(self, q: str, detected_entities: list) -> dict | None:
         """Suggest concrete follow-ups for a weak/empty search.
@@ -199,7 +212,7 @@ class GraphSearchAugmenter:
         if self.graph is not None:
             for eid in detected_entities:
                 node = self.graph.nodes.get(eid)
-                label = node.get("label") if node else None
+                label = self._public(node.get("label")) if node else None
                 if label and label not in entity_labels:
                     entity_labels.append(label)
         if entity_labels:
@@ -207,7 +220,7 @@ class GraphSearchAugmenter:
 
         if self.graph is not None and detected_entities:
             related: list[str] = []
-            for term in self.graph.get_expansion_terms(detected_entities):
+            for term in self._public(self.graph.get_expansion_terms(detected_entities)):
                 if not term:
                     continue
                 if _contains_word(q, term) or term in related:
@@ -226,7 +239,7 @@ class GraphSearchAugmenter:
                 narrower_query = f"{q} {top}".strip()
                 narrower_strategy = "entity_label_append"
         else:
-            seed = self._fallback_narrower_seed(q)
+            seed = self._public(self._fallback_narrower_seed(q))
             if seed and not _contains_word(q, seed):
                 narrower_query = f"{q} {seed}".strip()
                 narrower_strategy = "fallback_seed"
