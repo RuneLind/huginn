@@ -75,6 +75,32 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def refuse_if_tracked(explicit) -> Path:
+    """Resolve a caller-supplied output path, or exit if git would track it.
+
+    Shared with ``scripts/audit/sensitivity_sweep.py``, which writes the other
+    output that contains real names. One copy, because a second implementation of
+    a guard like this drifts in exactly the direction that costs nothing to write
+    and everything to discover.
+
+    Absolute FIRST. `check-ignore` runs with `cwd=REPO_ROOT` while the write later
+    resolves against the process CWD, so a relative path had the two steps
+    answering about two different files: `--candidates-out out.json` from inside
+    `data/` was refused because `<repo>/out.json` is tracked territory, and the
+    mirror image — ignored at the root, tracked where the caller stands — would
+    have been allowed and then written into a tracked directory. That is the
+    failure this guard exists to prevent.
+    """
+    path = Path(explicit).expanduser().resolve()
+    ignored = subprocess.run(["git", "check-ignore", "-q", str(path)],
+                             cwd=REPO_ROOT, capture_output=True)
+    # 0 = ignored, 1 = not ignored, 128 = not a git checkout / outside the repo.
+    if ignored.returncode == 1:
+        sys.exit(f"REFUSED: {path} is not gitignored, and it is an output that contains real "
+                 f"names. Write it under data/ or inside a private huginn-*/ sub-repo.")
+    return path
+
+
 def candidates_destination(explicit: str | None, collection: str) -> Path:
     """Where the ONE output with real text in it may be written.
 
@@ -88,22 +114,7 @@ def candidates_destination(explicit: str | None, collection: str) -> Path:
     if not explicit:
         DEFAULT_CANDIDATES_DIR.mkdir(parents=True, exist_ok=True)
         return DEFAULT_CANDIDATES_DIR / f"scan_candidates_{collection}.json"
-    # Absolute FIRST. `check-ignore` runs with `cwd=REPO_ROOT` while the write
-    # later resolves against the process CWD, so a relative path had the two
-    # steps answering about two different files: `--candidates-out out.json`
-    # from inside `data/` was refused because `<repo>/out.json` is tracked
-    # territory, and the mirror image — ignored at the root, tracked where the
-    # caller stands — would have been allowed and then written into a tracked
-    # directory. That is the failure this guard exists to prevent.
-    path = Path(explicit).expanduser().resolve()
-    ignored = subprocess.run(["git", "check-ignore", "-q", str(path)],
-                             cwd=REPO_ROOT, capture_output=True)
-    # 0 = ignored, 1 = not ignored, 128 = not a git checkout / outside the repo.
-    if ignored.returncode == 1:
-        sys.exit(f"REFUSED: {path} is not gitignored, and --candidates-out is the one output "
-                 f"that contains real names. Write it under data/ or inside a private "
-                 f"huginn-*/ sub-repo.")
-    return path
+    return refuse_if_tracked(explicit)
 
 
 def main() -> None:

@@ -25,6 +25,12 @@ sys.path.insert(0, str(REPO_ROOT / "scripts" / "audit"))
 import package_collection as pkg  # noqa: E402
 from main.privacy import index_scan  # noqa: E402
 import scan_index as cli  # noqa: E402
+# Imported by its PACKAGE path, the way package_collection imports it. A bare
+# `import sensitivity_sweep` off the sys.path entry above is a SECOND module
+# object with its own globals, so monkeypatching it would leave the copy the
+# packager actually calls untouched — and the gate tests below would pass
+# vacuously.
+from scripts.audit import sensitivity_sweep as sweep  # noqa: E402
 from tests.test_scan_index import _clean_document, _document, _map, _write_collection  # noqa: E402
 
 
@@ -49,7 +55,19 @@ def workspace(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(pkg, "REPO_ROOT", tmp_path)
+    # The sweep gate reads its reports from here. Repointed so the packager's
+    # verdict depends on what a test wrote, never on what happens to be in the
+    # operator's private sub-repo.
+    monkeypatch.setattr(sweep, "report_dirs", lambda: [tmp_path / "sweeps"])
     return tmp_path
+
+
+def _sweep_report(workspace, collection, *, generated_at, unknown=0):
+    directory = workspace / "sweeps"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"sweep_{collection}_2026-08-23.json").write_text(
+        json.dumps({"collection": collection, "generatedAt": generated_at,
+                    "unknownCount": unknown, "findings": []}), encoding="utf-8")
 
 
 def _package(workspace, monkeypatch, name="demo-aliased", extra=()):
@@ -453,3 +471,62 @@ def test_a_symlink_in_the_tree_prints_a_refusal(workspace, monkeypatch, capsys):
     assert code != 0 and "REFUSED" in out
     assert "Traceback" not in out
     assert _tarballs(workspace) == []
+
+
+# --- the local sensitivity sweep gate -----------------------------------------
+#
+# The deterministic scan certifies that no LISTED name survived. The sweep is the
+# second opinion about the people the map never listed, and the packager is where
+# its verdict has to bite — a report nobody reads is the advisory scanner this
+# whole script exists to replace.
+
+def test_no_sweep_report_warns_but_still_packages(workspace, monkeypatch, capsys):
+    """A second opinion, not a prerequisite. Making the hand-off depend on a local
+    GPU being up is how a gate gets routed around."""
+    _write_collection(workspace / "collections", "demo-aliased",
+                      documents=[_clean_document(0)])
+    code = _package(workspace, monkeypatch)
+    out = _combined(capsys, code)
+    assert code == 0 and "WARN" in out and "no local sensitivity sweep" in out
+    assert len(_tarballs(workspace)) == 1
+
+
+def test_a_sweep_that_found_an_unknown_person_refuses(workspace, monkeypatch, capsys):
+    _write_collection(workspace / "collections", "demo-aliased",
+                      documents=[_clean_document(0)])
+    _sweep_report(workspace, "demo-aliased", generated_at="2099-01-01T00:00:00Z", unknown=3)
+    code = _package(workspace, monkeypatch)
+    out = _combined(capsys, code)
+    assert code != 0 and "REFUSED" in out and "3 unknown" in out
+    # The strings stay in the gitignored report; the refusal is a count.
+    assert _tarballs(workspace) == []
+
+
+def test_a_sweep_older_than_the_collection_refuses(workspace, monkeypatch, capsys):
+    """A clean verdict about text that has since been rebuilt certifies nothing."""
+    collection = _write_collection(workspace / "collections", "demo-aliased",
+                                   documents=[_clean_document(0)])
+    manifest = json.loads((collection / "manifest.json").read_text(encoding="utf-8"))
+    manifest["updatedTime"] = "2026-08-20T00:00:00+00:00"
+    (collection / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _sweep_report(workspace, "demo-aliased", generated_at="2026-08-19T00:00:00Z")
+    code = _package(workspace, monkeypatch)
+    out = _combined(capsys, code)
+    assert code != 0 and "older than" in out
+    assert _tarballs(workspace) == []
+
+
+def test_a_clean_recent_sweep_is_stamped_into_the_package(workspace, monkeypatch, capsys):
+    """"Certified without a second opinion" has to be legible in the artifact, not
+    only in the console the builder happened to be looking at."""
+    collection = _write_collection(workspace / "collections", "demo-aliased",
+                                   documents=[_clean_document(0)])
+    manifest = json.loads((collection / "manifest.json").read_text(encoding="utf-8"))
+    manifest["updatedTime"] = "2026-08-20T00:00:00+00:00"
+    (collection / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _sweep_report(workspace, "demo-aliased", generated_at="2026-08-22T00:00:00Z")
+    code = _package(workspace, monkeypatch)
+    assert code == 0, _combined(capsys, code)
+    with tarfile.open(next((workspace / "out").glob("*.tar.gz"))) as tar:
+        stamp = json.loads(tar.extractfile("PACKAGE-STAMP.json").read().decode())
+    assert stamp["sensitivitySweep"]["status"] == "pass"

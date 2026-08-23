@@ -49,6 +49,12 @@ rather than about what is inside it:
 * its manifest must carry the ``privacy`` stamp, which the create branch writes
   and a windowed update cannot promise. No stamp means "some of this index was
   built before aliasing", and no scan can tell which part.
+
+And one refusal after it: the LOCAL sensitivity sweep
+(``scripts/audit/sensitivity_sweep.py``). A sweep that found an unknown person,
+or one that ran before the collection was last rebuilt, refuses. NO sweep report
+at all only WARNs — the sweep is a second opinion, and making a hand-off depend
+on a local GPU being up is how a gate gets routed around.
 """
 import argparse
 import gzip
@@ -71,6 +77,7 @@ from main.privacy.index_scan import (  # noqa: E402
     CHECK_NAMES, GIVEN_NAMES_FILE, scan_collection,
 )
 from scripts.audit.scan_index import DEFAULT_COLLECTIONS_DIR, resolve_allowlist  # noqa: E402
+from scripts.audit.sensitivity_sweep import sweep_gate  # noqa: E402
 
 STAMP_NAME = "PACKAGE-STAMP.json"
 
@@ -180,8 +187,13 @@ def tarball_name(collection: str, report, today: str) -> str:
             f"-policy{report.policy_version}.tar.gz")
 
 
-def package_stamp(report, manifest: dict, allowlist_path, gazetteer_path) -> dict:
+def package_stamp(report, manifest: dict, allowlist_path, gazetteer_path,
+                  sweep=None) -> dict:
     return {
+        # What the LOCAL second opinion said, so "certified without one" is
+        # legible in the artifact rather than only in the console the builder
+        # happened to be looking at.
+        "sensitivitySweep": sweep,
         "collection": report.collection,
         "scanDate": date.today().isoformat(),
         "policy_version": report.policy_version,
@@ -289,12 +301,19 @@ def main() -> None:
         sys.exit(f"\nREFUSED: the scan failed ({', '.join(failed)}). Nothing was written. "
                  f"Run scripts/audit/scan_index.py --candidates-out … to triage.")
 
+    manifest = json.loads((collection_dir / "manifest.json").read_text(encoding="utf-8"))
+    sweep_status, sweep_message = sweep_gate(args.collection, manifest)
+    print(f"\nsweep: {sweep_message}")
+    if sweep_status == "refuse":
+        sys.exit(f"\nREFUSED: {sweep_message}")
+    if sweep_status == "warn":
+        print("WARN: packaging without a local second opinion.")
+
     drifted = verify_members(collection_dir, report.scanned_members)
     if drifted:
         sys.exit(f"\nREFUSED: the collection changed between the scan and the tar, so the "
                  f"tarball would carry files nothing certified: {'; '.join(drifted[:5])}")
 
-    manifest = json.loads((collection_dir / "manifest.json").read_text(encoding="utf-8"))
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     tarball = out_dir / tarball_name(args.collection, report, date.today().isoformat())
@@ -302,7 +321,8 @@ def main() -> None:
         sys.exit(f"\nREFUSED: {tarball} already exists. A tarball someone has already copied "
                  f"out must keep matching the one on disk — pass --force to overwrite.")
 
-    stamp = json.dumps(package_stamp(report, manifest, allowlist_path, GIVEN_NAMES_FILE),
+    stamp = json.dumps(package_stamp(report, manifest, allowlist_path, GIVEN_NAMES_FILE,
+                                     sweep={"status": sweep_status, "detail": sweep_message}),
                        indent=2, ensure_ascii=False) + "\n"
     try:
         members = list(archive_members(collection_dir, args.collection,
