@@ -269,11 +269,18 @@ def swap(name: str, temp_name: str, api_base: str) -> None:
     # Rename, then repoint, then verify. The collection now IS `<name>`, so this
     # is the first moment at which `<name>/documents/…` is the right answer.
     manifest_path = live / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["collectionName"] = name
-    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False),
-                             encoding="utf-8")
-    print(f"repointed {rewrite_document_paths(live, temp_name, name)} documentPath prefixes")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["collectionName"] = name
+        manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False),
+                                 encoding="utf-8")
+        print(f"repointed {rewrite_document_paths(live, temp_name, name)} documentPath prefixes")
+    except (OSError, ValueError) as exc:
+        # After the rename the live directory may now hold temp-prefixed paths —
+        # the silent-empty-chunks state. Say where the way back is.
+        sys.exit(f"{name}: repointing failed after the rename ({exc}); the collection "
+                 f"in place may read no chunk texts. The pre-alias copy is at {parked}; "
+                 f"move it back and investigate.")
 
     stale = stale_temp_paths(live, temp_name)
     if stale:

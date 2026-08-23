@@ -27,7 +27,7 @@ def dealiased_query(collection_name: str, query: str) -> str:
     manifest_path = COLLECTIONS_DIR / collection_name / "manifest.json"
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except OSError:
+    except (OSError, ValueError):
         return query
     try:
         from main.privacy.alias_registry import resolve_registry_for_manifest

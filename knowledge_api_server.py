@@ -80,7 +80,10 @@ def main():
     config = ServerConfig.from_args(args)
     app.state.config = config
 
-    uvicorn.run(app, host=config.host, port=config.port)
+    # access_log=False: the access line carries the raw `?q=` before the privacy
+    # seam runs, and start.sh redirects stdout into logs/ — a typed real name
+    # would persist there verbatim.
+    uvicorn.run(app, host=config.host, port=config.port, access_log=False)
 
 
 if __name__ == "__main__":

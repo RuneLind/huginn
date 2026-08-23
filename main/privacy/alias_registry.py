@@ -386,10 +386,16 @@ class AliasRegistry:
         # that has to travel BACK into name space: the corrective-rescue query
         # handed to an out-of-scope collection, whose index has never contained
         # an alias token. Nothing built from it is logged, traced or echoed.
-        self._alias_names = {
-            entry["alias"]: entry["name"] for entry in map_data.get("entries", [])
-            if entry.get("alias") and entry.get("name")
-        }
+        self._alias_names = {}
+        for entry in map_data.get("entries", []):
+            alias, name = entry.get("alias"), entry.get("name")
+            if not (alias and name):
+                continue
+            if alias in self._alias_names and self._alias_names[alias] != name:
+                # An inverted duplicate would send an out-of-scope collection the
+                # WRONG person's name; the key must be injective to be a key.
+                raise PrivacyMapInvalid(f"alias {alias!r} is used by two entries")
+            self._alias_names[alias] = name
         # `(?<![\w-])`/`(?![\w-])` rather than `\b`: an alias is `dev-06`, so a
         # word boundary would happily fire inside `dev-061` or `pre-dev-06`.
         alternation = "|".join(sorted((re.escape(alias) for alias in self._alias_names),
@@ -402,7 +408,7 @@ class AliasRegistry:
         # the corpus), so one standing beside its own alias in an expansion term
         # re-pairs the two; query_privacy drops those.
         self.given_names = frozenset(
-            literal.split()[0].lower()
+            literal.split()[0].strip(",").lower()
             for literal in [entry.get("name") for entry in map_data.get("entries", [])]
             + list(map_data.get("unmapped_people_variants", {}))
             if isinstance(literal, str) and literal.strip()

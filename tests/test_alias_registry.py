@@ -677,3 +677,27 @@ def test_path_in_scope_follows_a_symlink_into_the_tree(scoped_tree):
     link = root / "outside" / "link"
     link.symlink_to(tree / "sub")
     assert path_in_scope(str(link)) is True
+
+
+def test_two_entries_sharing_an_alias_are_refused(tmp_path):
+    import json, pytest
+    from main.privacy import alias_registry
+    data = {"version": 1, "entries": [
+        {"alias": "dev-01", "name": "Ada Example", "variants": ["Ada Example"]},
+        {"alias": "dev-01", "name": "Bo Tester", "variants": ["Bo Tester"]},
+    ] + [{"alias": f"dev-{i:02d}", "name": f"Kari Tester{i}", "variants": [f"Kari Tester{i}"]} for i in range(2, 60)],
+        "non_person_labels": [], "unmapped_people_variants": {}}
+    p = tmp_path / "m.json"; p.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(alias_registry.PrivacyMapInvalid):
+        alias_registry.AliasRegistry.load(p)
+
+
+def test_given_names_strip_the_comma_of_a_surname_first_label(tmp_path):
+    import json
+    from main.privacy import alias_registry
+    data = {"version": 1, "entries": [
+        {"alias": f"dev-{i:02d}", "name": f"Kari Tester{i}", "variants": [f"Kari Tester{i}"]} for i in range(60)],
+        "non_person_labels": [], "unmapped_people_variants": {"Example, Ada": ["Example, Ada"]}}
+    p = tmp_path / "m.json"; p.write_text(json.dumps(data), encoding="utf-8")
+    reg = alias_registry.AliasRegistry.load(p)
+    assert "example" in reg.given_names and "example," not in reg.given_names
