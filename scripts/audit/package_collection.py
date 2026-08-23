@@ -51,6 +51,7 @@ rather than about what is inside it:
   built before aliasing", and no scan can tell which part.
 """
 import argparse
+import gzip
 import hashlib
 import io
 import json
@@ -104,6 +105,12 @@ def verify_members(collection_dir: Path, members: list) -> list:
     question is "did anything move", not "is this byte-identical to a baseline".
     A file that appeared is as disqualifying as one that changed — it would be
     tarred without ever having been read.
+
+    THE BOUND: this closes the scan-to-verify window, not the verify-to-tar one
+    — nothing is re-checked while `tarfile` reads the files, so a writer that
+    lands inside that second window still gets into the tarball, and a writer
+    that rewrites a file in place with the same size within the same mtime
+    granularity is invisible to both.
     """
     problems = []
     expected = {}
@@ -192,11 +199,22 @@ def package_stamp(report, manifest: dict, allowlist_path, gazetteer_path) -> dic
 
 
 def _write_tarball(tarball: Path, stamp: str, members) -> int:
-    """Build under a temp name in the same directory, then `os.replace`."""
+    """Build under a temp name in the same directory, then `os.replace`.
+
+    The gzip member is opened by hand rather than through ``mode="w:gz"``. That
+    convenience form writes the path it is CURRENTLY writing into the gzip FNAME
+    header field — which here is `.<name>.tar.gz.tmp-<pid>`, i.e. the builder's
+    process id, shipped inside the certified artifact and invisible to
+    `tar -tvf`. `filename=""` drops the field and `mtime=0` drops the build
+    clock with it, which also makes two packages of the same input compare byte
+    for byte. ``mode="w|"`` because a gzip stream is not seekable.
+    """
     temp = tarball.with_name(f".{tarball.name}.tmp-{os.getpid()}")
     count = 0
     try:
-        with tarfile.open(temp, "w:gz") as tar:
+        with open(temp, "wb") as raw, \
+                gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed, \
+                tarfile.open(fileobj=compressed, mode="w|") as tar:
             payload = stamp.encode("utf-8")
             info = _reset_identity(tarfile.TarInfo(STAMP_NAME))
             info.size = len(payload)
@@ -253,7 +271,13 @@ def main() -> None:
             allow_count_drift=args.allow_count_drift,
             allowed_bigrams_path=allowlist_path,
         )
-    except Refused as e:
+    except (ValueError, PrivacyMapMissing) as e:
+        # The scan's own refusals: the given-name gazetteer below its floor
+        # (ValueError) and a map that loads but would substitute wrongly
+        # (PrivacyMapInvalid, a PrivacyMapMissing). `--map` is not the map
+        # `refusal()` resolved the scope with, so an unusable one first surfaces
+        # here. Both used to come out of main() as a traceback, which reads as a
+        # broken tool rather than as the gate declining to certify.
         sys.exit(f"REFUSED: {e}")
     print(f"collection: {report.collection}  map v{report.map_version}  "
           f"policy v{report.policy_version}  entries: {report.map_entries}\n")

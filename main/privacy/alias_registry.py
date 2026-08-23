@@ -7,8 +7,8 @@ before contextual prefixing, before anything is written to disk — not at query
 time. The reverse map (``huginn-*/privacy/aliases.json``) never leaves this
 machine; it lives in a gitignored private sub-repo.
 
-Five substitution classes, resolved in one left-to-right pass plus a second
-handle pass:
+Six substitution classes, resolved in one left-to-right pass plus a handle pass
+and a home-path pass:
 
   (a) entry variants          -> the entry's alias        ("dev-06")
   (b) unmapped_people_variants-> person_redaction_token   ("[~ukjent-person]")
@@ -20,6 +20,9 @@ handle pass:
                                                           consumed with the token.
   (e) dotted handles and      -> "@person" / "person@"    only what (a)/(b) did not
       dotted email locals                                 already claim.
+  (f) `/Users/<name>/`        -> "/Users/<user>/"         the account name in a
+                                                          pasted stack trace or
+                                                          shell transcript.
 
 (a)-(d) share ONE compiled alternation sorted longest-first, which is what makes
 (c) win over any shorter overlapping person variant: at a given position the
@@ -30,7 +33,7 @@ would let a person variant eat half a role phrase.
 (e) runs afterwards, over the already-substituted text, which is exactly what
 "not matched by a mapped variant" means: a mapped handle has become "@dev-06" by
 then and no longer matches the handle shape (no dot, and digits/hyphens are
-outside its character class).
+outside its character class). (f) runs last, for the same reason.
 
 NEVER substituted: the document `id` and `url`. They are the join keys between
 the index mapping, the derived JSON and the source file; rewriting them would
@@ -171,6 +174,20 @@ _UNRESOLVED = object()
 # name or a slug — `Nord-Hansen` is a compound surname, and rejecting it made the
 # whole map unloadable over a legitimate entry.
 _BARE_GIVEN_NAME_RE = re.compile(r"[^\W\d_]+")
+
+# A macOS home directory. The account name in it is a person — and the one
+# person the alias map is least likely to list, because they are the operator
+# rather than a document author. It arrives in the corpora inside pasted stack
+# traces, shell transcripts and tool output, which is why the distribution
+# gate's check 10 found the shape and nothing removed it.
+#
+# Requires the trailing `/`: `/Users/` at the end of a line has no segment to
+# bound the account name against, and `s3://bucket/Users/x` is not a home
+# directory at all — hence the `(?<![\w])` in front. Idempotent, because
+# `<user>` is itself a `[^/\s]+` segment and re-substituting it changes nothing.
+# Check 10 keeps failing on the forms this does NOT rewrite; that is the point.
+USER_PATH_RE = re.compile(r"(?<![\w])/Users/[^/\s]+/")
+USER_PATH_TOKEN = "/Users/<user>/"
 
 
 def _lookup_key(literal: str) -> str:
@@ -464,7 +481,10 @@ class AliasRegistry:
             return text
         substituted = self._pattern.sub(self._substitute, text)
         substituted = _EMAIL_LOCAL_RE.sub(_substitute_email_local, substituted)
-        return _HANDLE_RE.sub(_substitute_handle, substituted)
+        substituted = _HANDLE_RE.sub(_substitute_handle, substituted)
+        # Last, so a mapped person's own home directory has already become
+        # `/Users/dev-06/` and this only has to deal with the unmapped rest.
+        return USER_PATH_RE.sub(USER_PATH_TOKEN, substituted)
 
     def _apply_value(self, value):
         """Alias any JSON value; returns (value, changed). Dict KEYS are left alone.

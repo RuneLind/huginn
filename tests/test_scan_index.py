@@ -193,10 +193,16 @@ def test_needle_boundaries_are_per_shape_not_all_multi_token():
     assert not pattern.search("no.nav.zylphia.quorndal.impl")
 
 
-# 14 characters that can sit against a needle in the corpora: percent escapes,
+# 17 characters that can sit against a needle in the corpora: percent escapes,
 # digits and letters welded onto a slug, path/query punctuation, quotes, a
-# non-breaking space, and the two whitespace characters a variant may span.
-FENCES = ["%", "4", "z", ".", "-", "_", "/", "=", ",", "(", '"', "\u00a0", "\n", "\t"]
+# non-breaking space, the two whitespace characters a variant may span \u2014 and
+# three letters whose case behaviour is not ASCII's. `\u0130` (U+0130) is the one
+# character in all of Unicode whose `str.lower()` is TWO characters, so it
+# shifts every offset in `text.lower()` after it; `\u00df` and `\ufb01` are the pair that
+# `re.IGNORECASE` does *not* fold onto `ss`/`fi`, i.e. the case where the
+# lowercase text and the pattern must agree that there is no match.
+FENCES = ["%", "4", "z", ".", "-", "_", "/", "=", ",", "(", '"', "\u00a0", "\n", "\t",
+          "\u0130", "\u00df", "\ufb01"]
 
 
 def test_the_bucketed_scan_never_hides_a_hit_the_alternation_finds():
@@ -238,6 +244,34 @@ def test_the_bucketed_scan_sees_a_welded_slug_and_a_percent_eaten_first_word():
     assert scanner.findall("id4711ada.example00") == ["ada.example00"]
     assert scanner.findall("50%Beate Example") == ["Beate Example"]
     assert scanner.findall("en helt vanlig setning") == []
+
+
+def test_a_dotted_capital_i_does_not_shift_the_anchor_past_a_later_name():
+    """`İ`.lower() is TWO characters, and the bucket anchor used to be an offset
+    into `text.lower()` applied to `text`.
+
+    One `İ` anywhere earlier in a file therefore moved every anchor one position
+    to the right, `pattern.match(text, wrong_position)` failed, and the file was
+    certified clean while a mapped name sat in it in the clear. It is the only
+    character in Unicode that does this, which is exactly why nothing else in
+    the corpora ever exposed it.
+    """
+    scanner = index_scan.NeedleScanner(["Ada Example00", "ada.example00"])
+    assert scanner.findall("İstanbul: skrevet av Ada Example00") == ["Ada Example00"]
+    assert scanner.search("İstanbul: skrevet av Ada Example00") is not None
+    # Two of them, i.e. a two-character shift, and a slug needle as well.
+    assert scanner.findall("İİ ada.example00") == ["ada.example00"]
+    # …and the character itself must not invent a hit.
+    assert scanner.findall("İstanbul er en by") == []
+
+
+def test_a_needle_with_no_word_run_is_refused_rather_than_dropped():
+    """Buckets are keyed on a needle's first `[^\\W_]` run. A needle that has
+    none had no bucket to go in and was silently left out of the scan — the
+    quiet direction of failure for a gate, since what is not scanned reads as
+    clean. There is no correct bucket for it, so the map is refused instead."""
+    with pytest.raises(ValueError, match="bucket"):
+        index_scan.NeedleScanner(["Ada Example00", "--"])
 
 
 def test_contains_sequence_catches_a_hyphenated_name_in_a_document_id():
@@ -604,7 +638,25 @@ def test_a_truncated_document_json_fails_check_eight(tmp_path, map_file):
     (collection / "documents" / "truncated.json").write_text('{"id": "x", "text"',
                                                              encoding="utf-8")
     check = _scan(tmp_path, map_file).check("unreadable_files")
-    assert check.passed is False and "truncated.json" in check.detail
+    assert check.passed is False and "documents/…: unreadable" in check.detail
+
+
+def test_check_eight_reports_a_location_and_never_a_document_filename(tmp_path, map_file):
+    """A document's filename IS its document id, and ids are never aliased —
+    that is the whole reason check 7 exists. Check 8's detail is printed and
+    written to `--json-report`, so it may name the DIRECTORY an uncertifiable
+    file sits in and the reason it could not be read, never the file.
+    """
+    collection = _write_collection(tmp_path, "demo-aliased",
+                                   documents=[_clean_document(0)])
+    (collection / "documents" / "team").mkdir()
+    (collection / "documents" / "team" / "Ada Example00 referat.json").write_text(
+        '{"id": "x", "text"', encoding="utf-8")
+    check = _scan(tmp_path, map_file).check("unreadable_files")
+    assert check.passed is False and check.count == 1
+    assert "Ada" not in check.detail and "Example00" not in check.detail
+    assert "referat" not in check.detail
+    assert "documents/xxxx/…" in check.detail and "JSONDecodeError" in check.detail
 
 
 def test_an_unreadable_manifest_fails_rather_than_raising(tmp_path, map_file):
@@ -626,7 +678,7 @@ def test_a_symlinked_file_fails_check_eight(tmp_path, map_file):
                                              encoding="utf-8")
     (collection / "documents" / "link.json").symlink_to(tmp_path / "elsewhere.json")
     check = _scan(tmp_path, map_file).check("unreadable_files")
-    assert check.passed is False and "link.json" in check.detail
+    assert check.passed is False and "documents/…: symlink" in check.detail
 
 
 def test_a_symlinked_directory_fails_check_eight(tmp_path, map_file):
@@ -637,7 +689,7 @@ def test_a_symlinked_directory_fails_check_eight(tmp_path, map_file):
                                                     encoding="utf-8")
     (collection / "extra").symlink_to(tmp_path / "outside", target_is_directory=True)
     check = _scan(tmp_path, map_file).check("unreadable_files")
-    assert check.passed is False and "extra" in check.detail
+    assert check.passed is False and "symlink (not followed)" in check.detail
 
 
 def test_a_bak_file_fails_check_eight(tmp_path, map_file):
@@ -645,7 +697,7 @@ def test_a_bak_file_fails_check_eight(tmp_path, map_file):
                                    documents=[_clean_document(0)])
     (collection / "manifest.json.bak").write_text("{}", encoding="utf-8")
     check = _scan(tmp_path, map_file).check("unreadable_files")
-    assert check.passed is False and "manifest.json.bak" in check.detail
+    assert check.passed is False and ".bak file" in check.detail
 
 
 def test_an_undecodable_binary_fails_check_eight(tmp_path, map_file):
@@ -654,7 +706,7 @@ def test_an_undecodable_binary_fails_check_eight(tmp_path, map_file):
                                    documents=[_clean_document(0)])
     (collection / "stray.dat").write_bytes(b"\xff\xfe\x00\x01Ada Example00")
     check = _scan(tmp_path, map_file).check("unreadable_files")
-    assert check.passed is False and "stray.dat" in check.detail
+    assert check.passed is False and "unreadable (UnicodeDecodeError)" in check.detail
 
 
 def test_a_vector_index_carrying_strings_fails_check_eight(tmp_path, map_file):
@@ -767,3 +819,29 @@ def test_the_scan_boundary_never_narrows_the_substituters():
         for text in fenced:
             if registry.search(text):
                 assert gate.search(text), (literal, text)
+
+
+# --- --candidates-out: the ONE output that carries real text ------------------
+
+def test_a_relative_candidates_path_is_resolved_where_the_caller_stands(monkeypatch):
+    """`git check-ignore` ran with `cwd=REPO_ROOT`, so a relative
+    `--candidates-out` was tested against the REPO ROOT while `write_text` later
+    resolved it against the process CWD.
+
+    The two therefore answered about different files. Standing in `data/`
+    (gitignored wholesale) and asking for `scan_out.json` was refused because
+    `<repo>/scan_out.json` is tracked territory — and the reverse, a path that
+    is ignored at the root and tracked where the caller stands, would have been
+    allowed and then written into a tracked directory.
+    """
+    monkeypatch.chdir(REPO_ROOT / "data")
+    destination = cli.candidates_destination("scan_out.json", "demo")
+    assert destination.is_absolute()
+    assert destination == REPO_ROOT / "data" / "scan_out.json"
+
+
+def test_a_tracked_candidates_path_is_still_refused(monkeypatch):
+    monkeypatch.chdir(REPO_ROOT)
+    with pytest.raises(SystemExit) as excinfo:
+        cli.candidates_destination("scan_out.json", "demo")
+    assert "REFUSED" in str(excinfo.value.code)

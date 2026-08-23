@@ -261,9 +261,10 @@ def _variant_counts(text: str) -> dict:
 def bench_anchoring_on_corpus(ctx=None) -> BenchmarkResult:
     """What each precision requirement buys, per in-scope collection.
 
-    Collections are reported as A/B/C in sorted scope order; the mapping is not
-    written down here, because a per-collection finding count is a statement
-    about a named corpus and RESULTS.md is a tracked file.
+    Collections are reported as A/B/C in sorted scope order — the three names
+    `main/privacy/scope.json` lists, which CLAUDE.md already names in full, so
+    `benchmarks/pii/RESULTS.md` §2 spells the mapping out. Only the counts are
+    new information, and a count is not a disclosure.
     """
     start = time.monotonic()
     scanner = SensitivityScanner()

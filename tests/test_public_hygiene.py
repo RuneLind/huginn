@@ -246,15 +246,34 @@ def test_the_gazetteer_surname_carve_out_stays_small_and_reviewed():
 def test_no_two_gazetteer_lines_concatenate_into_a_mapped_full_name():
     """The single-token rule keeps a full name out of any ONE line. It does not
     keep the two halves of one out of two lines — and `First` on line 40 plus
-    `Last` on line 700 is the same disclosure, one grep away."""
+    `Last` on line 700 is the same disclosure, one grep away.
+
+    Only where the second half is a SURNAME. A two-token map literal is not
+    automatically `First Last`: a Norwegian double given name is two given
+    names and no surname at all, so reassembling one from two gazetteer
+    lines discloses nothing that a list of common given names does not already
+    say. Treating every two-token literal as a full name forced ten ordinary
+    given names out of the public file — of which only three are in the map's
+    own runtime given-name set, so the other seven made `<given> <Surname>`
+    pairs *undetectable* by check 9. A hole punched in a common-names list to
+    hide a name that is not there is a cost with no return.
+
+    "Surname" is decided by the MAP, never by the gazetteer: `_map_name_tokens`
+    files a two-token literal's second token as a surname unless the map itself
+    also knows it as a given name. So adding a line to `given_names.txt` can
+    never exempt a pair from this test — the exemption has to already be true
+    of the map.
+    """
     if not list(_alias_maps()):
         pytest.skip("no private alias map checked out here")
     gazetteer = {line.lower() for line in _gazetteer_lines()}
+    given, _ = _map_name_tokens()
     hits = set()
     for data in _alias_maps():
         for literal in _person_literals(data):
             tokens = _tokens(literal or "")
-            if len(tokens) == 2 and all(token in gazetteer for token in tokens):
+            if (len(tokens) == 2 and all(token in gazetteer for token in tokens)
+                    and tokens[1] not in given):
                 # Reported as a SHAPE: this message reaches CI logs.
                 hits.add(re.sub(r"[^\W\d_]", "x", " ".join(tokens)))
     assert not hits, (f"{len(hits)} mapped full names can be reassembled from two gazetteer "

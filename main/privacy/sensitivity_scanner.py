@@ -114,10 +114,15 @@ _BANK_ANCHOR = re.compile(r"(?i)(?:kontonr|kontonummer|bankkonto|kontonummeret"
 # assignment with a long opaque value, an `Authorization:` header, a PEM private
 # key block, a URL carrying userinfo with a password, and the vendor-prefixed
 # token formats plus a JWT.
+# The keyword may be QUALIFIED — `aws_secret_access_key`, `gcp_client_secret`.
+# `\b` sits before `aws`, and `_` is a word character, so there is no boundary
+# in front of `secret_access_key` for the alternation to start at: the canonical
+# AWS secret key was not matched at all, by any of the five shapes.
 _CRED_ASSIGN_RE = re.compile(
     r"""(?ix)
-    \b(?:api[_-]?key|apikey|access[_-]?token|auth[_-]?token|client[_-]?secret
-       |secret[_-]?key|private[_-]?key|bearer)
+    \b(?:[a-z0-9]+[_-])*
+    (?:api[_-]?key|apikey|access[_-]?key|access[_-]?token|auth[_-]?token
+       |client[_-]?secret|secret[_-]?key|private[_-]?key|bearer)
     [_a-z]*
     \s*[:=]\s*
     ["']?(?!<redacted)(?P<value>[A-Za-z0-9_\-./+]{20,})["']?
@@ -140,17 +145,46 @@ _CRED_TOKEN_RE = re.compile(
     r"|\bxox[baprs]-[A-Za-z0-9-]{10,}"
     r"|\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})")
 
-# Base64/base64url padding and alphabet characters a filesystem path does not
-# carry. `private_key: /etc/ssl/private/service-account-signing.pem` is a
-# configuration line saying where the key LIVES; reporting it as the key is the
-# false positive that trains an operator to skim check 11.
-_BASE64_ONLY = set("=+")
+# What makes an assigned value a FILE rather than a secret.
+# `private_key: /etc/ssl/private/service-account-signing.pem` is a configuration
+# line saying where the key LIVES; reporting it as the key is the false positive
+# that trains an operator to skim check 11.
+#
+# The predecessor asked "does it contain `/` and neither `=` nor `+`", which
+# gets the discriminator backwards in both halves: `/` is one of the 64
+# characters of the base64 alphabet, so a long base64 value very often carries
+# one, and `=` was not even reachable, because the assignment pattern's value
+# class does not capture it. So every secret with a slash in it (an AWS secret
+# key, a base64 client secret, a slash-bearing opaque token) was silently
+# dropped from a BLOCKING category. Three positive tests for "path" instead:
+_PATH_PREFIXES = ("./", "../", "/", "~/")
+_PATH_EXTENSIONS = (".json", ".yaml", ".yml", ".txt", ".md", ".py", ".js", ".ts",
+                    ".pem", ".key", ".env", ".cfg", ".ini", ".toml", ".xml",
+                    ".csv", ".log", ".sh")
+
+# The entropy floor. Path segments are words; opaque tokens are not. 16 is the
+# `Authorization:` matcher's own minimum token length, reused rather than
+# invented, and requiring two of {lower, upper, digit} inside the run is what
+# separates `config/some/very/long/relative/path` from `bPxRfiCYEXAMPLEKEY`.
+_ALNUM_RUN_RE = re.compile(r"[A-Za-z0-9]{16,}")
+
+
+def _has_an_opaque_run(value: str) -> bool:
+    for run in _ALNUM_RUN_RE.findall(value):
+        classes = (any(c.islower() for c in run) + any(c.isupper() for c in run)
+                   + any(c.isdigit() for c in run))
+        if classes >= 2:
+            return True
+    return False
 
 
 def _looks_like_a_path(value: str) -> bool:
-    if value.startswith("./") or value.startswith("/"):
+    """True for a value that names a file rather than being one's contents."""
+    if value.startswith(_PATH_PREFIXES):
         return True
-    return "/" in value and not (_BASE64_ONLY & set(value))
+    if value.lower().endswith(_PATH_EXTENSIONS):
+        return True
+    return "/" in value and not _has_an_opaque_run(value)
 
 
 _ANCHOR_WINDOW = 60
@@ -242,12 +276,15 @@ class SensitivityScanner:
                 yield match.start(), match.group(0)
 
     def _credential(self, text):
-        for pattern in (_CRED_ASSIGN_RE, _CRED_HEADER_RE):
-            for match in pattern.finditer(text):
-                if _looks_like_a_path(match.group("value")):
-                    continue
-                yield match.start(), match.group(0)
-        for pattern in (_CRED_PEM_RE, _CRED_URL_RE, _CRED_TOKEN_RE):
+        # The path exemption applies to the ASSIGNMENT form only. `private_key:`
+        # is a configuration key that legitimately holds a filename; an
+        # `Authorization:` header never does, and `Bearer abc/def/ghi/jkl` was
+        # being waved through for looking like one.
+        for match in _CRED_ASSIGN_RE.finditer(text):
+            if _looks_like_a_path(match.group("value")):
+                continue
+            yield match.start(), match.group(0)
+        for pattern in (_CRED_HEADER_RE, _CRED_PEM_RE, _CRED_URL_RE, _CRED_TOKEN_RE):
             for match in pattern.finditer(text):
                 yield match.start(), match.group(0)
 

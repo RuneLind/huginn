@@ -259,6 +259,31 @@ def test_a_long_file_path_assigned_to_a_key_is_not_a_credential(scanner):
         scanner, "access_token=aB3/dE6+gH9jK2mN5pQ8rS1tU4vW7xY0zA3b=")
 
 
+# Real secret material that the old "contains a slash and no `=`/`+`" rule
+# filed as a file path. `/` is 62 of the 64 base64 alphabet's characters away
+# from being path-specific — it IS a base64 character — and `=` was never even
+# reachable, because the assignment pattern's value class does not capture it.
+# Every one of these was therefore silently dropped from a BLOCKING category.
+@pytest.mark.parametrize("text", [
+    "api_key=abcdefgh/ijklmnopqrstuvwxyz012345",
+    'client_secret: "Gq3/8vNwq2Lx0pTz9RmYb4Kd7Jc1Ae6H"',
+    "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    "Authorization: Bearer abc/def/ghi/jklmnopqrs",
+])
+def test_a_secret_with_a_slash_in_it_is_still_a_credential(scanner, text):
+    assert "credential" in categories(scanner, text)
+
+
+@pytest.mark.parametrize("text", [
+    "api_key = ../../config/some/very/long/relative/path.json",
+    "private_key: /Users/x/.ssh/id_rsa_deployment_key_file",
+])
+def test_a_path_shaped_value_is_still_not_a_credential(scanner, text):
+    """The precision the rule above must not cost: a relative path climbing out
+    of the working directory, and an absolute path with no extension at all."""
+    assert "credential" not in categories(scanner, text)
+
+
 # --- laziness ---------------------------------------------------------------
 
 def test_line_starts_are_not_computed_for_clean_text(scanner, monkeypatch):

@@ -254,9 +254,11 @@ _WORD_RE = re.compile(r"[^\W_]+")
 class NeedleScanner:
     r"""The needle alternation, split into buckets keyed on the first word.
 
-    ~1000 branches, each with its own lookarounds, and Python's engine tries
-    every branch at every position: 83 seconds over one 16 MB collection, which
-    makes a gate the packager calls unusable and a gate nobody runs.
+    1 974 branches over the real map, each with its own lookarounds, and
+    Python's engine tries every branch at every position: 170 s over the 4.0 M
+    characters of one collection, and still 62 s behind the token prefilter this
+    replaced — which makes a gate the packager calls unusable and a gate nobody
+    runs. Bucketed it is 0.67 s (``benchmarks/pii/RESULTS.md`` §5).
 
     Every needle begins with an alphanumeric run, so a text that does not contain
     that word cannot match any branch of that needle's bucket. The word is looked
@@ -282,8 +284,15 @@ class NeedleScanner:
         buckets: dict[str, list] = {}
         for needle in needles:
             match = _WORD_RE.search(needle)
-            if match:
-                buckets.setdefault(match.group(0).lower(), []).append(needle)
+            if match is None:
+                # No alphanumeric run means no bucket to put it in, and the
+                # predecessor simply left it out — i.e. never scanned for it,
+                # which reads as "clean" in the report. There is no correct
+                # bucket for such a needle, so the map is refused instead.
+                raise ValueError(
+                    f"a needle (shape {sanitize(needle)!r}) has no alphanumeric run and "
+                    f"therefore no bucket; the scan would silently never look for it")
+            buckets.setdefault(match.group(0).lower(), []).append(needle)
         self._patterns = []
         for word in sorted(buckets):
             group = buckets[word]
@@ -303,36 +312,57 @@ class NeedleScanner:
     def buckets(self) -> int:
         return len(self._patterns)
 
-    def _active(self, text: str) -> list:
-        lowered = text.lower()
-        return [entry for entry in self._patterns if entry[0] in lowered]
+    def _iter(self, text: str):
+        """Every match in `text`, bucketed where that is sound and in full where
+        it is not.
 
-    def _matches(self, text: str, lowered: str, entry):
-        word, pattern, anchorable = entry
-        if not anchorable:
-            yield from pattern.finditer(text)
+        Both the bucket filter (`word in lowered`) and the anchor
+        (`lowered.find(word)` used as an offset into `text`) assume that
+        ``str.lower()`` maps every character to exactly one character. `İ`
+        (U+0130) is the ONE character in Unicode for which it does not — it
+        lowercases to `i` plus a combining dot — so one of them anywhere in a
+        file shifted every later anchor by one position, `pattern.match` was
+        tried against the wrong offset, and a mapped name sitting in the clear
+        after it was certified as absent. A silent PASS, from a Turkish place
+        name in a document.
+
+        `len(lowered) != len(text)` detects exactly that case and nothing else:
+        no character lowercases to *zero* characters, so equal lengths means
+        every character mapped one-to-one and the offsets are exact. When the
+        lengths differ the buckets are abandoned for that text and the full
+        alternation runs — the buckets are only ever an optimisation of it.
+
+        KNOWN RESIDUAL, unfixed: `re.IGNORECASE` also folds `ı`, `ſ`, `µ` and a
+        dozen Greek/Cyrillic variants onto another letter where ``str.lower()``
+        does not, so a needle spelled `i…` matches a text spelled `ı…` that the
+        `word in lowered` filter then rejects. It needs the two spellings to
+        meet, and pinning it costs either a hardcoded fold table or the fast
+        path; it is recorded here rather than papered over.
+        """
+        lowered = text.lower()
+        if len(lowered) != len(text):
+            for _, pattern, _ in self._patterns:
+                yield from pattern.finditer(text)
             return
-        start = lowered.find(word)
-        while start != -1:
-            match = pattern.match(text, start)
-            if match:
-                yield match
-            start = lowered.find(word, start + 1)
+        for word, pattern, anchorable in self._patterns:
+            if word not in lowered:
+                continue
+            if not anchorable:
+                yield from pattern.finditer(text)
+                continue
+            start = lowered.find(word)
+            while start != -1:
+                match = pattern.match(text, start)
+                if match:
+                    yield match
+                start = lowered.find(word, start + 1)
 
     def findall(self, text: str) -> list:
-        lowered = text.lower()
-        hits = []
-        for entry in self._patterns:
-            if entry[0] in lowered:
-                hits.extend(m.group(0) for m in self._matches(text, lowered, entry))
-        return hits
+        return [match.group(0) for match in self._iter(text)]
 
     def search(self, text: str):
-        lowered = text.lower()
-        for entry in self._patterns:
-            if entry[0] in lowered:
-                for match in self._matches(text, lowered, entry):
-                    return match
+        for match in self._iter(text):
+            return match
         return None
 
 
@@ -520,6 +550,33 @@ def classify(relative: Path) -> str:
     return "other"
 
 
+# Directory names a collection's own layout puts there. Everything else in a
+# path came from a document id or from whoever dropped a stray file in the tree.
+_STRUCTURAL_DIRS = frozenset({"documents", "indexes"})
+_INDEXER_DIR_RE = re.compile(r"indexer_[\w.\-]+")
+
+
+def safe_location(relative: str) -> str:
+    """Where an uncertifiable file sits, with no corpus-controlled text in it.
+
+    Check 8's detail is printed and written to ``--json-report``, and a file
+    under ``documents/`` is named after its document id — which is never
+    aliased, by design, which is the entire reason check 7 exists. Reporting
+    `documents/Ada Example.md.json: unreadable` would put a real name in the one
+    output that is supposed to be safe to paste.
+
+    So the FILENAME is dropped (`…`) and every directory segment is shaped
+    (letters -> x) unless it is part of the collection's own layout. What is
+    left — the directory, the reason, and the count — is what the operator needs
+    to find the file on the disk they are already standing on.
+    """
+    segments = relative.split("/")
+    directories = [segment if segment in _STRUCTURAL_DIRS
+                   or _INDEXER_DIR_RE.fullmatch(segment) else sanitize(segment)
+                   for segment in segments[:-1]]
+    return "/".join([*directories, "…"])
+
+
 def walk_strings(value):
     """Every string in a decoded JSON structure, keys included."""
     if isinstance(value, str):
@@ -634,26 +691,28 @@ def _check_artifacts(root: Path, scanner: NeedleScanner, sequences, sensitivity,
     for path, kind in collection_files(root):
         relative = path.relative_to(root).as_posix()
         label = "documents" if relative.startswith("documents/") else relative
+        # NEVER the filename: see `safe_location`.
+        location = safe_location(relative)
         try:
             stat = os.lstat(path)
             members.append({"path": relative, "size": stat.st_size,
                             "mtime": stat.st_mtime_ns})
         except OSError as e:
-            unreadable.append(f"{relative}: unstattable ({type(e).__name__})")
+            unreadable.append(f"{location}: unstattable ({type(e).__name__})")
             continue
 
         if kind == "symlink":
-            unreadable.append(f"{relative}: symlink (not followed)")
+            unreadable.append(f"{location}: symlink (not followed)")
             continue
         if kind == "bak":
-            unreadable.append(relative)
+            unreadable.append(f"{location}: .bak file")
             continue
         if kind == "bm25":
             continue
         if kind == "vectors":
             ok, problem = _scan_vectors(path)
             if not ok:
-                unreadable.append(f"{relative}: {problem}")
+                unreadable.append(f"{location}: {problem}")
             scanned += 1
             continue
 
@@ -661,7 +720,7 @@ def _check_artifacts(root: Path, scanner: NeedleScanner, sequences, sensitivity,
         if kind == "json":
             payload, problem = _read_json(path)
             if problem:
-                unreadable.append(f"{relative}: {problem}")
+                unreadable.append(f"{location}: {problem}")
                 continue
             strings = list(walk_strings(payload))
             if relative.startswith("documents/") and isinstance(payload, dict):
@@ -674,7 +733,7 @@ def _check_artifacts(root: Path, scanner: NeedleScanner, sequences, sensitivity,
             try:
                 strings = [path.read_text(encoding="utf-8")]
             except (UnicodeDecodeError, OSError) as e:
-                unreadable.append(f"{relative}: unreadable ({type(e).__name__})")
+                unreadable.append(f"{location}: unreadable ({type(e).__name__})")
                 continue
 
         scan_strings(strings)

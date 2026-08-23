@@ -4,10 +4,10 @@ Numbers only. No fixture, no table cell and no example below contains a real
 name; the corpus measurements are counts taken from collections whose contents
 stay on the machine that produced them.
 
-The three in-scope collections are reported as **A / B / C**, in sorted order of
-the names in `main/privacy/scope.json`. The mapping is deliberately not written
-here: a per-collection finding count is a statement about a named corpus, and
-this file is tracked in a public repo.
+The three in-scope collections are **A = `jira-issues`**, **B =
+`melosys-confluence-v3`**, **C = `nav-wiki`** — the three names
+`main/privacy/scope.json` lists, which `CLAUDE.md` already names in full. Only
+the counts are new information, and a count is not a disclosure.
 
 Reproduce with:
 
@@ -96,8 +96,8 @@ mapped them".
 
 | Gazetteer | Recall over the map's names |
 |---|---|
-| public `given_names.txt` only (871 entries) | 0.72 |
-| public + `bare_given_name_residual` | 0.97 |
+| public `given_names.txt` only (881 entries) | 0.76 |
+| public + `bare_given_name_residual` | 0.98 |
 
 Both figures were 0.53 / 0.72 before the detector evaluated **every** adjacent
 pair of a capitalised run rather than only the pair at its head. The names it
@@ -105,13 +105,22 @@ was missing were not exotic: a full name after an acronym, after a heading word,
 or after another name is behind a capitalised token, and the head-only probe
 never looked past it.
 
+The public-only figure was 0.72 over 871 entries for one round: ten common given
+names had been deleted from `given_names.txt` to satisfy a hygiene test that
+treated every two-token map literal as `First Last`, including the Norwegian
+double given names that are two given names and no surname at all. Only three of
+the ten are in the map's own runtime given-name set, so seven `<given>
+<surname>` pairs stopped being detectable by anything. The test now fires only
+where the second token is a surname *in the map*, all ten names are back, and
+the measurement above is with them.
+
 The remainder the union still misses are people whose given name is in neither
 list. That is the detector's real ceiling and the reason the private map's own
 given names (232 of them) are unioned in at runtime.
 
 ## 4. Capitalised-bigram detector — false positives on the real corpus
 
-Measured on collection A's aliased document text, before any allow-listing:
+Measured on collection C (`nav-wiki`) — its aliased document text, before any allow-listing:
 
 | Measure | Value |
 |---|---|
@@ -135,13 +144,24 @@ is the return.
 
 ## 5. Gate runtime
 
-The needle alternation is ~1 800 branches, each with its own lookarounds, and
-Python's engine tries every branch at every position.
+The needle alternation is 1 974 branches over the real map, each with its own
+lookarounds, and Python's engine tries every branch at every position. Bucketing
+by first word puts them in 271 buckets.
 
-| Step | Before | After |
-|---|---|---|
-| check 1 over collection A (4.0 M characters) | 177 s | 0.9 s |
-| whole `scan_index.py` run over collection A | 83 s | 2.4 s |
+All four numbers below are one collection — C (`nav-wiki`), 542 scanned files
+and 4.0 M characters of scanned text — measured on the same machine in the same
+sitting. "Before" is commit `375ed0c` unpacked with `git archive` and run
+against the live collection; the earlier revision of this table reported the two
+rows against *different* baselines, so the whole run appeared to be faster than
+the one check that dominates it.
+
+| Step | No prefilter | `375ed0c` token prefilter | Bucketed (now) |
+|---|---|---|---|
+| check 1 alone | 170.4 s | 62.3 s | 0.67 s |
+| whole `scan_index.py` run | — | 64.8 s | 2.08 s |
+
+Check 1 is essentially the whole run in every column, which is the point: the
+other twelve checks together cost about 2 s.
 
 Two changes, both of which keep the scan a *superset* of what the single
 alternation finds: needles are bucketed by their lowercased first word and a
@@ -156,3 +176,12 @@ welded onto a preceding word and a name behind a percent escape whose hex digits
 ate its first letters. A miss there is a silent PASS, and
 `test_the_bucketed_scan_never_hides_a_hit_the_alternation_finds` fuzzes 500
 fenced texts against the full alternation to hold the property.
+
+The bucketing has one more soundness condition, and it cost a round: both the
+filter and the anchor are offsets into `text.lower()`, and `İ` (U+0130) is the
+one character in Unicode whose `str.lower()` is *two* characters. A single one
+of them shifted every later anchor and certified every name after it as absent.
+A text whose lowercase is a different length now skips the buckets entirely and
+runs the full alternation — provably the only case, since no character
+lowercases to zero characters. The fence alphabet in that fuzz test carries
+`İ`, `ß` and `ﬁ` for it.

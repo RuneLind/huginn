@@ -409,12 +409,36 @@ def test_apply_document_walks_nested_metadata(registry):
     assert metadata["Ada Example"] == "fag-01"
 
 
+# --- /Users/<name>/ — the pasted-stack-trace fingerprint ----------------------
+
+@pytest.mark.parametrize("text,expected", [
+    ("File \"/Users/someone/source/huginn/main/x.py\", line 3",
+     "File \"/Users/<user>/source/huginn/main/x.py\", line 3"),
+    ("cd /Users/some.one/src && ls", "cd /Users/<user>/src && ls"),
+    ("file:///Users/someone/notes/x.md", "file:///Users/<user>/notes/x.md"),
+    # A home directory with nothing under it is check 10's business, not a
+    # substitution: there is no `/` to bound the account name against.
+    ("bygget under /Users/someone", "bygget under /Users/someone"),
+    # Not a home path at all: the segment before `/Users/` is a word character.
+    ("s3://bucket/Users/someone/x", "s3://bucket/Users/someone/x"),
+])
+def test_a_home_directory_path_loses_the_account_name(registry, text, expected):
+    """A pasted stack trace or shell transcript carries the BUILDER's home
+    directory, and the account name in it is a person — usually the one person
+    the alias map is least likely to list, because they are the operator rather
+    than a document author. Every fingerprint check 10 found on the real
+    collections was this shape.
+    """
+    assert registry.apply(text) == expected
+
+
 @pytest.mark.parametrize("text", [
     "Ada Example og Bo Tester og Kari Ukjent",
     "Ident [~Q000124] og Q000124 og f000111",
     "ping @ola.nordmann.example og ola.nordmann@nav.no",
     "dev-01 fag-01 [~person] [~ukjent-person] @person",
     "no.nav.zylphia.quorndal.Klasse og en saksbehandler",
+    "/Users/someone/src og /Users/<user>/src",
 ])
 def test_apply_is_idempotent(registry, text):
     once = registry.apply(text)

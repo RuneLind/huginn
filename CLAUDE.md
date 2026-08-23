@@ -155,7 +155,14 @@ map stays local.
   dotted handle into `@person`, and in a dotted email *local part* the local part
   becomes `person` (`ola.nordmann@nav.no` → `person@nav.no`). `id` and `url` are
   never rewritten — they are the join keys to the source file and the index
-  mapping.
+  mapping. A **third** pass rewrites `/Users/<name>/` to `/Users/<user>/`: the
+  account name in a macOS home path is a person, arriving through pasted stack
+  traces and shell transcripts, and it is the one person the map is least likely
+  to list because they are the operator rather than a document author. Every
+  fingerprint check 10 found on the live collections was this shape. It needs
+  the trailing `/` (`/Users/` at end of line has nothing to bound the segment
+  against) and refuses a preceding word character, so `s3://bucket/Users/x` is
+  untouched — check 10 keeps failing on the forms this deliberately leaves.
 - **What that second pass leaves alone**, because the corpora are code-heavy:
   `@v1.2.3` versions; package paths under a known root (`@org.`, `@jakarta.`,
   `@kotlin.`, `@android.`, `@net.`, …); **code annotations**, i.e. a lowercase
@@ -236,7 +243,10 @@ map stays local.
   covers it.
   - A file the scan cannot read — a truncated `documents/*.json`, an
     undecodable binary, an unreadable manifest — is a check-8 failure naming the
-    path, never a traceback: the scan can only certify what it has read. So is
+    **directory** and the reason, never a traceback and never the filename: a
+    file under `documents/` is named after its document id, ids are never
+    aliased (that is what check 7 is for), and this detail goes into
+    `--json-report`. The scan can only certify what it has read. So is
     **any symlink** anywhere under the collection dir, file or directory, and
     the walk never follows one.
   - **Check 9, capitalised-bigram candidates, is the one that finds people the
@@ -250,7 +260,7 @@ map stays local.
     names" removes exactly the target category. EVERY adjacent pair of a
     capitalised run is evaluated, not just the head pair (a name behind an
     acronym, a heading word or another name was invisible: recall against the
-    map's own names went 0.53 → 0.72 on the public gazetteer alone); the initial
+    map's own names went 0.53 → 0.76 on the public gazetteer alone); the initial
     capital is `str.isupper()` rather than `[A-ZÆØÅ]`; a hyphenated given name is
     probed part by part; a dot may precede the pair and one newline may sit
     inside it. The union of gazetteer + map given names has its own floor
@@ -258,7 +268,11 @@ map stays local.
     "no candidates" is what a clean collection looks like.
     The public gazetteer must never grow corpus-specific names. Four structural
     tests hold it: one alphabetic token per line, sorted and duplicate-free, no
-    two lines concatenating into a mapped full name, and a carve-out narrowed to
+    two lines concatenating into a mapped full name **whose second token is a
+    surname in the map** (a two-token literal is not automatically `First Last`
+    — the wider rule deleted ten ordinary given names for Norwegian double given
+    names, and only three of the ten were unioned back in from the map, so seven
+    `<given> <surname>` pairs went undetectable), and a carve-out narrowed to
     the map's GIVEN-name set plus a capped, runtime-derived set of
     given-name/surname overlaps — the old carve-out exempted every mononym and
     bare surname the map knew (see the comment there for why a list of common
@@ -302,8 +316,13 @@ map stays local.
     changed in that window is a `REFUSED:` line, because it would otherwise be
     tarred without having been read;
   - **no builder identity** — `uid`/`gid`/`uname`/`gname` are zeroed on every
-    member. That is the same class of fingerprint as the absolute `/Users/` path
-    check 10 looks for, just in the header instead of the content;
+    member, and the **gzip** member is opened by hand with `filename=""`,
+    `mtime=0` rather than through `tarfile.open(path, "w:gz")`, which writes the
+    path it is currently writing (`.<name>.tar.gz.tmp-<pid>`, i.e. the builder's
+    process id) into the FNAME header. `tar -tvf` does not show it; `gzip -l`
+    does. Same class of fingerprint as the absolute `/Users/` path check 10
+    looks for, just in the header instead of the content — and zeroing MTIME
+    also makes two packages of the same input compare byte for byte;
   - **a legible stamp** — `PACKAGE-STAMP.json` carries collection, scan date,
     policy/map version, document and file counts, `allowlistSha256` and
     `gazetteerSha256` (a tarball certified against a longer allow-list was

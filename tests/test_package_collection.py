@@ -283,6 +283,69 @@ def test_the_tarball_carries_no_owner_names(workspace, monkeypatch):
     assert getpass.getuser() not in listing
 
 
+def test_the_gzip_header_carries_no_temp_name_and_no_build_time(workspace, monkeypatch):
+    """`tarfile.open(path, "w:gz")` puts the file it is WRITING into the gzip
+    FNAME field — and the packager writes under `.<name>.tar.gz.tmp-<pid>`.
+
+    So the certified artifact shipped the builder's process id in its header,
+    which is the same class of fingerprint as the uid/uname above and is not
+    visible in `tar -tvf` at all. `gzip -l` and `gzip -N` show it. The build
+    time (MTIME) goes with it: it is a second fingerprint and it makes two
+    byte-identical packages differ.
+    """
+    _write_collection(workspace / "collections", "demo-aliased",
+                      documents=[_clean_document(0)])
+    _package(workspace, monkeypatch)
+    tarball = next((workspace / "out").glob("*.tar.gz"))
+    header = tarball.read_bytes()[:10]
+    assert header[:2] == b"\x1f\x8b"
+    flags = header[3]
+    assert not flags & 0x08, f"gzip FNAME flag is set (FLG={flags:#04x})"
+    assert header[4:8] == b"\x00\x00\x00\x00", "gzip MTIME is not zeroed"
+    assert b".tmp-" not in tarball.read_bytes()[:512]
+
+
+# --- a refusal from inside the scan is a refusal, not a traceback -------------
+
+def test_a_gazetteer_below_the_floor_is_a_refusal_not_a_traceback(
+        workspace, monkeypatch, capsys):
+    """`scan_collection` raises ValueError when the given-name gazetteer is too
+    small to make check 9 mean anything. That came out of `main()` as a
+    traceback, which reads as a broken tool rather than as the gate refusing."""
+    from main.privacy import index_scan
+    monkeypatch.setattr(index_scan, "load_public_given_names", lambda *a, **k: set())
+    _write_collection(workspace / "collections", "demo-aliased",
+                      documents=[_clean_document(0)])
+    code = _package(workspace, monkeypatch)
+    out = _combined(capsys, code)
+    assert code != 0 and "REFUSED" in out and "gazetteer" in out
+    assert "Traceback" not in out
+    assert _tarballs(workspace) == []
+
+
+def test_an_invalid_explicit_map_is_a_refusal_not_a_traceback(
+        workspace, monkeypatch, capsys):
+    """`--map` is not the map `refusal()` resolves the scope with, so an
+    unusable one first shows up inside `scan_collection` as PrivacyMapInvalid."""
+    broken = workspace / "broken-map.json"
+    broken.write_text(json.dumps({"version": 7, "entries": []}), encoding="utf-8")
+    _write_collection(workspace / "collections", "demo-aliased",
+                      documents=[_clean_document(0)])
+    monkeypatch.setattr(sys, "argv", [
+        "package_collection.py", "--collection", "demo-aliased",
+        "--collections-dir", str(workspace / "collections"),
+        "--out", str(workspace / "out"), "--map", str(broken),
+    ])
+    try:
+        pkg.main()
+        code = 0
+    except SystemExit as e:
+        code = e.code
+    out = _combined(capsys, code)
+    assert code != 0 and "REFUSED" in out and "Traceback" not in out
+    assert _tarballs(workspace) == []
+
+
 # --- the same check set as the CLI -------------------------------------------
 
 def test_the_packager_runs_the_compare_checks_when_asked(workspace, monkeypatch, capsys):

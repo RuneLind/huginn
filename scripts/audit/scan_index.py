@@ -88,7 +88,14 @@ def candidates_destination(explicit: str | None, collection: str) -> Path:
     if not explicit:
         DEFAULT_CANDIDATES_DIR.mkdir(parents=True, exist_ok=True)
         return DEFAULT_CANDIDATES_DIR / f"scan_candidates_{collection}.json"
-    path = Path(explicit)
+    # Absolute FIRST. `check-ignore` runs with `cwd=REPO_ROOT` while the write
+    # later resolves against the process CWD, so a relative path had the two
+    # steps answering about two different files: `--candidates-out out.json`
+    # from inside `data/` was refused because `<repo>/out.json` is tracked
+    # territory, and the mirror image — ignored at the root, tracked where the
+    # caller stands — would have been allowed and then written into a tracked
+    # directory. That is the failure this guard exists to prevent.
+    path = Path(explicit).expanduser().resolve()
     ignored = subprocess.run(["git", "check-ignore", "-q", str(path)],
                              cwd=REPO_ROOT, capture_output=True)
     # 0 = ignored, 1 = not ignored, 128 = not a git checkout / outside the repo.

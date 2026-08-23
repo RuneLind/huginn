@@ -27,16 +27,24 @@
 # clone with no private sub-repo therefore gets a weaker detector, which is
 # correct: without the map there is nothing to certify anyway.
 #
-# NO TWO LINES CONCATENATE INTO A MAPPED FULL NAME. The one-token-per-line rule
+# NO TWO LINES CONCATENATE INTO A MAPPED SURNAME. The one-token-per-line rule
 # keeps a full name out of any single line; it does not keep the two halves of
 # one out of two lines, and `First` here plus `Last` 600 lines down is the same
 # disclosure one grep away. `test_no_two_gazetteer_lines_concatenate_into_a_
-# mapped_full_name` fails on any such pair, which is why nine otherwise ordinary
-# given names are absent. That is a real cost — this file's whole argument is
-# that a common-names list with holes in it is a *reverse* fingerprint — and it
-# is paid because the disclosure is direct and the fingerprint is inferential.
-# The detector loses nothing on this machine: every removed name is in the
-# private map's own given-name set and is unioned back in at runtime.
+# mapped_full_name` fails on any such pair.
+#
+# It fails only where the SECOND half is a surname, and that narrowing is the
+# point. A two-token literal in the private map is not automatically
+# `First Last` — a Norwegian double given name is two given names and no
+# surname — and the wider rule that preceded it treated every two-token literal
+# as a full name. Ten ordinary given names were removed from this file to
+# satisfy it; only three of the ten are in the map's own runtime given-name set,
+# so seven `<given> <surname>` pairs became invisible to the bigram detector
+# altogether. Measured cost: recall against the map's own names on the public
+# gazetteer alone was 0.76 with the ten present and 0.72 without
+# (benchmarks/pii/RESULTS.md §3). All ten are back. A hole punched in a
+# common-names list to hide a name the list never contained is a *reverse*
+# fingerprint bought for nothing.
 #
 # ADDING A NAME. Only add names that are common in public use somewhere. If a
 # name is only interesting because it appears in this machine's corpus, it
@@ -44,6 +52,8 @@
 # in `test_given_names_file_is_sorted_and_duplicate_free` (casefold, with
 # aa/ae/oe for the Norwegian letters) and free of duplicates.
 Ådne
+Aage
+Åge
 Åsa
 Åse
 Åsmund
@@ -110,7 +120,9 @@ Anthony
 Antoine
 Anton
 Antonio
+Arild
 Arjun
+Arne
 Arnfinn
 Arnt
 Aron
@@ -239,6 +251,7 @@ Edvard
 Edvin
 Egil
 Eilif
+Einar
 Eirik
 Eivind
 Elena
@@ -308,6 +321,7 @@ Gabor
 Gabriel
 Gabriela
 Gaute
+Geir
 Genevieve
 Georg
 George
@@ -491,6 +505,7 @@ Konrad
 Konstantin
 Kornelia
 Krister
+Kristian
 Kristiane
 Kristin
 Kristina
@@ -547,6 +562,7 @@ Lykke
 Mads
 Magdalena
 Magnar
+Magne
 Magnus
 Mahmoud
 Mai
@@ -636,6 +652,7 @@ Natalie
 Nathalie
 Neha
 Nelly
+Nguyen
 Niclas
 Nicolai
 Nicolas
@@ -690,6 +707,7 @@ Per
 Pernille
 Peter
 Petra
+Petter
 Philip
 Philippe
 Pia
