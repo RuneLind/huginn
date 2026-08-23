@@ -434,8 +434,9 @@ map stays local.
     files were extracted before the corpus was aliased, so node labels, ids
     (`entity:<name>`), expansion terms and entity contexts still spell people by
     name, and they reach `retryHints.relatedTerms`, `graph_answer`,
-    `graph_context` and the trace's expansion. Measured 24 leaked terms across
-    the 10-probe sweep (the table is in PR #117). So `GraphSearchAugmenter`
+    `graph_context` and the trace's expansion. Measured on the 10-probe sweep:
+    19 graph-contributed strings still spelled a mapped person before this seam
+    and 0 after (per-probe table in PR #117). So `GraphSearchAugmenter`
     takes the same registry (`alias_registry=`) and every string it contributes
     is de-aliased — the trace's entity ids included, while the lookup keeps
     using the raw ones. A request that touches no aliased collection passes
