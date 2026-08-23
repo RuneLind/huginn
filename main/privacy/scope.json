@@ -1,5 +1,5 @@
 {
-  "_comment": "Collections whose built index must carry no real person name. Extended by huginn-*/privacy/scope.json for collections whose names or source paths are not public. Relative basePaths resolve against the process CWD, like every other reader path in this repo.",
+  "_comment": "Collections whose built index must carry no real person name. Extended by huginn-*/privacy/scope.json for collections whose names or source paths are not public. Relative basePaths resolve against the REPO ROOT (alias_registry.REPO_ROOT), not the process CWD: a guard that evaporates when its caller is started from somewhere else is a guard that is off exactly when it matters.",
   "version": 1,
   "collections": [
     "melosys-confluence-v3",

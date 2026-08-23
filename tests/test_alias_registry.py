@@ -409,12 +409,36 @@ def test_apply_document_walks_nested_metadata(registry):
     assert metadata["Ada Example"] == "fag-01"
 
 
+# --- /Users/<name>/ — the pasted-stack-trace fingerprint ----------------------
+
+@pytest.mark.parametrize("text,expected", [
+    ("File \"/Users/someone/source/huginn/main/x.py\", line 3",
+     "File \"/Users/<user>/source/huginn/main/x.py\", line 3"),
+    ("cd /Users/some.one/src && ls", "cd /Users/<user>/src && ls"),
+    ("file:///Users/someone/notes/x.md", "file:///Users/<user>/notes/x.md"),
+    # A home directory with nothing under it is check 10's business, not a
+    # substitution: there is no `/` to bound the account name against.
+    ("bygget under /Users/someone", "bygget under /Users/someone"),
+    # Not a home path at all: the segment before `/Users/` is a word character.
+    ("s3://bucket/Users/someone/x", "s3://bucket/Users/someone/x"),
+])
+def test_a_home_directory_path_loses_the_account_name(registry, text, expected):
+    """A pasted stack trace or shell transcript carries the BUILDER's home
+    directory, and the account name in it is a person — usually the one person
+    the alias map is least likely to list, because they are the operator rather
+    than a document author. Every fingerprint check 10 found on the real
+    collections was this shape.
+    """
+    assert registry.apply(text) == expected
+
+
 @pytest.mark.parametrize("text", [
     "Ada Example og Bo Tester og Kari Ukjent",
     "Ident [~Q000124] og Q000124 og f000111",
     "ping @ola.nordmann.example og ola.nordmann@nav.no",
     "dev-01 fag-01 [~person] [~ukjent-person] @person",
     "no.nav.zylphia.quorndal.Klasse og en saksbehandler",
+    "/Users/someone/src og /Users/<user>/src",
 ])
 def test_apply_is_idempotent(registry, text):
     once = registry.apply(text)
@@ -479,17 +503,67 @@ def test_invalid_map_refuses_to_compile(bad_map):
 
 
 def test_two_distinct_literals_sharing_a_casefold_key_are_invalid():
-    """`Weiss` and `Weiß` casefold to the same table key but are different names.
+    """`Ada Weiss` and `Ada Weiß` casefold to one table key but belong to two
+    DIFFERENT people.
 
     The table is keyed on the casefold, so the second literal's replacement is
-    dropped and BOTH spellings get the first one's alias — a wrong substitution
+    dropped and both spellings get the first one's alias — a wrong substitution
     that no output inspection reveals. Pure case variation of the SAME literal
     (`Saksbehandler`/`saksbehandler`, both in MAP) is not this and must still
-    compile.
+    compile, and neither is the same collision under one alias.
     """
-    bad = _mutated(non_person_labels=[*MAP["non_person_labels"], "Weiss", "Weiß"])
+    entries = json.loads(json.dumps(MAP["entries"]))
+    entries[0]["variants"].append("Ada Weiss")
+    entries[1]["variants"].append("Ada Weiß")
+    with pytest.raises(PrivacyMapInvalid, match="casefold"):
+        AliasRegistry(_mutated(entries=entries))
+
+
+def test_casefold_collision_with_the_same_replacement_still_compiles():
+    """Two spellings of one person under ONE alias collide harmlessly.
+
+    The collision matters only because the losing literal's replacement is
+    silently dropped. When both literals resolve to the same replacement there
+    is nothing to drop, and refusing made the whole map unloadable over an entry
+    that was simply thorough about a Unicode spelling.
+    """
+    entries = json.loads(json.dumps(MAP["entries"]))
+    entries[0]["variants"] += ["Ada Weiss", "Ada Weiß"]
+    registry = AliasRegistry(_mutated(entries=entries))
+    assert registry.apply("av Ada Weiss og Ada Weiß") == "av dev-01 og dev-01"
+
+
+def test_casefold_collision_across_classes_is_still_invalid():
+    """…but the same collision between an exempt label and a person is not: one
+    of the two replacements is real and gets silently thrown away."""
+    entries = json.loads(json.dumps(MAP["entries"]))
+    entries[0]["variants"].append("Ada Weiß")
+    bad = _mutated(entries=entries, non_person_labels=[*MAP["non_person_labels"], "Ada Weiss"])
     with pytest.raises(PrivacyMapInvalid, match="casefold"):
         AliasRegistry(bad)
+
+
+@pytest.mark.parametrize("variant", ["Ada", " Ada ", "\tAda\n"])
+def test_a_whitespace_padded_bare_given_name_is_still_refused(variant):
+    """`fullmatch` against the padded literal fails, so the guard waved it
+    through and compiled a pattern that substitutes a bare given name — the one
+    substitution the campaign explicitly decided never to make."""
+    with pytest.raises(PrivacyMapInvalid, match="bare given name"):
+        AliasRegistry(_mutated(entries=_entries_with_variant(variant)))
+
+
+@pytest.mark.parametrize("text", [
+    "https://x/?f=%3BAda%20Example%3B",       # %3B — a semicolon separator
+    "https://x/?p=%2FAda%20Example%2F",       # %2F — a path separator
+    "https://x/?q=%3AAda%20Example%3A",       # %3A — a colon
+])
+def test_multi_token_variant_matches_across_any_percent_escape(registry, text):
+    """The boundary knows the SHAPE of a percent escape, not three instances.
+
+    `%2C`, `%20` and `%40` were enumerated from one corpus sample. Every other
+    escape a query string uses fenced a name the substituter then walked past.
+    """
+    assert "dev-01" in registry.apply(text)
 
 
 def test_case_only_duplicate_literals_still_compile():
@@ -517,7 +591,7 @@ def test_two_discovered_maps_are_ambiguous_rather_than_first_wins(tmp_path, monk
         privacy = tmp_path / name / "privacy"
         privacy.mkdir(parents=True)
         (privacy / "aliases.json").write_text(json.dumps(MAP), encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
+    _point_discovery_at(monkeypatch, tmp_path)
     with pytest.raises(PrivacyMapMissing, match="ambiguous"):
         resolve_registry("jira-issues", None)
 
@@ -546,3 +620,60 @@ def test_public_scope_lists_the_three_campaign_collections():
     from main.privacy.alias_registry import load_scope
     collections, _ = load_scope()
     assert {"melosys-confluence-v3", "jira-issues", "nav-wiki"} <= collections
+
+
+# --- path_in_scope ----------------------------------------------------------
+
+def _point_discovery_at(monkeypatch, root):
+    """Point the private-file globs and the relative scope paths at a tmp root.
+
+    They resolve against `alias_registry.REPO_ROOT`, not the process CWD — a
+    guard that only arms when the caller happens to be standing in the repo is
+    not a guard. `chdir` stays so a genuinely CWD-relative read would still be
+    caught by the tests that assert a refusal.
+    """
+    from main.privacy import alias_registry
+    monkeypatch.setattr(alias_registry, "REPO_ROOT", str(root))
+    monkeypatch.chdir(root)
+
+
+@pytest.fixture
+def scoped_tree(tmp_path, monkeypatch):
+    """A private scope file naming one tree, discovered the usual way."""
+    tree = tmp_path / "sources" / "in-scope"
+    (tree / "sub").mkdir(parents=True)
+    (tmp_path / "outside").mkdir()
+    privacy = tmp_path / "huginn-x" / "privacy"
+    privacy.mkdir(parents=True)
+    (privacy / "scope.json").write_text(
+        json.dumps({"collections": [], "basePaths": ["./sources/in-scope"]}), encoding="utf-8")
+    _point_discovery_at(monkeypatch, tmp_path)
+    return tmp_path, tree
+
+
+def test_path_in_scope_matches_the_tree_and_everything_under_it(scoped_tree):
+    from main.privacy.alias_registry import path_in_scope
+    root, tree = scoped_tree
+    assert path_in_scope(str(tree)) is True
+    assert path_in_scope(str(tree / "sub")) is True
+    assert path_in_scope("./sources/in-scope/sub") is True
+
+
+def test_path_in_scope_rejects_a_sibling_and_a_walk_out(scoped_tree):
+    from main.privacy.alias_registry import path_in_scope
+    root, tree = scoped_tree
+    assert path_in_scope(str(root / "outside")) is False
+    # A prefix match on the string would accept this sibling directory.
+    (root / "sources" / "in-scope-other").mkdir()
+    assert path_in_scope(str(root / "sources" / "in-scope-other")) is False
+    assert path_in_scope(str(tree / ".." / "in-scope-other")) is False
+    assert path_in_scope("") is False
+
+
+def test_path_in_scope_follows_a_symlink_into_the_tree(scoped_tree):
+    """Realpath on both sides: a link is not a way out of scope."""
+    from main.privacy.alias_registry import path_in_scope
+    root, tree = scoped_tree
+    link = root / "outside" / "link"
+    link.symlink_to(tree / "sub")
+    assert path_in_scope(str(link)) is True

@@ -2,7 +2,9 @@
 the format round-trip against the ?tags= metadata filter, and the process_files
 changed-files manifest + all-failed exit signal."""
 import argparse
+import builtins
 import json
+import os
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -13,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "taggin
 
 from tag_documents import (  # noqa: E402
     build_prompt,
+    external_backend_refusal,
     call_backend,
     get_html_excerpt,
     has_html_tags,
@@ -22,6 +25,7 @@ from tag_documents import (  # noqa: E402
     inject_tags,
     process_files,
 )
+from tag_documents import main as tag_documents_main  # noqa: E402
 
 from main.core.search_response_formatter import apply_metadata_filters  # noqa: E402
 
@@ -420,3 +424,159 @@ class TestFileExclusion:
             process_files(args)
 
         assert seen == ["plans/real.md"]
+
+
+class TestExternalBackendGuard:
+    """A privacy-scoped source tree may only be tagged by a local backend.
+
+    This script reads RAW source markdown — the pre-alias text — and its default
+    backend ships an excerpt of every file to a hosted model. The guard has to
+    fire before a single file is opened; a refusal after the first excerpt has
+    left the machine is not a refusal.
+    """
+
+    @pytest.fixture
+    def scoped(self, tmp_path, monkeypatch):
+        """A tmp repo root: one tree named by basePaths, one named only through
+        an in-scope collection's built manifest, and one out of scope."""
+        from main.privacy import alias_registry
+        tree = tmp_path / "sources" / "in-scope"
+        (tree / "sub").mkdir(parents=True)
+        by_manifest = tmp_path / "sources" / "by-manifest"
+        by_manifest.mkdir(parents=True)
+        (tmp_path / "outside").mkdir()
+        privacy = tmp_path / "huginn-x" / "privacy"
+        privacy.mkdir(parents=True)
+        (privacy / "scope.json").write_text(
+            json.dumps({"collections": ["scoped-collection"],
+                        "basePaths": ["./sources/in-scope"]}),
+            encoding="utf-8")
+        collection = tmp_path / "data" / "collections" / "scoped-collection"
+        collection.mkdir(parents=True)
+        (collection / "manifest.json").write_text(
+            json.dumps({"collectionName": "scoped-collection",
+                        "reader": {"type": "localFiles",
+                                   "basePath": "./sources/by-manifest"}}),
+            encoding="utf-8")
+        monkeypatch.setattr(alias_registry, "REPO_ROOT", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        return tmp_path, tree
+
+    def test_an_in_scope_tree_refuses_an_external_backend(self, scoped):
+        _, tree = scoped
+        refusal = external_backend_refusal(str(tree), "claude-cli")
+        assert refusal is not None
+        assert "ollama" in refusal and "Nothing was read" in refusal
+
+    def test_a_subdirectory_of_an_in_scope_tree_refuses_too(self, scoped):
+        _, tree = scoped
+        assert external_backend_refusal(str(tree / "sub"), "claude-cli") is not None
+
+    def test_an_in_scope_tree_may_be_tagged_locally(self, scoped):
+        _, tree = scoped
+        assert external_backend_refusal(str(tree), "ollama") is None
+
+    def test_an_out_of_scope_tree_is_unaffected(self, scoped):
+        root, _ = scoped
+        assert external_backend_refusal(str(root / "outside"), "claude-cli") is None
+
+    def test_main_exits_before_reading_anything(self, scoped, monkeypatch, capsys):
+        """End to end through main(): no file is opened, not even the taxonomy."""
+        _, tree = scoped
+        (tree / "a.md").write_text("body", encoding="utf-8")
+        # `builtins.open`, not `Path.open`: `load_taxonomy` calls the builtin,
+        # and so does every other read on this path, so spying on the Path
+        # method watched a door nobody uses and the assertion was vacuous.
+        opened = []
+        real_open = builtins.open
+
+        def spy(file, *args, **kwargs):
+            opened.append(str(file))
+            return real_open(file, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", spy)
+        monkeypatch.setattr(sys, "argv", [
+            "tag_documents.py", "--source", str(tree),
+            "--taxonomy", "/nonexistent/taxonomy.json", "--dry-run",
+        ])
+        with pytest.raises(SystemExit) as excinfo:
+            tag_documents_main()
+        assert excinfo.value.code == 2
+        assert "sends document text off this machine" in capsys.readouterr().err
+        # The guard reads its own scope files; nothing from the CORPUS, and not
+        # even the taxonomy, which `main()` loads on the very next line.
+        assert [path for path in opened
+                if str(tree) in path or "taxonomy" in path] == []
+
+
+class TestGuardIsCwdIndependent:
+    """The guard's refusal must not depend on where the operator is standing.
+
+    `load_scope` resolved its relative basePaths against the process CWD, so from
+    any directory other than the repo root the whole scope resolved to paths that
+    do not exist, `path_in_scope` returned False for everything, and the guard
+    silently permitted the hosted backend on the exact trees it exists to
+    protect. A finder reproduced it from /tmp and the run reached the backend.
+    """
+
+    @pytest.fixture
+    def repo(self, tmp_path, monkeypatch):
+        from main.privacy import alias_registry
+        tree = tmp_path / "data" / "sources" / "scoped-tree"
+        (tree / "nested").mkdir(parents=True)
+        privacy = tmp_path / "huginn-x" / "privacy"
+        privacy.mkdir(parents=True)
+        (privacy / "scope.json").write_text(
+            json.dumps({"collections": [], "basePaths": ["./data/sources/scoped-tree"]}),
+            encoding="utf-8")
+        monkeypatch.setattr(alias_registry, "REPO_ROOT", str(tmp_path))
+        return tmp_path, tree
+
+    def test_the_guard_refuses_from_an_unrelated_working_directory(
+            self, repo, tmp_path_factory, monkeypatch):
+        root, tree = repo
+        elsewhere = tmp_path_factory.mktemp("elsewhere")
+        monkeypatch.chdir(elsewhere)
+        assert os.getcwd() != str(root)
+        assert external_backend_refusal(str(tree), "claude-cli") is not None
+        assert external_backend_refusal(str(tree / "nested"), "claude-cli") is not None
+
+    def test_main_refuses_from_an_unrelated_working_directory(
+            self, repo, tmp_path_factory, monkeypatch, capsys):
+        root, tree = repo
+        (tree / "a.md").write_text("body", encoding="utf-8")
+        monkeypatch.chdir(tmp_path_factory.mktemp("elsewhere2"))
+        monkeypatch.setattr(sys, "argv", [
+            "tag_documents.py", "--source", str(tree),
+            "--taxonomy", "/nonexistent/taxonomy.json", "--dry-run",
+            "--backend", "claude-cli",
+        ])
+        with pytest.raises(SystemExit) as excinfo:
+            tag_documents_main()
+        assert excinfo.value.code == 2
+        assert "sends document text off this machine" in capsys.readouterr().err
+
+
+def test_a_tree_named_only_by_an_in_scope_collections_manifest_is_in_scope(tmp_path,
+                                                                          monkeypatch):
+    """Scope is declared twice — by collection name and by basePath — and the two
+    drift. The built manifest is the record of what the collection actually
+    reads, so it is consulted rather than trusted to be mirrored by hand."""
+    from main.privacy import alias_registry
+    tree = tmp_path / "sources" / "by-manifest"
+    (tree / "sub").mkdir(parents=True)
+    privacy = tmp_path / "huginn-x" / "privacy"
+    privacy.mkdir(parents=True)
+    (privacy / "scope.json").write_text(
+        json.dumps({"collections": ["scoped-collection"], "basePaths": []}),
+        encoding="utf-8")
+    collection = tmp_path / "data" / "collections" / "scoped-collection"
+    collection.mkdir(parents=True)
+    (collection / "manifest.json").write_text(
+        json.dumps({"reader": {"type": "localFiles", "basePath": "./sources/by-manifest"}}),
+        encoding="utf-8")
+    monkeypatch.setattr(alias_registry, "REPO_ROOT", str(tmp_path))
+    assert external_backend_refusal(str(tree), "claude-cli") is not None
+    assert external_backend_refusal(str(tree / "sub"), "claude-cli") is not None
+    assert external_backend_refusal(str(tree), "ollama") is None
+    assert external_backend_refusal(str(tmp_path / "sources"), "claude-cli") is None

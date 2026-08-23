@@ -63,6 +63,13 @@ benchmarks/FINDINGS.md
 Vipps_*.md
 Møtereferat*
 
+# Distribution-gate triage output. `--candidates-out` is the ONE gate output
+# that contains real names; these are the filenames a hurried run reaches for.
+# `data/` is already ignored wholesale and is where the flag now defaults.
+/scan_candidates*.json
+/candidates*.json
+/report*.json
+
 # Local-only Claude Code memory (private LLM-session redirect to mimir wiki repo)
 CLAUDE.local.md
 .claude/worktrees/
