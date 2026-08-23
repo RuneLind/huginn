@@ -298,3 +298,12 @@ def test_line_starts_are_not_computed_for_clean_text(scanner, monkeypatch):
     assert calls == []
     scanner.detect(f"orgnr {VALID_ORGNR}")
     assert len(calls) == 1
+
+
+def test_an_opaque_secret_named_like_a_file_is_still_a_credential(scanner):
+    """A path-shaped exemption must never outrank entropy: `.key`/`.env` are
+    the extensions a secret is most likely to be named after."""
+    assert "credential" in categories(
+        scanner, "client_secret = wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY.key")
+    assert "credential" in categories(
+        scanner, "aws_secret_access_key = /JalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY")

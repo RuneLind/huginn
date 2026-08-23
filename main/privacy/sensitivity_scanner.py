@@ -281,7 +281,7 @@ class SensitivityScanner:
         # `Authorization:` header never does, and `Bearer abc/def/ghi/jkl` was
         # being waved through for looking like one.
         for match in _CRED_ASSIGN_RE.finditer(text):
-            if _looks_like_a_path(match.group("value")):
+            if _looks_like_a_path(match.group("value")) and not _has_an_opaque_run(match.group("value")):
                 continue
             yield match.start(), match.group(0)
         for pattern in (_CRED_HEADER_RE, _CRED_PEM_RE, _CRED_URL_RE, _CRED_TOKEN_RE):

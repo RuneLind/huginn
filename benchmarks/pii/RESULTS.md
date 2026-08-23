@@ -157,8 +157,8 @@ the one check that dominates it.
 
 | Step | No prefilter | `375ed0c` token prefilter | Bucketed (now) |
 |---|---|---|---|
-| check 1 alone | 170.4 s | 62.3 s | 0.67 s |
-| whole `scan_index.py` run | — | 64.8 s | 2.08 s |
+| check 1 alone | 170.4 s | 62.3 s | 9.1 s |
+| whole `scan_index.py` run | — | 64.8 s | 11.9 s (melosys-confluence-v3 19.8 s, jira-issues 35.3 s) |
 
 Check 1 is essentially the whole run in every column, which is the point: the
 other twelve checks together cost about 2 s.
@@ -185,3 +185,6 @@ A text whose lowercase is a different length now skips the buckets entirely and
 runs the full alternation — provably the only case, since no character
 lowercases to zero characters. The fence alphabet in that fuzz test carries
 `İ`, `ß` and `ﬁ` for it.
+
+
+The bucketed column was re-measured after the anchors moved from `text.lower()` offsets to a case-insensitive lookahead regex over the original text (commit 60872a0): ~100 % of the remaining time is the 271 zero-width anchor passes. A hazard-character fast path (take the `str.lower()` route when the text contains none of the 22 characters whose `re.IGNORECASE` fold differs from `str.lower()`) measured 1.07 s vs 7.14 s for the anchor stage and is the known follow-up.

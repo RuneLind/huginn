@@ -865,3 +865,9 @@ def test_overlapping_occurrences_of_the_bucket_word_are_all_anchors():
     # non-overlapping anchor search would have consumed it inside the first.
     scanner = index_scan.NeedleScanner(["ada.example00"])
     assert scanner.findall("adada.example00") == ["ada.example00"]
+
+
+def test_a_needle_headed_by_a_dotted_capital_i_is_refused():
+    import pytest
+    with pytest.raises(ValueError):
+        index_scan.NeedleScanner(["İbrahim Example00"])

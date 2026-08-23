@@ -292,6 +292,12 @@ class NeedleScanner:
                 raise ValueError(
                     f"a needle (shape {sanitize(needle)!r}) has no alphanumeric run and "
                     f"therefore no bucket; the scan would silently never look for it")
+            if len(match.group(0).lower()) != len(match.group(0)):
+                # `İ` lowercases to two chars; an anchor built from the lowered
+                # word would not match the needle's own spelling (silent PASS).
+                raise ValueError(
+                    f"a needle (shape {sanitize(needle)!r}) starts with a character whose "
+                    f"lowercase form is longer than itself; the bucket anchor cannot be trusted")
             buckets.setdefault(match.group(0).lower(), []).append(needle)
         self._patterns = []
         for word in sorted(buckets):
