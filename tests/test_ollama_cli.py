@@ -1,10 +1,13 @@
 """Tests for main.utils.ollama_cli — the headless Ollama chat wrapper."""
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from main.utils.ollama_cli import DEFAULT_MODEL, call_ollama
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 class _FakeResp:
@@ -148,3 +151,79 @@ class TestCallOllama:
                    return_value=_FakeResp(b"not json")):
             with pytest.raises(RuntimeError, match="Bad JSON"):
                 call_ollama("hi", model="m")
+
+
+class TestDefaultModelPropagation:
+    """Who inherits DEFAULT_MODEL and who deliberately does not.
+
+    The constant is the general-purpose local model. The tagging scripts take it
+    so a model swap is a one-line change; the knowledge-graph extractor and the
+    contextual-prefix backend pin their own, because their caches are keyed by
+    document id rather than by model — swapping under them silently produces a
+    hybrid graph mixing two models' output (docs/knowledge-graph-when-to-use-
+    what.md).
+
+    The propagation assertions are deliberately RELATIONAL (`== DEFAULT_MODEL`),
+    so they keep holding across a model bump. That leaves the constant's own
+    value unguarded — every one of them passes if it silently reverts — so
+    `test_the_default_model_is_the_one_the_campaign_chose` pins it separately.
+    A bump then costs one line here, which is the right price: choosing the
+    machine's general-purpose model is a decision worth restating out loud.
+    """
+
+    def test_the_default_model_is_the_one_the_campaign_chose(self):
+        """The one assertion that is allowed to name a model.
+
+        Without it the constant can be reverted with the whole suite green: the
+        propagation tests compare things TO DEFAULT_MODEL, and the extractor
+        test only requires it to DIFFER, so all four hold at any value. Pinned
+        because moving it was a deliberate deliverable (the A/B is in the PR
+        that introduced this line), not an incidental default.
+        """
+        assert DEFAULT_MODEL == "qwen3.8:27b-mlx"
+
+    def test_the_tagging_scripts_inherit_it(self):
+        from scripts.tagging import discover_tags, tag_documents
+        assert tag_documents.DEFAULT_OLLAMA_MODEL == DEFAULT_MODEL
+        assert discover_tags.DEFAULT_OLLAMA_MODEL == DEFAULT_MODEL
+
+    def test_the_tagging_argparse_defaults_are_the_same_constant(self):
+        """The import is not the contract — the flag default is what a run uses."""
+        import re
+
+        for path in ("scripts/tagging/tag_documents.py", "scripts/tagging/discover_tags.py"):
+            source = (REPO_ROOT / path).read_text(encoding="utf-8")
+            assert re.search(r'--ollama-model"[^)]*default=DEFAULT_OLLAMA_MODEL', source), path
+
+    def test_the_graph_extractor_pins_its_own(self):
+        """Its `--model` default is a LITERAL, and this is which one.
+
+        `!= DEFAULT_MODEL` was the whole assertion, which holds for any literal
+        at all — including one someone changes to a third model by accident. The
+        extraction cache is keyed by document id rather than by model, so a
+        changed pin silently produces a graph mixing two models' output; the
+        value is the thing worth guarding, and the A/B that would justify moving
+        it has not been run at a size that decides.
+        """
+        import re
+
+        source = (REPO_ROOT / "scripts" / "knowledge_graph"
+                  / "extract_entities_llm.py").read_text(encoding="utf-8")
+        match = re.search(r'"--model",\s*default="([^"]+)"', source)
+        assert match, "the extractor no longer pins a literal --model default"
+        assert match.group(1) == "qwen3.6:35b-a3b-coding-nvfp4"
+
+    def test_the_contextual_prefix_ollama_backend_pins_its_own(self):
+        """Same argument, same cache shape: the contextual prefixes stored on a
+        collection carry no model id, so re-running under another model leaves a
+        collection whose chunks were prefixed by two."""
+        from main.core.contextual_prefix.backends.ollama_backend import OllamaBackend
+
+        import inspect
+
+        pinned = inspect.signature(OllamaBackend.__init__).parameters["model"].default
+        assert pinned == "qwen3.6:35b-a3b-nvfp4" != DEFAULT_MODEL
+
+    def test_the_sweep_inherits_it(self):
+        from scripts.audit import sensitivity_sweep
+        assert sensitivity_sweep.build_parser().get_default("model") == DEFAULT_MODEL

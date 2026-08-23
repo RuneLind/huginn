@@ -352,8 +352,11 @@ map stays local.
   maps indistinguishable, and an existing file of the same name is a refusal
   unless `--force`. It takes the same flags as the CLI so it certifies the same
   check set, and refuses outright for a collection out of privacy scope or
-  without a manifest `privacy` stamp. Copying the collection directory by hand
-  is not a supported hand-off. Four guarantees, each of which was missing:
+  without a manifest `privacy` stamp. It also consults the **local sensitivity
+  sweep** (subsection below): a report with unknown persons, or one older than
+  the collection's last rebuild, refuses; no report at all only warns. Copying
+  the collection directory by hand is not a supported hand-off. Four guarantees,
+  each of which was missing:
   - **atomic** — built under a temp name in the destination directory and
     `os.replace`d into place. A half-written `.tar.gz` has the name of a
     certified package and the contents of an interrupted one;
@@ -458,6 +461,38 @@ map stays local.
     (`_should_skip_reranker`) reads the word count and langdetect's verdict on
     the text that collection is actually searched with, so it can differ between
     collections in one mixed request.
+
+### Local sensitivity sweep
+
+The **second opinion** on a built collection: the gate proves no *listed* name
+survived; the sweep asks a local model who is named that the map never heard of.
+Reasoning is in the docstrings of `main/privacy/sensitivity_sweep.py` and its CLI
+`scripts/audit/sensitivity_sweep.py` (`--baseline` = all documents, default =
+the changed ones, `--limit N` = a priced sample).
+
+- **Local by requirement** — transport is `main/utils/ollama_cli.py`, no
+  `--backend` flag, `--model` defaults to `ollama_cli.DEFAULT_MODEL`. The graph
+  extractor and contextual-prefix backend pin their own: those caches are keyed
+  by doc id, not model, so a swap yields a hybrid artifact.
+- **The model does not judge.** Answers are filtered deterministically (verbatim
+  containment, aliases, redaction tokens, `non_person_labels`, reviewed bigrams)
+  into `alias`/`mapped_residual`/`role`/`unknown_person`; only the last blocks.
+  Cache `data/state/sensitivity/<collection>.json` keys on text + policy + model
+  + map version + allow-list sha; unread window = uncached, cached unknowns keep
+  their strings.
+- **Report** — gitignored, the only output with real strings:
+  `sweep_<collection>_<date>_<mode>[-limitN].json` under a private sub-repo's
+  `privacy/` else `data/privacy/`; stdout is counts and shapes. Exit `0` clean,
+  `2` an unknown person survived, `1` no collection / no map / no Ollama.
+- **Packaging gate** (`sweep_gate`, `--sweep-reports` to relocate):
+  `unknownCount > 0` refuses; what only makes a *clean* verdict unreliable warns
+  — no report, a limited/partial one, unreadable answers, a different
+  map/policy/model, a moved `lastModifiedDocumentTime` (not `updatedTime`,
+  which a no-op reindex bumps).
+- **Ledger** key `sensitivity-audit`, one fatal `sweep` phase, `variant`
+  `rebuild` for `--baseline`, swept collection in `detail.collection`. Per the
+  routing convention a helper-wired daily script may add a non-fatal
+  `sensitivity` phase after its reindex — one does today.
 
 ## LLM entity extraction (knowledge graph)
 

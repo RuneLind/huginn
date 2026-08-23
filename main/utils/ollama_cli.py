@@ -24,7 +24,16 @@ import urllib.request
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 
-DEFAULT_MODEL = "qwen3.6:35b-a3b-nvfp4"
+# The general-purpose local model for every caller that does not pin its own.
+# Inherited by the tagging scripts (`scripts/tagging/tag_documents.py`,
+# `scripts/tagging/discover_tags.py`) and by the privacy sensitivity sweep.
+#
+# NOT inherited by the knowledge-graph entity extractor or the contextual-prefix
+# backend: both pin their own model, and a graph rebuilt under a different model
+# is a different graph (the extraction cache is keyed by doc id, not by model —
+# see docs/knowledge-graph-when-to-use-what.md). Moving those needs an A/B; the
+# one run against this model is tabled in the PR that introduced this constant.
+DEFAULT_MODEL = "qwen3.8:27b-mlx"
 
 
 def call_ollama(prompt: str, *, model: str = DEFAULT_MODEL, timeout: int = 120,

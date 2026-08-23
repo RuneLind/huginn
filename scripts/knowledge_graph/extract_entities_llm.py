@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from main.graph.graph_loader import get_collection_manifest, resolve_graph_output_path
 from main.privacy.alias_registry import (
     POLICY_VERSION as PRIVACY_POLICY_VERSION, PrivacyMapMissing, resolve_registry)
+from main.privacy.cache_envelope import ENTRIES_KEY, load_envelope, write_envelope
 from main.utils.ollama_cli import call_ollama as call_ollama_chat
 
 
@@ -237,7 +238,7 @@ def build_source_stamp(collection: str, data_path: str, processed_doc_count: int
 
 
 CACHE_POLICY_KEY = "policy_version"
-CACHE_ENTRIES_KEY = "entries"
+CACHE_ENTRIES_KEY = ENTRIES_KEY
 
 
 def load_extraction_cache(cache_path: Path, aliased: bool) -> dict:
@@ -251,23 +252,17 @@ def load_extraction_cache(cache_path: Path, aliased: bool) -> dict:
     are still valid.
 
     The version lives in an envelope rather than a `_`-prefixed key beside the
-    entries, because a doc id may itself start with `_`.
+    entries, because a doc id may itself start with `_`. That envelope, its
+    atomic write and its lock are ``main/privacy/cache_envelope.py`` — shared
+    with the sensitivity sweep, which reached the same three conclusions
+    independently. A legacy flat file comes back with empty metadata, i.e. no
+    policy version, which is exactly the pre-envelope case handled below.
 
     Discarding here is in-memory only; the file keeps the pre-alias extractions
     until scripts/audit/purge_prealias_caches.py deletes it.
     """
-    if not cache_path.exists():
-        return {}
-    try:
-        raw = json.loads(cache_path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    if not isinstance(raw, dict):
-        return {}
-    if isinstance(raw.get(CACHE_ENTRIES_KEY), dict):
-        entries, version = raw[CACHE_ENTRIES_KEY], raw.get(CACHE_POLICY_KEY)
-    else:
-        entries, version = raw, None            # legacy flat cache, pre-envelope
+    metadata, entries = load_envelope(cache_path)
+    version = metadata.get(CACHE_POLICY_KEY)
     if not aliased or version == PRIVACY_POLICY_VERSION:
         return entries
     if entries:
@@ -277,10 +272,7 @@ def load_extraction_cache(cache_path: Path, aliased: bool) -> dict:
 
 
 def write_extraction_cache(cache_path: Path, cache: dict) -> None:
-    cache_path.write_text(
-        json.dumps({CACHE_POLICY_KEY: PRIVACY_POLICY_VERSION, CACHE_ENTRIES_KEY: cache},
-                   ensure_ascii=False),
-        encoding="utf-8")
+    write_envelope(cache_path, {CACHE_POLICY_KEY: PRIVACY_POLICY_VERSION}, cache)
 
 
 def main():

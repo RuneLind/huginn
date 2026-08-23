@@ -14,6 +14,7 @@ import os
 import pickle
 import random
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -974,6 +975,53 @@ def test_a_tracked_candidates_path_is_still_refused(monkeypatch):
     with pytest.raises(SystemExit) as excinfo:
         cli.candidates_destination("scan_out.json", "demo")
     assert "REFUSED" in str(excinfo.value.code)
+
+
+def _nested_repos(root):
+    """An outer checkout with a second checkout inside it, the huginn-*/ shape."""
+    outer = root / "outer"
+    (outer / "inner" / "privacy").mkdir(parents=True)
+    for path in (outer, outer / "inner"):
+        subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    return outer
+
+
+def test_a_path_is_judged_by_the_repository_that_owns_it(tmp_path):
+    """The private sub-repos are separate checkouts, and only they know their own
+    ignore rules.
+
+    A sub-repo that ignores its `privacy/` through `.git/info/exclude` — not a
+    committed `.gitignore`, which the outer repo would also read — was reported
+    as tracked when `check-ignore` ran from this repo, and the write of the one
+    output that carries real names was refused. Asking inside the owning
+    checkout is the only question whose answer is about the file that will (or
+    will not) be committed.
+    """
+    outer = _nested_repos(tmp_path)
+    (outer / ".gitignore").write_text("unrelated\n", encoding="utf-8")
+    (outer / "inner" / ".git" / "info" / "exclude").write_text("privacy/\n",
+                                                               encoding="utf-8")
+    target = outer / "inner" / "privacy" / "candidates.json"
+    assert cli.refuse_if_tracked(target) == target
+
+
+def test_a_path_the_owning_repository_tracks_is_still_refused(tmp_path):
+    """The mirror image, and the one that leaks: the outer repo ignores
+    `inner/` wholesale, so from out here every path under it looks safe — while
+    the sub-repo itself would happily commit the file."""
+    outer = _nested_repos(tmp_path)
+    (outer / ".gitignore").write_text("inner/\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as excinfo:
+        cli.refuse_if_tracked(outer / "inner" / "privacy" / "candidates.json")
+    assert "REFUSED" in str(excinfo.value.code)
+
+
+def test_a_path_no_checkout_contains_is_allowed(tmp_path):
+    """Nothing can track it, so there is nothing to refuse — and refusing would
+    make a scratch directory unusable as a destination."""
+    target = tmp_path / "loose" / "candidates.json"
+    target.parent.mkdir()
+    assert cli.refuse_if_tracked(target) == target
 
 
 def test_a_dotless_i_in_the_text_does_not_hide_a_needle_the_pattern_matches():

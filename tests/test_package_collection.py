@@ -25,7 +25,11 @@ sys.path.insert(0, str(REPO_ROOT / "scripts" / "audit"))
 import package_collection as pkg  # noqa: E402
 from main.privacy import index_scan  # noqa: E402
 import scan_index as cli  # noqa: E402
-from tests.test_scan_index import _clean_document, _document, _map, _write_collection  # noqa: E402
+from main.privacy import sensitivity_sweep as sweep  # noqa: E402
+from main.utils.ollama_cli import DEFAULT_MODEL  # noqa: E402
+from tests.test_scan_index import (  # noqa: E402
+    MAP_VERSION, _clean_document, _document, _map, _write_collection,
+)
 
 
 @pytest.fixture
@@ -49,7 +53,41 @@ def workspace(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(pkg, "REPO_ROOT", tmp_path)
+    # The sweep gate reads its reports from here. Repointed so the packager's
+    # verdict depends on what a test wrote, never on what happens to be in the
+    # operator's private sub-repo.
+    monkeypatch.setattr(sweep, "report_dirs", lambda: [tmp_path / "sweeps"])
     return tmp_path
+
+
+SWEPT_AT = "2026-08-20T13:02:01.631639"
+
+
+def _sweep_report(workspace, collection, *, generated_at, unknown=0, documents=1,
+                  expected=1, limit=None, last_modified=SWEPT_AT, directory=None):
+    """A report of the shape the gate reads: coverage, inputs, collection stamp.
+
+    Every field matters to a different branch of `sweep_gate`, so a helper that
+    filled in only `unknownCount` would have every test below exercising the
+    "this report cannot prove anything" path instead of the one it names.
+    """
+    directory = directory or workspace / "sweeps"
+    directory.mkdir(parents=True, exist_ok=True)
+    mode = "baseline" if limit is None else f"baseline-limit{limit}"
+    (directory / f"sweep_{collection}_2026-08-23_{mode}.json").write_text(
+        json.dumps({"collection": collection, "generatedAt": generated_at,
+                    "unknownCount": unknown, "documents": documents,
+                    "documentsExpected": expected, "limit": limit,
+                    "mapVersion": MAP_VERSION, "policyVersion": index_scan.POLICY_VERSION,
+                    "model": DEFAULT_MODEL,
+                    "collectionLastModifiedDocumentTime": last_modified,
+                    "findings": []}), encoding="utf-8")
+
+
+def _with_last_modified(collection, stamp=SWEPT_AT):
+    manifest = json.loads((collection / "manifest.json").read_text(encoding="utf-8"))
+    manifest["lastModifiedDocumentTime"] = stamp
+    (collection / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
 
 def _package(workspace, monkeypatch, name="demo-aliased", extra=()):
@@ -453,3 +491,132 @@ def test_a_symlink_in_the_tree_prints_a_refusal(workspace, monkeypatch, capsys):
     assert code != 0 and "REFUSED" in out
     assert "Traceback" not in out
     assert _tarballs(workspace) == []
+
+
+# --- the local sensitivity sweep gate -----------------------------------------
+#
+# The deterministic scan certifies that no LISTED name survived. The sweep is the
+# second opinion about the people the map never listed, and the packager is where
+# its verdict has to bite — a report nobody reads is the advisory scanner this
+# whole script exists to replace.
+
+def test_no_sweep_report_warns_but_still_packages(workspace, monkeypatch, capsys):
+    """A second opinion, not a prerequisite. Making the hand-off depend on a local
+    GPU being up is how a gate gets routed around."""
+    _write_collection(workspace / "collections", "demo-aliased",
+                      documents=[_clean_document(0)])
+    code = _package(workspace, monkeypatch)
+    out = _combined(capsys, code)
+    assert code == 0 and "WARN" in out and "no local sensitivity sweep" in out
+    assert len(_tarballs(workspace)) == 1
+
+
+def test_a_sweep_that_found_an_unknown_person_refuses(workspace, monkeypatch, capsys):
+    collection = _write_collection(workspace / "collections", "demo-aliased",
+                                   documents=[_clean_document(0)])
+    _with_last_modified(collection)
+    _sweep_report(workspace, "demo-aliased", generated_at="2099-01-01T00:00:00Z", unknown=3)
+    code = _package(workspace, monkeypatch)
+    out = _combined(capsys, code)
+    assert code != 0 and "REFUSED" in out and "3 unknown" in out
+    # The strings stay in the gitignored report; the refusal is a count.
+    assert _tarballs(workspace) == []
+
+
+def test_a_sweep_of_older_documents_warns(workspace, monkeypatch, capsys):
+    """A clean verdict about text that has since changed certifies nothing — but
+    it is a warning, not a refusal: the deterministic scan just passed on the
+    documents that are actually there."""
+    collection = _write_collection(workspace / "collections", "demo-aliased",
+                                   documents=[_clean_document(0)])
+    _with_last_modified(collection, "2026-08-22T09:00:00")
+    _sweep_report(workspace, "demo-aliased", generated_at="2026-08-19T00:00:00Z")
+    code = _package(workspace, monkeypatch)
+    out = _combined(capsys, code)
+    assert code == 0 and "WARN" in out and "has since changed" in out
+    assert len(_tarballs(workspace)) == 1
+
+
+def test_a_limited_sweep_does_not_certify(workspace, monkeypatch, capsys):
+    """A 1-of-2 sample is a spot check. It warns with its coverage in the line, so
+    the operator sees WHAT was read rather than "no second opinion"."""
+    collection = _write_collection(workspace / "collections", "demo-aliased",
+                                   documents=[_clean_document(0), _clean_document(1)])
+    _with_last_modified(collection)
+    _sweep_report(workspace, "demo-aliased", generated_at="2026-08-22T00:00:00Z",
+                  documents=1, expected=2, limit=1)
+    code = _package(workspace, monkeypatch)
+    out = _combined(capsys, code)
+    assert code == 0 and "WARN" in out and "1/2 documents" in out
+
+
+def test_a_clean_full_sweep_is_stamped_into_the_package(workspace, monkeypatch, capsys):
+    """"Certified without a second opinion" has to be legible in the artifact, not
+    only in the console the builder happened to be looking at."""
+    collection = _write_collection(workspace / "collections", "demo-aliased",
+                                   documents=[_clean_document(0)])
+    _with_last_modified(collection)
+    _sweep_report(workspace, "demo-aliased", generated_at="2026-08-22T00:00:00Z")
+    code = _package(workspace, monkeypatch)
+    assert code == 0, _combined(capsys, code)
+    with tarfile.open(next((workspace / "out").glob("*.tar.gz"))) as tar:
+        stamp = json.loads(tar.extractfile("PACKAGE-STAMP.json").read().decode())
+    assert stamp["sensitivitySweep"]["status"] == "pass"
+
+
+def test_sweep_reports_can_be_pointed_somewhere_else(workspace, monkeypatch, capsys):
+    """`--sweep-reports` exists for certifying an unpacked copy on a machine that
+    is not the one that swept it — the report travels beside the tarball, not in
+    a private sub-repo that machine does not have."""
+    collection = _write_collection(workspace / "collections", "demo-aliased",
+                                   documents=[_clean_document(0)])
+    _with_last_modified(collection)
+    elsewhere = workspace / "handover"
+    _sweep_report(workspace, "demo-aliased", generated_at="2026-08-22T00:00:00Z",
+                  directory=elsewhere)
+    code = _package(workspace, monkeypatch, extra=["--sweep-reports", str(elsewhere)])
+    assert code == 0, _combined(capsys, code)
+    assert "clean (1/1 documents)" in _combined(capsys, code)
+
+
+def test_a_map_version_the_sweep_never_saw_warns(workspace, monkeypatch, capsys):
+    """The map decides which findings are dropped as already-aliased. A verdict
+    produced under another one is about a different filter."""
+    collection = _write_collection(workspace / "collections", "demo-aliased",
+                                   documents=[_clean_document(0)])
+    _with_last_modified(collection)
+    directory = workspace / "sweeps"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "sweep_demo-aliased_2026-08-23_baseline.json").write_text(
+        json.dumps({"collection": "demo-aliased", "generatedAt": "2026-08-22T00:00:00Z",
+                    "unknownCount": 0, "documents": 1, "documentsExpected": 1,
+                    "limit": None, "mapVersion": MAP_VERSION - 1,
+                    "policyVersion": index_scan.POLICY_VERSION, "model": DEFAULT_MODEL,
+                    "collectionLastModifiedDocumentTime": SWEPT_AT, "findings": []}),
+        encoding="utf-8")
+    code = _package(workspace, monkeypatch)
+    out = _combined(capsys, code)
+    assert code == 0 and "WARN" in out and "different inputs" in out
+
+
+def test_drift_is_refused_before_the_sweep_gate_is_consulted(workspace, monkeypatch, capsys):
+    """The cheap refusal first: when the collection moved under us, what some
+    report says about the previous contents cannot matter."""
+    collection = _write_collection(workspace / "collections", "demo-aliased",
+                                   documents=[_clean_document(0)])
+    _with_last_modified(collection)
+    _sweep_report(workspace, "demo-aliased", generated_at="2026-08-22T00:00:00Z", unknown=9)
+
+    real_verify = pkg.verify_members
+
+    def drifting(collection_dir, members):
+        (collection_dir / "documents" / "late.json").write_text("{}", encoding="utf-8")
+        return real_verify(collection_dir, members)
+
+    monkeypatch.setattr(pkg, "verify_members", drifting)
+    code = _package(workspace, monkeypatch)
+    out = _combined(capsys, code)
+    assert code != 0 and "changed between the scan and the tar" in out
+    # The dirty sweep report would also have refused — the point is which line
+    # the operator is shown, and it is the one about the directory moving.
+    assert "unknown person reference" not in out
