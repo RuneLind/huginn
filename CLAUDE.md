@@ -514,6 +514,15 @@ is five figures of occurrences; a regex cannot read them).
   itself start with `_`). A cached document's `unknown_count` still lands in the
   run total — an incremental that skipped the one dirty document and reported
   zero would flip the packaging gate from refuse to pass with nothing fixed.
+- **An unread run is not a clean run.** The report counts the model answers this
+  script could not parse, and a run past `MAX_PARSE_FAILURE_RATIO` (20% of
+  calls) is `degraded` in the ledger, prints `RESULT: INCONCLUSIVE`, and is
+  **warned on rather than passed** by the packaging gate. `unknownCount: 0` out
+  of a run where the model answered nothing readable is indistinguishable from a
+  genuinely clean collection — the same vacuous pass that `index_scan`'s
+  map-entry and gazetteer floors exist to prevent. Measured rate on the real
+  corpus: 5 of 117 calls (4.3%) on the nav-wiki `--limit 50` baseline. Reports
+  written before this check carry neither field and stay readable.
 - **Outputs.** A gitignored JSON report at
   `<private-sub-repo>/privacy/sweep_<collection>_<date>.json` (real strings, for
   triage; falls back to `data/privacy/`, and an explicit `--report-out` is

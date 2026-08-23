@@ -95,6 +95,17 @@ OLLAMA_TAGS_URL = "http://localhost:11434/api/tags"
 WINDOW_CHARS = 6000
 WINDOW_OVERLAP = 200
 
+# The share of model calls that may go unread before the run's verdict stops
+# meaning anything. `unknownCount: 0` from a run where the model answered
+# nothing readable is indistinguishable, in the report, from a genuinely clean
+# collection — and it is the shape a vacuous pass takes here, exactly as an
+# empty needle list is in `index_scan`. So a run past this ratio is `degraded`
+# in the ledger and the packaging gate declines to read it as clean.
+# 0.2 sits well above the measured rate on the real corpus (5 of 117 calls,
+# 4.3%, on the nav-wiki --limit 50 baseline) and well below a run that has
+# stopped working.
+MAX_PARSE_FAILURE_RATIO = 0.2
+
 # Kinds the model may return. Anything else is coerced to `other` rather than
 # dropped — the classification below is what decides, not the model's label.
 KINDS = ("full_name", "given_name", "surname", "handle", "initials", "role")
@@ -354,6 +365,18 @@ def report_path(collection: str, out_dir=None, today=None) -> Path:
     return directory / f"{REPORT_PREFIX}{collection}_{stamp}.json"
 
 
+def answers_are_readable(windows, parse_failures) -> bool:
+    """Did enough of the run come back readable for its verdict to mean anything?
+
+    A run that asked nothing at all (every document cached) is vacuously fine —
+    the cached verdicts are what carry it. A run that asked and could not read
+    the answers is not.
+    """
+    if not isinstance(windows, int) or not isinstance(parse_failures, int) or windows <= 0:
+        return True
+    return parse_failures <= windows * MAX_PARSE_FAILURE_RATIO
+
+
 def _read_report(path: Path):
     try:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -410,6 +433,12 @@ def sweep_gate(collection: str, manifest: dict, dirs=None):
     if updated and generated < _normalise_stamp(updated):
         return "refuse", (f"the local sensitivity sweep ({path.name}) is older than the "
                           f"collection's last rebuild — it judged text that is no longer there")
+    if not answers_are_readable(payload.get("windows"), payload.get("parseFailures")):
+        # WARN rather than refuse: this is the same standing as never having run
+        # the sweep at all, which is what a run this unreadable amounts to.
+        return "warn", (f"the local sensitivity sweep ({path.name}) could not read "
+                        f"{payload.get('parseFailures')} of {payload.get('windows')} model "
+                        f"answers — its clean verdict is not evidence. Re-run it")
     return "pass", f"local sensitivity sweep {path.name}: clean"
 
 
@@ -738,7 +767,8 @@ def main(argv=None) -> int:
     print(f"\nreport: {destination}")
 
     unknown = result["unknownCount"]
-    status = "degraded" if unknown else "succeeded"
+    readable = answers_are_readable(result["windows"], result["parseFailures"])
+    status = "degraded" if (unknown or not readable) else "succeeded"
     if not args.no_ledger:
         where = report_run(
             ledger_record(status, started_at=started_at, finished_at=generated_at,
@@ -758,6 +788,14 @@ def main(argv=None) -> int:
         print(f"\nRESULT: {unknown} unknown person reference(s) — triage the report before "
               f"packaging this collection.")
         return 2
+    if not readable:
+        # Exit 0 still: the documented codes are 0/2/1 and the nightly phase is
+        # non-fatal. The degradation travels where it is acted on — the ledger
+        # row and the packaging gate, which both decline to call this clean.
+        print(f"\nRESULT: INCONCLUSIVE — {result['parseFailures']} of {result['windows']} "
+              f"model answers were unreadable, so 'no unknown persons' is not evidence. "
+              f"Re-run before relying on this report.")
+        return 0
     print("\nRESULT: clean — the local model found no person reference the map does not "
           "already account for.")
     return 0

@@ -517,3 +517,62 @@ class TestCli:
             _cli(cli_workspace, monkeypatch, {},
                  extra=["--report-out", str(REPO_ROOT / "docs" / "sweep.json")])
         assert "REFUSED" in str(exit_info.value)
+
+
+# --- a run nobody could read is not a clean run -------------------------------
+#
+# `unknownCount: 0` from a run where the model answered nothing readable looks,
+# in the report, exactly like a genuinely clean collection. That is the shape a
+# vacuous pass takes here — the same failure `index_scan`'s map-entry and
+# gazetteer floors exist to prevent.
+
+class TestUnreadableRuns:
+    def test_a_run_within_the_failure_budget_is_readable(self):
+        assert sweep.answers_are_readable(117, 5)
+
+    def test_a_run_past_the_budget_is_not(self):
+        assert not sweep.answers_are_readable(117, 38)
+
+    def test_a_run_that_asked_nothing_is_vacuously_readable(self):
+        """Every document cached: the cached verdicts are what carry the run."""
+        assert sweep.answers_are_readable(0, 0)
+
+    def test_the_gate_will_not_call_an_unreadable_report_clean(self, tmp_path):
+        path = tmp_path / "sweep_demo_2026-08-23.json"
+        path.write_text(json.dumps({"collection": "demo",
+                                    "generatedAt": "2026-08-22T00:00:00Z",
+                                    "unknownCount": 0, "windows": 100,
+                                    "parseFailures": 90}), encoding="utf-8")
+        status, message = sweep.sweep_gate("demo", {"updatedTime": "2026-08-20T00:00:00+00:00"},
+                                           dirs=[tmp_path])
+        assert status == "warn" and "not evidence" in message
+
+    def test_an_unknown_person_still_outranks_unreadability(self, tmp_path):
+        """A refusal must not be downgraded to a warning by a bad answer rate."""
+        path = tmp_path / "sweep_demo_2026-08-23.json"
+        path.write_text(json.dumps({"collection": "demo",
+                                    "generatedAt": "2026-08-22T00:00:00Z",
+                                    "unknownCount": 2, "windows": 100,
+                                    "parseFailures": 90}), encoding="utf-8")
+        assert sweep.sweep_gate("demo", {}, dirs=[tmp_path])[0] == "refuse"
+
+    def test_an_older_report_without_the_fields_is_still_readable(self, tmp_path):
+        """Reports written before this check carry neither field; they must not
+        all become warnings retroactively."""
+        _report(tmp_path, "demo", generated_at="2026-08-22T00:00:00Z")
+        assert sweep.sweep_gate("demo", {}, dirs=[tmp_path])[0] == "pass"
+
+    def test_the_cli_reports_inconclusive_and_degrades_the_run(
+            self, cli_workspace, monkeypatch, capsys):
+        _collection(cli_workspace / "collections", [("a.md", "x" * 20000)])
+        monkeypatch.setattr(sweep, "call_ollama", lambda prompt, **kw: "I cannot help")
+        code = sweep.main([
+            "--collection", "demo",
+            "--collections-dir", str(cli_workspace / "collections"),
+            "--cache-dir", str(cli_workspace / "cache"),
+            "--api-url", "http://127.0.0.1:59999", "--baseline",
+        ])
+        assert code == 0 and "INCONCLUSIVE" in capsys.readouterr().out
+        run = IndexingRunLedger(runs_dir=str(cli_workspace / "runs")).recent(
+            sweep.LEDGER_COLLECTION)[-1]
+        assert run["status"] == "degraded"
