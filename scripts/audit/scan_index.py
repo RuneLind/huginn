@@ -28,6 +28,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
+from main.privacy import DEFAULT_PRIVACY_DIR  # noqa: E402
 from main.privacy.alias_registry import (  # noqa: E402
     PrivacyMapMissing, _load_ident_exceptions, discover_map_path,
 )
@@ -40,7 +41,7 @@ BIGRAM_ALLOWLIST_GLOB = "huginn-*/privacy/non_person_bigrams.json"
 # not by a second copy of the globs here. The gate has to verify with the map the
 # BUILD substituted with; two independent resolvers is how it ends up verifying
 # with a different one. `alias_registry.REPO_ROOT` is what a test repoints.
-DEFAULT_CANDIDATES_DIR = REPO_ROOT / "data" / "privacy"
+DEFAULT_CANDIDATES_DIR = DEFAULT_PRIVACY_DIR
 
 
 def resolve_allowlist(explicit: str | None, repo_root: Path | None = None):
@@ -75,45 +76,74 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def enclosing_repo(path: Path):
+    """The nearest ancestor that is a git checkout, or None.
+
+    ``.git`` as a FILE counts — that is a worktree or a submodule, and both are
+    repositories with their own ignore rules.
+    """
+    for candidate in (path, *path.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
 def refuse_if_tracked(explicit) -> Path:
-    """Resolve a caller-supplied output path, or exit if git would track it.
+    """Resolve an output path, or exit if git would track it.
 
     Shared with ``scripts/audit/sensitivity_sweep.py``, which writes the other
     output that contains real names. One copy, because a second implementation of
     a guard like this drifts in exactly the direction that costs nothing to write
     and everything to discover.
 
-    Absolute FIRST. `check-ignore` runs with `cwd=REPO_ROOT` while the write later
-    resolves against the process CWD, so a relative path had the two steps
+    Absolute FIRST. `check-ignore` used to run with `cwd=REPO_ROOT` while the
+    write resolves against the process CWD, so a relative path had the two steps
     answering about two different files: `--candidates-out out.json` from inside
     `data/` was refused because `<repo>/out.json` is tracked territory, and the
     mirror image — ignored at the root, tracked where the caller stands — would
-    have been allowed and then written into a tracked directory. That is the
-    failure this guard exists to prevent.
+    have been allowed and then written into a tracked directory.
+
+    And the question is asked INSIDE the repository that owns the path. The
+    default report and candidate directories live in private `huginn-*/`
+    sub-repos, which are separate checkouts: run from this repo, `check-ignore`
+    consults THIS repo's rules (`.git/info/exclude`, `core.excludesFile`, the
+    root `.gitignore`) about a file another repository will actually commit or
+    not. A sub-repo that ignores its own `privacy/` via `.git/info/exclude` was
+    reported as tracked and the write refused; the mirror image — a path this
+    repo ignores because `huginn-*/` is ignored here, while the sub-repo tracks
+    it — would have been allowed, and that one ships real names.
+
+    A path with no enclosing checkout is allowed: nothing can track it.
     """
     path = Path(explicit).expanduser().resolve()
+    repo = enclosing_repo(path)
+    if repo is None:
+        return path
     ignored = subprocess.run(["git", "check-ignore", "-q", str(path)],
-                             cwd=REPO_ROOT, capture_output=True)
+                             cwd=repo, capture_output=True)
     # 0 = ignored, 1 = not ignored, 128 = not a git checkout / outside the repo.
     if ignored.returncode == 1:
-        sys.exit(f"REFUSED: {path} is not gitignored, and it is an output that contains real "
-                 f"names. Write it under data/ or inside a private huginn-*/ sub-repo.")
+        sys.exit(f"REFUSED: {path} is not gitignored in {repo}, and it is an output that "
+                 f"contains real names. Write it under data/ or inside a private "
+                 f"huginn-*/ sub-repo that ignores it.")
     return path
 
 
 def candidates_destination(explicit: str | None, collection: str) -> Path:
-    """Where the ONE output with real text in it may be written.
+    """Where the capitalised-pair candidate list may be written.
 
-    Default: ``data/privacy/`` — `data/` is gitignored wholesale, so the default
-    cannot land a list of real names in a tracked file. An explicit path is
-    checked with `git check-ignore` and refused if git would track it. The
-    campaign has already had to rewrite history once over a real name in this
+    Default: ``data/privacy/`` — `data/` is gitignored wholesale. EVERY path goes
+    through `refuse_if_tracked`, the default included: "gitignored wholesale" is
+    a property of a `.gitignore` this script does not own, and checking only the
+    explicit path means the one route nobody thinks about is the unchecked one.
+    The campaign has already had to rewrite history once over a real name in this
     repo; a `--candidates-out report.json` typo is the same mistake with a
     shorter fuse.
     """
     if not explicit:
         DEFAULT_CANDIDATES_DIR.mkdir(parents=True, exist_ok=True)
-        return DEFAULT_CANDIDATES_DIR / f"scan_candidates_{collection}.json"
+        return refuse_if_tracked(
+            DEFAULT_CANDIDATES_DIR / f"scan_candidates_{collection}.json")
     return refuse_if_tracked(explicit)
 
 

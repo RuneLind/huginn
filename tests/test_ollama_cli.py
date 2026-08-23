@@ -196,15 +196,33 @@ class TestDefaultModelPropagation:
             assert re.search(r'--ollama-model"[^)]*default=DEFAULT_OLLAMA_MODEL', source), path
 
     def test_the_graph_extractor_pins_its_own(self):
-        """Its `--model` default must be a literal, not this constant — the A/B
-        that would justify moving it has not been run at a size that decides."""
+        """Its `--model` default is a LITERAL, and this is which one.
+
+        `!= DEFAULT_MODEL` was the whole assertion, which holds for any literal
+        at all — including one someone changes to a third model by accident. The
+        extraction cache is keyed by document id rather than by model, so a
+        changed pin silently produces a graph mixing two models' output; the
+        value is the thing worth guarding, and the A/B that would justify moving
+        it has not been run at a size that decides.
+        """
         import re
 
         source = (REPO_ROOT / "scripts" / "knowledge_graph"
                   / "extract_entities_llm.py").read_text(encoding="utf-8")
         match = re.search(r'"--model",\s*default="([^"]+)"', source)
         assert match, "the extractor no longer pins a literal --model default"
-        assert match.group(1) != DEFAULT_MODEL
+        assert match.group(1) == "qwen3.6:35b-a3b-coding-nvfp4"
+
+    def test_the_contextual_prefix_ollama_backend_pins_its_own(self):
+        """Same argument, same cache shape: the contextual prefixes stored on a
+        collection carry no model id, so re-running under another model leaves a
+        collection whose chunks were prefixed by two."""
+        from main.core.contextual_prefix.backends.ollama_backend import OllamaBackend
+
+        import inspect
+
+        pinned = inspect.signature(OllamaBackend.__init__).parameters["model"].default
+        assert pinned == "qwen3.6:35b-a3b-nvfp4" != DEFAULT_MODEL
 
     def test_the_sweep_inherits_it(self):
         from scripts.audit import sensitivity_sweep

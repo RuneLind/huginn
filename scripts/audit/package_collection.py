@@ -51,10 +51,13 @@ rather than about what is inside it:
   built before aliasing", and no scan can tell which part.
 
 And one refusal after it: the LOCAL sensitivity sweep
-(``scripts/audit/sensitivity_sweep.py``). A sweep that found an unknown person,
-or one that ran before the collection was last rebuilt, refuses. NO sweep report
-at all only WARNs — the sweep is a second opinion, and making a hand-off depend
-on a local GPU being up is how a gate gets routed around.
+(``main/privacy/sensitivity_sweep.sweep_gate``). A sweep that found an unknown
+person refuses, whatever its coverage — that is positive evidence. Everything
+that merely makes a CLEAN verdict unreliable warns and says which: no report, a
+`--limit`ed one, one whose model answers were mostly unreadable, one produced
+under a different map / policy / model, or one that read the collection before
+its documents last changed. The sweep is a second opinion, and making a hand-off
+depend on a local GPU being up is how a gate gets routed around.
 """
 import argparse
 import gzip
@@ -76,8 +79,8 @@ from main.privacy.alias_registry import (  # noqa: E402
 from main.privacy.index_scan import (  # noqa: E402
     CHECK_NAMES, GIVEN_NAMES_FILE, scan_collection,
 )
+from main.privacy.sensitivity_sweep import sweep_gate  # noqa: E402
 from scripts.audit.scan_index import DEFAULT_COLLECTIONS_DIR, resolve_allowlist  # noqa: E402
-from scripts.audit.sensitivity_sweep import sweep_gate  # noqa: E402
 
 STAMP_NAME = "PACKAGE-STAMP.json"
 
@@ -257,6 +260,11 @@ def main() -> None:
                          "--compare to a warning.")
     ap.add_argument("--allowed-bigrams", default=None,
                     help="Reviewed non-person bigram allow-list (default: the discovered one)")
+    ap.add_argument("--sweep-reports", default=None,
+                    help="Directory to read local sensitivity sweep reports from (default: "
+                         "the private huginn-*/privacy/ dirs, then data/privacy/). For "
+                         "certifying an unpacked copy on a machine that is not the one that "
+                         "swept it.")
     ap.add_argument("--force", action="store_true",
                     help="Overwrite an existing tarball of the same name.")
     args = ap.parse_args()
@@ -301,18 +309,29 @@ def main() -> None:
         sys.exit(f"\nREFUSED: the scan failed ({', '.join(failed)}). Nothing was written. "
                  f"Run scripts/audit/scan_index.py --candidates-out … to triage.")
 
-    manifest = json.loads((collection_dir / "manifest.json").read_text(encoding="utf-8"))
-    sweep_status, sweep_message = sweep_gate(args.collection, manifest)
-    print(f"\nsweep: {sweep_message}")
-    if sweep_status == "refuse":
-        sys.exit(f"\nREFUSED: {sweep_message}")
-    if sweep_status == "warn":
-        print("WARN: packaging without a local second opinion.")
-
+    # Drift BEFORE the sweep gate: it is a stat() walk of a directory that was
+    # just read, while the gate globs several directories and parses every
+    # report it finds. When the collection moved under us nothing else matters,
+    # and the cheap refusal should not wait behind the expensive one.
     drifted = verify_members(collection_dir, report.scanned_members)
     if drifted:
         sys.exit(f"\nREFUSED: the collection changed between the scan and the tar, so the "
                  f"tarball would carry files nothing certified: {'; '.join(drifted[:5])}")
+
+    manifest = json.loads((collection_dir / "manifest.json").read_text(encoding="utf-8"))
+    sweep_status, sweep_message = sweep_gate(
+        args.collection, manifest,
+        dirs=[Path(args.sweep_reports)] if args.sweep_reports else None,
+        map_version=report.map_version)
+    print(f"\nsweep: {sweep_message}")
+    if sweep_status == "refuse":
+        sys.exit(f"\nREFUSED: {sweep_message}")
+    if sweep_status == "warn":
+        # The message says WHICH warning this is — no report, a limited one, an
+        # unreadable one, drifted inputs, a changed collection. "packaging
+        # without a local second opinion" was printed for all five, so four of
+        # them were reported as the one that is least alarming.
+        print(f"WARN: packaging anyway — {sweep_message}")
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)

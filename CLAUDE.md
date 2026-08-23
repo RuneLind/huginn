@@ -464,92 +464,35 @@ map stays local.
 
 ### Local sensitivity sweep
 
-`scripts/audit/sensitivity_sweep.py` is the **second opinion** on a built
-collection: the deterministic gate proves no *listed* name survived, and this
-asks a local model who is named that the map never heard of. Two questions
-`index_scan.py` structurally cannot answer — a person in any form other than
-the capitalised bigram check 9 retains (a mononym, a bare surname, an
-initials-plus-surname byline, a role phrase naming one individual), and whether
-a bare given name standing in prose is a person reference at all (the residual
-is five figures of occurrences; a regex cannot read them).
+The **second opinion** on a built collection: the gate proves no *listed* name
+survived; the sweep asks a local model who is named that the map never heard of.
+Reasoning is in the docstrings of `main/privacy/sensitivity_sweep.py` and its CLI
+`scripts/audit/sensitivity_sweep.py` (`--baseline` = all documents, default =
+the changed ones, `--limit N` = a priced sample).
 
-```sh
-.venv/bin/python scripts/audit/sensitivity_sweep.py --collection <name> --baseline
-.venv/bin/python scripts/audit/sensitivity_sweep.py --collection <name>            # incremental
-```
-
-- **Local by requirement, not by preference.** The transport is
-  `main/utils/ollama_cli.py` and there is no `--backend` flag. A sensitivity
-  check that ships document text to a hosted model *is* the leak it is looking
-  for. Same rule as `tag_documents.py`'s external-backend refusal, one step
-  further: here there is no external backend to refuse.
-- **It reads the DERIVED documents** (`data/collections/<name>/documents/*.json`
-  — already aliased), never `data/sources/`. The point is what a recipient of
-  the tarball would see.
-- **Two modes.** `--baseline` asks about every document (`--limit N` bounds a
-  priced sample to the first N). The default asks only about documents whose
-  text hash changed since the cache — that is the mode the nightly job runs.
-- **Model policy.** `--model` defaults to `main/utils/ollama_cli.DEFAULT_MODEL`
-  (`qwen3.8:27b-mlx`), the general-purpose local model the tagging scripts also
-  inherit. The knowledge-graph extractor and the contextual-prefix backend keep
-  their own pins: their caches are keyed by document id, not by model, so a swap
-  silently produces a hybrid artifact. The A/B behind that split (5 documents of
-  `melosys-confluence-v3`, coding pin vs. this default) is in the PR that
-  introduced the constant; it did not decide, so the extractor did not move.
-- **Deterministic pre/post-processing does the judging, not the model.** A
-  reference is dropped when it is not a verbatim substring of the document (an
-  invented name is the finding a human spends the whole triage budget on), and
-  when it is an exempt `non_person_labels` entry or a reviewed
-  `non_person_bigrams.json` pair. What is left is bucketed `alias` (an alias or
-  a redaction token — the substituter working), `mapped_residual` (a *bare*
-  given name the map knows, via `AliasRegistry.given_names` plus the map's
-  `bare_given_name_residual` keys — a deliberate non-substitution, counted not
-  alarmed on) or `unknown_person`, which fails the sweep.
-- **Cache.** `data/state/sensitivity/<collection>.json`, an envelope
-  `{policy_version, model, entries: {doc_id: {hash, findings_count,
-  unknown_count}}}` where `hash` is `sha256(text + POLICY_VERSION + model)`. All
-  three change the answer, so all three are in the key; the envelope repeats the
-  policy and model so a changed one is reported once rather than per entry (and
-  an envelope is used rather than `_`-prefixed sibling keys because a doc id may
-  itself start with `_`). A cached document's `unknown_count` still lands in the
-  run total — an incremental that skipped the one dirty document and reported
-  zero would flip the packaging gate from refuse to pass with nothing fixed.
-- **An unread run is not a clean run.** The report counts the model answers this
-  script could not parse, and a run past `MAX_PARSE_FAILURE_RATIO` (20% of
-  calls) is `degraded` in the ledger, prints `RESULT: INCONCLUSIVE`, and is
-  **warned on rather than passed** by the packaging gate. `unknownCount: 0` out
-  of a run where the model answered nothing readable is indistinguishable from a
-  genuinely clean collection — the same vacuous pass that `index_scan`'s
-  map-entry and gazetteer floors exist to prevent. Measured rate on the real
-  corpus: 5 of 117 calls (4.3%) on the nav-wiki `--limit 50` baseline. Reports
-  written before this check carry neither field and stay readable.
-- **Outputs.** A gitignored JSON report at
-  `<private-sub-repo>/privacy/sweep_<collection>_<date>.json` (real strings, for
-  triage; falls back to `data/privacy/`, and an explicit `--report-out` is
-  refused unless `git check-ignore` already covers it). Everything on stdout is
-  a count or a shape. Exit `0` clean, `2` on an `unknown_person`, `1` when
-  Ollama is unreachable.
-- **Ledger.** Every run is recorded under the collection key
-  `sensitivity-audit` with a single `sweep` phase, `fatal: true` — `succeeded`
-  clean, `degraded` on unknown persons, `failed` when the model was unreachable
-  (a sweep that judged nothing must not read like one that found nothing). Not
-  the swept collection's own key: a sweep is not an indexing run of it, and
-  folding the two would put a `degraded` sweep on the row a reader uses to
-  answer "is the index fresh". `/api/indexing/jobs` shows it with
-  `loaded: false` by design. It POSTs to `/api/indexing/runs` and falls back to
-  an in-process `IndexingRunLedger().append` — the same writer, same flock, that
-  `scripts/lib/indexing_run.sh` shells out to.
-- **Packaging interaction.** `package_collection.py` consults the latest report
-  for the collection: an `unknownCount > 0` **refuses**, and so does a report
-  older than the collection's `updatedTime` (a clean verdict about text that has
-  since been rebuilt certifies nothing). **No report at all only WARNs** — the
-  sweep is a second opinion, and making a hand-off depend on a local GPU being
-  up is how a gate gets routed around. The verdict is stamped into
-  `PACKAGE-STAMP.json` as `sensitivitySweep`.
-- **Scheduling.** Wired into the helper-instrumented private daily scripts as a
-  non-fatal `sensitivity` phase after the reindex. The Confluence and Jira daily
-  scripts are **not** wired: they are not helper-instrumented and fire their
-  reindex without polling it, so a sweep there would read a half-rebuilt index.
+- **Local by requirement** — transport is `main/utils/ollama_cli.py`, no
+  `--backend` flag, `--model` defaults to `ollama_cli.DEFAULT_MODEL`. The graph
+  extractor and contextual-prefix backend pin their own: those caches are keyed
+  by doc id, not model, so a swap yields a hybrid artifact.
+- **The model does not judge.** Answers are filtered deterministically (verbatim
+  containment, aliases, redaction tokens, `non_person_labels`, reviewed bigrams)
+  into `alias`/`mapped_residual`/`role`/`unknown_person`; only the last blocks.
+  Cache `data/state/sensitivity/<collection>.json` keys on text + policy + model
+  + map version + allow-list sha; unread window = uncached, cached unknowns keep
+  their strings.
+- **Report** — gitignored, the only output with real strings:
+  `sweep_<collection>_<date>_<mode>[-limitN].json` under a private sub-repo's
+  `privacy/` else `data/privacy/`; stdout is counts and shapes. Exit `0` clean,
+  `2` an unknown person survived, `1` no collection / no map / no Ollama.
+- **Packaging gate** (`sweep_gate`, `--sweep-reports` to relocate):
+  `unknownCount > 0` refuses; what only makes a *clean* verdict unreliable warns
+  — no report, a limited/partial one, unreadable answers, a different
+  map/policy/model, a moved `lastModifiedDocumentTime` (not `updatedTime`,
+  which a no-op reindex bumps).
+- **Ledger** key `sensitivity-audit`, one fatal `sweep` phase, `variant`
+  `rebuild` for `--baseline`, swept collection in `detail.collection`. Per the
+  routing convention a helper-wired daily script may add a non-fatal
+  `sensitivity` phase after its reindex — one does today.
 
 ## LLM entity extraction (knowledge graph)
 
