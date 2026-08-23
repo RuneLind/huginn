@@ -860,5 +860,8 @@ def test_a_dotless_i_in_the_text_does_not_hide_a_needle_the_pattern_matches():
 
 
 def test_overlapping_occurrences_of_the_bucket_word_are_all_anchors():
-    scanner = index_scan.NeedleScanner(["Ada Example00"])
-    assert scanner.findall("adAda Example00") == ["Ada Example00"]
+    # A slug's left boundary admits a preceding word char, so the occurrence
+    # of `ada` at offset 2 of `adada.example00` is a real hit; a
+    # non-overlapping anchor search would have consumed it inside the first.
+    scanner = index_scan.NeedleScanner(["ada.example00"])
+    assert scanner.findall("adada.example00") == ["ada.example00"]
