@@ -23,6 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "audit"))
 
 import package_collection as pkg  # noqa: E402
+from main.privacy import index_scan  # noqa: E402
 import scan_index as cli  # noqa: E402
 from tests.test_scan_index import _clean_document, _document, _map, _write_collection  # noqa: E402
 
@@ -108,6 +109,28 @@ def test_a_clean_collection_is_packaged(workspace, monkeypatch, capsys):
     assert stamp["numberOfDocuments"] == 1
     assert stamp["scanChecks"]["bigram_candidates"] == {"passed": True, "count": 0,
                                                         "ran": True}
+
+
+def test_the_untarred_package_rescans_clean(workspace, monkeypatch, capsys, tmp_path):
+    """The recipient's half of the hand-off, and the one path check 12 must not
+    break: the tarball unpacks to `data/collections/<name>/`, so the directory
+    name it lands under is the one the mapping's `documentPath` prefixes name.
+    A check keyed off anything else fails every package the moment it is opened.
+    """
+    _write_collection(workspace / "collections", "demo-aliased",
+                      documents=[_clean_document(0), _clean_document(1)])
+    _package(workspace, monkeypatch)
+    capsys.readouterr()
+
+    unpacked = tmp_path / "recipient"
+    with tarfile.open(next((workspace / "out").glob("*.tar.gz"))) as tar:
+        tar.extractall(unpacked, filter="data")
+
+    report = index_scan.scan_collection(
+        unpacked / "data" / "collections" / "demo-aliased",
+        workspace / "huginn-x" / "privacy" / "aliases.json")
+    assert report.check("document_paths").passed is True
+    assert report.passed is True
 
 
 @pytest.mark.parametrize("text,failing_check", [

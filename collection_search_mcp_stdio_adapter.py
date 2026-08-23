@@ -69,6 +69,7 @@ def main():
         max_number_of_documents=args['maxNumberOfDocuments'],
         include_full_text=args['includeFullText'],
         trace_default=TRACE_DEFAULT,
+        alias_registry=store.get_alias_registries().get(args['collection']),
     )
     mcp.tool(name=f"search_{args['collection']}", description=tool_description)(search_fn)
 

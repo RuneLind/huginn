@@ -87,6 +87,61 @@ def parking_path(name: str) -> Path:
     return PREALIAS_DIR / f"{name}-{date.today().isoformat()}"
 
 
+INDEX_MAPPING = "indexes/index_document_mapping.json"
+
+
+def rewrite_document_paths(collection_dir: Path, temp_name: str, name: str) -> int:
+    """Repoint every ``documentPath`` from the temp build name to the real one.
+
+    The build runs under `<name>-aliased`, so the mapping it writes records
+    `<name>-aliased/documents/<id>.json`. `swap()` renames the *directory*, and
+    nothing used to rewrite those paths — all three live collections then served
+    empty chunk texts, silently, at every reranked query (the incident is
+    written up in CLAUDE.md, "Build-time people aliasing").
+
+    Called by `swap()` AFTER the rename, never by the build: until the directory
+    is actually `<name>`, `<name>-aliased/documents/…` is the *correct* answer,
+    and a temp collection that is served or scanned in place has to read its own
+    aliased documents.
+
+    Written to a sibling temp file and `os.replace`d, so an interrupted rewrite
+    cannot leave a mapping that is half one prefix and half the other.
+
+    Returns the number of entries changed (0 when already rewritten).
+    """
+    path = collection_dir / INDEX_MAPPING
+    mapping = json.loads(path.read_text(encoding="utf-8"))
+    stale, real = f"{temp_name}/", f"{name}/"
+    changed = 0
+    for entry in mapping.values():
+        document_path = entry.get("documentPath", "")
+        if document_path.startswith(stale):
+            entry["documentPath"] = real + document_path[len(stale):]
+            changed += 1
+    if changed:
+        temp = path.with_name(path.name + ".tmp")
+        temp.write_text(json.dumps(mapping, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(temp, path)
+    return changed
+
+
+def stale_temp_paths(collection_dir: Path, temp_name: str) -> list:
+    """Relative paths of `indexes/` JSON still spelling the temp collection name.
+
+    `rewrite_document_paths` only touches the mapping, because that is the one
+    built artifact stamped with the collection name (the reverse mapping is
+    keyed by document id, `index_info.json` holds a counter, and the manifest's
+    `collectionName` is rewritten separately). Rather than trust that list to
+    stay true, the swap re-derives it: any `indexes/` JSON still carrying
+    `<temp_name>/` is a refusal. Only JSON — the indexer blobs beside it are
+    pickles, and searching them for a name would be a decode error, not a check.
+    """
+    needle = f"{temp_name}/".encode()
+    return sorted(path.relative_to(collection_dir).as_posix()
+                  for path in (collection_dir / "indexes").rglob("*.json")
+                  if needle in path.read_bytes())
+
+
 def stamp_mismatch(manifest: dict, policy_version: int, map_version) -> str | None:
     """Why this manifest is not a build of the current map, or None."""
     stamp = manifest.get("privacy")
@@ -167,9 +222,13 @@ def build(name: str, temp_name: str, workers: int) -> None:
         if problem:
             sys.exit(f"{temp_name}: {problem}. Refusing to leave a build that cannot be swapped.")
 
-    # The temp collection records its own name; the swap makes it the real one.
-    temp_manifest["collectionName"] = name
-    temp_manifest_path.write_text(json.dumps(temp_manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    # Nothing is renamed here. The build leaves a collection that names ITSELF —
+    # manifest `collectionName` and every `documentPath` say `<name>-aliased` —
+    # so it is internally consistent as it sits: servable, and scannable (the
+    # gate's check 12 keys off the directory name and requires the manifest to
+    # agree with it). Rewriting either one before the directory moves would
+    # leave, on any later refusal, a directory whose own manifest claims to be
+    # another collection. `swap()` renames first and repoints after.
     print(f"\n{temp_name}: {temp_manifest['numberOfDocuments']} docs, "
           f"{temp_manifest['numberOfChunks']} chunks, privacy={temp_manifest.get('privacy')}")
 
@@ -188,6 +247,16 @@ def swap(name: str, temp_name: str, api_base: str) -> None:
     if problem:
         sys.exit(f"{temp_name}: {problem}. Refusing to swap it over {name}.")
 
+    # Everything the post-rename rewrite needs, checked BEFORE anything moves.
+    # The rewrite cannot run earlier (until the directory is renamed the temp
+    # prefixes are correct), so a build that never produced an index must be
+    # refused here — after the rename there is no live collection to fall back
+    # to, and a mapping still pointing into `<temp_name>/documents/` resolves to
+    # nothing: empty chunk texts, no error anywhere.
+    if not (aliased / "indexes").is_dir() or not (aliased / INDEX_MAPPING).is_file():
+        sys.exit(f"{temp_name}: no {INDEX_MAPPING} — this is not a finished build, "
+                 f"and the swap could not repoint it. Refusing to touch {name}.")
+
     parked = parking_path(name)
     if parked.exists():
         sys.exit(f"Refusing to overwrite an existing parked collection: {parked}")
@@ -196,6 +265,30 @@ def swap(name: str, temp_name: str, api_base: str) -> None:
     shutil.move(str(live), str(parked))
     shutil.move(str(aliased), str(live))
     print(f"swapped: {name} -> {parked}, {temp_name} -> {name}")
+
+    # Rename, then repoint, then verify. The collection now IS `<name>`, so this
+    # is the first moment at which `<name>/documents/…` is the right answer.
+    manifest_path = live / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["collectionName"] = name
+        manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False),
+                                 encoding="utf-8")
+        print(f"repointed {rewrite_document_paths(live, temp_name, name)} documentPath prefixes")
+    except (OSError, ValueError) as exc:
+        # After the rename the live directory may now hold temp-prefixed paths —
+        # the silent-empty-chunks state. Say where the way back is.
+        sys.exit(f"{name}: repointing failed after the rename ({exc}); the collection "
+                 f"in place may read no chunk texts. The pre-alias copy is at {parked}; "
+                 f"move it back and investigate.")
+
+    stale = stale_temp_paths(live, temp_name)
+    if stale:
+        # Non-zero, loudly: the directory is in place but unreadable, and the
+        # parked copy is the way back.
+        sys.exit(f"{name}: {stale} still spell {temp_name} after the rewrite — the "
+                 f"collection would read no chunk texts. The pre-alias copy is at "
+                 f"{parked}; move it back and investigate.")
 
     request = urllib.request.Request(f"{api_base}/api/collections/{name}/reload", method="POST")
     try:

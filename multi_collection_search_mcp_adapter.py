@@ -29,6 +29,7 @@ from mcp.server.fastmcp import FastMCP
 from main.core.mcp_search_tool import build_search_tool_fn
 from main.core.trace_store import TRACE_DEFAULT_ENV
 from main.graph.graph_search_augmenter import GraphSearchAugmenter
+from main.privacy.query_privacy import first_armed_registry
 from main.runtime.knowledge_store import get_store
 from main.runtime.stdio_search_args import add_search_tool_args
 from main.utils.env import env_bool
@@ -40,14 +41,27 @@ setup_root_logger()
 TRACE_DEFAULT = env_bool(TRACE_DEFAULT_ENV)
 
 
-def register_collection_tools(mcp, searchers, augmenter, **tool_kwargs):
-    """Register one MCP search tool per collection on the given FastMCP instance."""
+def register_collection_tools(mcp, searchers, augmenter, alias_registries=None, **tool_kwargs):
+    """Register one MCP search tool per collection on the given FastMCP instance.
+
+    ``alias_registries`` maps collection name -> AliasRegistry|None, so a
+    privacy-aliased collection's tool de-aliases the query (see
+    ``main/privacy/query_privacy.py``). Every tool also gets the *shared*
+    registry — the first armed one across all served collections — because a
+    real name typed at an out-of-scope collection's tool must not reach the log
+    or the trace either.
+    """
+    registries = alias_registries or {}
+    shared_registry = first_armed_registry(registries)
     for collection_name, searcher in searchers.items():
         tool_description = (
             f"Search in {collection_name} collection using vector search. "
             "Each document contains 'url' field - always include it in responses when citing information."
         )
-        search_fn = build_search_tool_fn(searcher, collection_name, augmenter, **tool_kwargs)
+        search_fn = build_search_tool_fn(
+            searcher, collection_name, augmenter,
+            alias_registry=registries.get(collection_name),
+            shared_registry=shared_registry, **tool_kwargs)
         mcp.tool(name=f"search_{collection_name}", description=tool_description)(search_fn)
 
 
@@ -79,6 +93,7 @@ def main():
         mcp,
         searchers,
         augmenter,
+        alias_registries=store.get_alias_registries(),
         max_number_of_chunks=args['maxNumberOfChunks'],
         max_number_of_documents=args['maxNumberOfDocuments'],
         include_full_text=args['includeFullText'],

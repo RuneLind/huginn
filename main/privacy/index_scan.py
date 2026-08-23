@@ -13,7 +13,8 @@ tokens, **3** NAV idents and **3b** their exceptions, **4** dotted handles,
 privacy stamp and contextual prefixes, **7** document ids and urls (never
 aliased by design), **8** every file read or the scan fails, **9** capitalised
 bigram candidates, **10** distributor fingerprints, **11**
-``sensitivity_scanner`` categories. ``benchmarks/pii/RESULTS.md`` carries the
+``sensitivity_scanner`` categories, **12** the index mapping still resolving to
+the documents on disk. ``benchmarks/pii/RESULTS.md`` carries the
 measurements; each check's own docstring carries its reasoning.
 
 SCOPE. Checks 1-8 certify that no *listed* form survives; they do not cover bare
@@ -62,7 +63,8 @@ WORD_SPLIT_RE = re.compile(r"[^\w]+")
 # backup file. `.bak` as a FILENAME is check 8; this is `.bak` inside content.
 FINGERPRINT_RE = re.compile(r"/Users/[\w.\-]+|(?<![\w])[\w.\-]*\.bak(?![\w])")
 
-JSON_ARTIFACTS = ("indexes/index_document_mapping.json",
+INDEX_MAPPING = "indexes/index_document_mapping.json"
+JSON_ARTIFACTS = (INDEX_MAPPING,
                   "indexes/reverse_index_document_mapping.json",
                   "manifest.json")
 BM25_INDEX = "indexes/indexer_BM25/indexer"
@@ -85,6 +87,7 @@ CHECKS = (
     ("9", "bigram_candidates"),
     ("10", "fingerprints"),
     ("11", "sensitive_tokens"),
+    ("12", "document_paths"),
 )
 CHECK_NAMES = tuple(name for _, name in CHECKS)
 
@@ -944,6 +947,82 @@ def _check_manifest_and_prefixes(root: Path, manifest, compare_root: Path | None
                  "; ".join(problems), notes=notes)
 
 
+def _path_prefix(document_path) -> str:
+    """The collection directory a ``documentPath`` names, for the report.
+
+    Only when there is one: a path with no ``/`` after its first segment has no
+    directory name to report, and printing what is left would be printing a
+    document filename — which IS a document id, and ids are never aliased
+    (check 7's whole premise).
+    """
+    head, separator, _ = (document_path or "").partition("/")
+    return head if (separator and head) else "(unrecognised)"
+
+
+def _check_document_paths(root: Path, manifest) -> Check:
+    """Check 12 — every mapped chunk still resolves to a document on disk.
+
+    The searcher reads chunk text through the mapping's ``documentPath``, and
+    resolves it against the collections directory — so the name that has to
+    match is the **directory's**, which is also what ``KnowledgeStore`` loads
+    the collection by. This check exists because a rebuild swap left the temp
+    prefix on every path and three collections served empty chunk texts for
+    weeks with no error anywhere (CLAUDE.md, "Build-time people aliasing").
+
+    Keying off ``manifest.collectionName`` instead made the check
+    self-consistent rather than true: a directory renamed or copied under
+    another name (a backup, a scratch copy, a hand-made "staged" tree) agrees
+    with its own manifest and serves nothing. So the manifest must ALSO name the
+    directory — that equality is part of the check.
+
+    No other check here could see any of this: they all read ``documents/*.json``
+    directly and never ask whether the index still points at them. This one
+    walks the join. Nothing corpus-controlled reaches the detail — the offending
+    *prefix* (a collection directory name) and counts, never a path.
+    """
+    collection = root.name
+    declared = (manifest or {}).get("collectionName")
+    if declared != collection:
+        return Check("12", "document_paths", False, 1,
+                     f"the manifest calls this collection {declared!r} but the "
+                     f"directory is {collection!r}; the searcher resolves every "
+                     f"documentPath against the directory, so the two must agree")
+
+    mapping, problem = _read_json(root / INDEX_MAPPING)
+    if problem is not None or not isinstance(mapping, dict):
+        return Check("12", "document_paths", False, 1,
+                     f"{INDEX_MAPPING} is missing or undecodable — the index cannot "
+                     f"be joined to the documents it claims to hold")
+    if not mapping:
+        # Every other check reads documents/*.json directly, so an index that
+        # maps nothing passes all of them — and this one vacuously too.
+        return Check("12", "document_paths", False, 1,
+                     f"{INDEX_MAPPING} maps no chunks at all; there is no join to "
+                     f"verify and nothing this collection can answer with")
+
+    expected = f"{collection}/documents/"
+    wrong_prefix, missing = Counter(), 0
+    for entry in mapping.values():
+        document_path = (entry.get("documentPath") or "") if isinstance(entry, dict) else ""
+        if not document_path.startswith(expected):
+            wrong_prefix[_path_prefix(document_path)] += 1
+            continue
+        relative = document_path[len(collection) + 1:]
+        if ".." in Path(relative).parts or not (root / relative).is_file():
+            missing += 1
+
+    count = sum(wrong_prefix.values()) + missing
+    if not count:
+        return Check("12", "document_paths", True, 0,
+                     f"{len(mapping)} mapped chunks, all under {expected} and all "
+                     f"resolving to a file")
+    return Check("12", "document_paths", False, count,
+                 f"of {len(mapping)} mapped chunks: {sum(wrong_prefix.values())} under a "
+                 f"foreign prefix {list(wrong_prefix)[:3]}, {missing} pointing at a file "
+                 f"that is not there — chunk texts unreadable, reranked queries would "
+                 f"return nothing")
+
+
 # --- entry point ------------------------------------------------------------
 
 def scan_collection(collection_dir, map_path, *, compare_dir=None, exceptions=(),
@@ -995,5 +1074,6 @@ def scan_collection(collection_dir, map_path, *, compare_dir=None, exceptions=()
             _check_exemption_invariant(compare_root, alias_map, exceptions, registry))
     report.checks.append(
         _check_manifest_and_prefixes(root, manifest, compare_root, scanner, allow_count_drift))
+    report.checks.append(_check_document_paths(root, manifest))
     report.checks.sort(key=lambda c: (int(re.match(r"\d+", c.number).group(0)), c.number))
     return report

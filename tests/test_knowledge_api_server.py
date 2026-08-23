@@ -1650,6 +1650,11 @@ class _IngestFakeStore:
         self.searchers_for.extend(names)
         return {n: self.searcher for n in names}
 
+    def get_searchers_and_registries(self, names):
+        # Nothing in scope here: the ingest similarity query is de-aliased only
+        # for a collection served from a privacy-aliased index.
+        return self.get_searchers(names), {n: None for n in names}
+
 
 class TestIngestContract:
     """Happy-path response contract over every registered ingest source.

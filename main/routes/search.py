@@ -8,6 +8,7 @@ from main.core.search_pipeline import run_search_request
 from main.core.search_trace import create_trace
 from main.core.trace_store import any_trace_enabled, default_trace_store, pointer_mode_enabled
 from main.graph.graph_search_augmenter import GraphSearchAugmenter
+from main.privacy.query_privacy import prepare_aliased_request
 from main.runtime.knowledge_store import KnowledgeStore, get_store
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,17 @@ def search(
         for c in collection:
             if not store.has_collection(c):
                 raise HTTPException(status_code=404, detail=f"Collection '{c}' not found")
-    target_searchers = store.get_searchers(collection)
+    # One lock acquisition for both, so a reload landing between two reads
+    # cannot pair a rebuilt searcher with the previous registry. The registries
+    # are every SERVED collection's, not the targeted subset: the request's
+    # SHARED text — trace, query log, retry hints, queriesTried — is de-aliased
+    # whenever any served collection is aliased, so a typed real name is never
+    # echoed back or persisted even by a request scoped away from it. The raw
+    # text survives only as the twin the pipeline hands to out-of-scope
+    # collections, whose indexes still spell people by name.
+    target_searchers, alias_registries = store.get_searchers_and_registries(collection)
+    prepared = prepare_aliased_request(q, alias_registries)
+    public_q = prepared.public_query
 
     has_filters = bool(project or git_branch or tags)
     overfetch = 5 if has_filters else 3
@@ -45,11 +56,14 @@ def search(
 
     trace_enabled = trace or any_trace_enabled()
     trace_obj = create_trace(trace_enabled)
-    trace_obj.set_query_raw(q)
+    trace_obj.set_query_raw(public_q)
 
-    augmenter = GraphSearchAugmenter(store.graph)
-    search_q, graph_answer, detected_entities = augmenter.augment_query(q, trace_obj)
-    if search_q != q:
+    # The graph is a pre-alias artifact; the registry keeps its labels and
+    # expansion terms out of the response whenever this request is aliased.
+    augmenter = GraphSearchAugmenter(store.graph, alias_registry=prepared.armed)
+    search_q, graph_answer, detected_entities, raw_terms = augmenter.augment_query(
+        public_q, trace_obj)
+    if search_q != public_q:
         logger.debug(f"Graph-expanded query: {search_q[:200]}")
 
     search_kwargs = dict(
@@ -70,7 +84,7 @@ def search(
 
     response = run_search_request(
         target_searchers,
-        raw_query=q,
+        raw_query=public_q,
         search_query=search_q,
         augmenter=augmenter,
         detected_entities=detected_entities,
@@ -80,6 +94,10 @@ def search(
         shape_kwargs=shape_kwargs,
         min_relevance=min_relevance,
         corrective_mode=corrective,
+        alias_registries=alias_registries,
+        shared_registry=prepared.armed,
+        unaliased_title_boost_query=prepared.title_boost_text(),
+        unaliased_search_query=prepared.expansion_twin(search_q, raw_terms),
     )
     if trace_enabled:
         trace_dict = trace_obj.to_dict()

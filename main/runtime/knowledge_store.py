@@ -36,6 +36,10 @@ class KnowledgeStore:
         self.shared_reranker = None
         self.disk_persister = None
         self.searchers = {}
+        # collection name -> AliasRegistry (in privacy scope) or None. Resolved
+        # once per (re)load, read on the search hot path to de-alias the query
+        # for exactly the collections whose index is aliased.
+        self.alias_registries = {}
         self.graph = None  # KnowledgeGraph or None
         # Maps normalized notion ID (no dashes) -> {doc_path, url} for fast lookup.
         # Rebuilt by re-merging the per-collection slices below, so a reload drops
@@ -97,8 +101,10 @@ class KnowledgeStore:
                 # whole server — log it and keep loading the rest (H5/M6).
                 logger.exception(f"Failed to load collection {name}; skipping it")
                 continue
+            registry = self._resolve_alias_registry(name)
             with self._lock:
                 self.searchers[name] = searcher
+                self.alias_registries[name] = registry
             logger.info(f"Collection {name} loaded with {searcher.indexer.get_size()} embeddings")
             if build_aux_indexes:
                 self._build_tag_counts(name)
@@ -130,8 +136,12 @@ class KnowledgeStore:
 
     def reload_collection(self, collection_name):
         searcher = self._build_searcher(collection_name)
+        # Re-resolved, not carried over: a reload is how a collection that was
+        # just rebuilt aliased (or un-aliased) enters service.
+        registry = self._resolve_alias_registry(collection_name)
         with self._lock:
             self.searchers[collection_name] = searcher
+            self.alias_registries[collection_name] = registry
             self._similarity_graph_cache.pop(collection_name, None)
             self._author_graph_cache.pop(collection_name, None)
         if self._build_aux_indexes:
@@ -255,7 +265,7 @@ class KnowledgeStore:
                 "stage": "end",
             }
             if status == "succeeded":
-                counts = self.__manifest_counts(collection_name)
+                counts = self.__manifest(collection_name) or {}
                 record["documentCount"] = counts.get("numberOfDocuments")
                 record["chunkCount"] = counts.get("numberOfChunks")
             IndexingRunLedger().append(record)
@@ -263,19 +273,20 @@ class KnowledgeStore:
             logger.warning("Could not write indexing run ledger record for %s",
                            collection_name, exc_info=True)
 
-    def __manifest_counts(self, collection_name):
-        """Document/chunk counts from the manifest, or empty if it is missing.
+    def __manifest(self, collection_name):
+        """The collection's parsed manifest, or None if it is missing/unreadable.
 
         A missing manifest is expected rather than exceptional: the failure path
         never rewrote it, and collection creation removes the whole folder when it
-        reads zero documents.
+        reads zero documents. Two readers — the ledger's document/chunk counts and
+        the privacy-scope decision — so it stays one read helper, not two.
         """
         try:
             return json.loads(
                 self.disk_persister.read_text_file(f"{collection_name}/manifest.json")
             )
         except Exception:
-            return {}
+            return None
 
     def get_update_status(self, collection_name):
         with self._lock:
@@ -334,6 +345,80 @@ class KnowledgeStore:
             persister=self.disk_persister,
             reranker=self.shared_reranker,
         )
+
+    def _resolve_alias_registry(self, name):
+        """The alias registry for a served collection, or None.
+
+        Same scoping decision the build path makes
+        (``update_collection_factory._build_local_files``): scope files by name
+        or basePath, re-armed by the manifest's ``privacy`` stamp.
+
+        **Never fatal.** Indexing must fail closed — building an in-scope
+        collection without the map writes real names to disk. *Serving* is the
+        opposite: the index on disk is already clean, so a missing or unloadable
+        map costs query-side de-aliasing, not privacy. Refusing to start (or
+        dropping the collection) over it would take the server down on a
+        machine that simply has no private sub-repo checked out. The import is
+        inside the ``try`` for the same reason: a checkout without the privacy
+        package must serve, not crash on the first collection.
+        """
+        manifest = self.__manifest(name) or {}
+        try:
+            from main.privacy.alias_registry import resolve_registry_for_manifest
+
+            registry = resolve_registry_for_manifest(manifest, name)
+        except Exception as e:
+            logger.error("Privacy: serving %s WITHOUT query de-aliasing: %s", name, e)
+            return None
+        self.__warn_on_map_drift(name, manifest, registry)
+        return registry
+
+    @staticmethod
+    def __warn_on_map_drift(name, manifest, registry):
+        """One WARNING when the index was built from a different map version.
+
+        Queries de-alias with whatever the map says TODAY; the index holds
+        whatever it said at build time. Divergence is a silent miss — the query
+        rewrites to an alias the index may never have been given — and nothing
+        else on the serving path would mention it.
+        """
+        if registry is None:
+            return
+        built_with = (manifest.get("privacy") or {}).get("map_version")
+        if built_with is not None and built_with != registry.map_version:
+            logger.warning(
+                "Privacy: %s was built with map_version %s but the map on disk is "
+                "map_version %s; queries may de-alias to aliases this index does not "
+                "contain", name, built_with, registry.map_version)
+
+    def get_alias_registries(self, collection_names=None):
+        """``{collection: AliasRegistry | None}`` for the named collections."""
+        with self._lock:
+            if collection_names:
+                return {c: self.alias_registries.get(c) for c in collection_names
+                        if c in self.searchers}
+            return {c: self.alias_registries.get(c) for c in self.searchers}
+
+    def get_searchers_and_registries(self, collection_names=None):
+        """The targeted searchers and EVERY served registry, from ONE lock hold.
+
+        Read separately, a reload landing between the two calls pairs a
+        just-rebuilt (aliased) searcher with the previous registry — the exact
+        window ``POST /api/collections/{name}/reload`` opens, and the search hot
+        path is what runs in it.
+
+        The registries are deliberately the whole served set rather than the
+        targeted subset: the request's shared text is de-aliased whenever ANY
+        served collection is armed (see ``query_privacy.first_armed_registry``),
+        and ``search_and_shape`` looks its per-collection registry up by name,
+        so a superset is exactly right.
+        """
+        with self._lock:
+            names = ([c for c in collection_names if c in self.searchers]
+                     if collection_names else list(self.searchers))
+            searchers = {c: self.searchers[c] for c in names}
+            registries = {c: self.alias_registries.get(c) for c in self.searchers}
+        return searchers, registries
 
     def get_tag_counts(self, collection_names=None):
         with self._lock:

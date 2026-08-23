@@ -14,6 +14,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from main.core.search_response_formatter import extract_chunk_text, truncate_snippet
 from main.ingest.registry import INGEST_SOURCES, IngestSource
 from main.ingest.youtube import fetch_transcript, list_categories
+from main.privacy.query_privacy import dealias_query
 from main.runtime.knowledge_store import (
     KnowledgeStore,
     get_store,
@@ -44,13 +45,20 @@ def _ingest_errors(operation: str):
         raise HTTPException(status_code=500, detail=f"{operation} failed: {exc}") from exc
 
 
-def _find_similar_documents(searcher, query: str, exclude_match) -> list[dict]:
+def _find_similar_documents(searcher, query: str, exclude_match,
+                            alias_registry=None) -> list[dict]:
     """Run a similarity search and return up to 5 {title, url, snippet} results.
 
     exclude_match is called on each result; truthy means skip (e.g. self-link).
+
+    ``alias_registry`` is the collection's, when it is served from a
+    privacy-aliased index: the query here is document text (a title, a
+    transcript line), so it carries names as readily as a typed one, and an
+    aliased index cannot be searched by name. Same seam as /api/search — see
+    ``main/privacy/query_privacy.py``.
     """
     search_result = searcher.search(
-        query,
+        dealias_query(query, alias_registry),
         max_number_of_chunks=30,
         max_number_of_documents=5,
         include_matched_chunks_content=True,
@@ -77,10 +85,12 @@ def _similar_for_collection(store, collection_name, query, exclude_match) -> lis
     """Look up the searcher for a configured collection and run a similarity search."""
     if not (collection_name and store.has_collection(collection_name)):
         return []
-    searcher = store.get_searchers([collection_name]).get(collection_name)
+    searchers, registries = store.get_searchers_and_registries([collection_name])
+    searcher = searchers.get(collection_name)
     if not searcher:
         return []
-    return _find_similar_documents(searcher, query=query, exclude_match=exclude_match)
+    return _find_similar_documents(searcher, query=query, exclude_match=exclude_match,
+                                   alias_registry=registries.get(collection_name))
 
 
 #: Ingest's alias for the shared enqueue contract (see
