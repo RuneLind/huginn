@@ -222,7 +222,16 @@ class DocumentCollectionSearcher:
                 )
 
     def _should_skip_reranker(self, query):
-        """Skip reranker for English queries (cross-lingual score collapse)."""
+        """Skip reranker for English queries (cross-lingual score collapse).
+
+        Note that a privacy-aliased collection is searched with the *de-aliased*
+        query (``main/privacy/query_privacy.py``), so both inputs to this
+        decision — the word count and what langdetect sees — can differ from the
+        typed query's, and therefore between collections in one mixed request.
+
+        The log line carries a shape, never the text: a query is the one piece
+        of a request most likely to hold a typed real name.
+        """
         if not _langdetect_available:
             return False
         words = query.split()
@@ -231,7 +240,8 @@ class DocumentCollectionSearcher:
         try:
             lang = detect(query)
             if lang == 'en':
-                logger.info(f"Skipping reranker for English query: {query[:50]}")
+                logger.info("Skipping reranker for English query (%d words, %d chars)",
+                            len(words), len(query))
                 return True
         except Exception:
             pass

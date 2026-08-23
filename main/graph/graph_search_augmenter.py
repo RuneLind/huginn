@@ -18,7 +18,7 @@ graph is ``None``.
 import re
 
 from main.core.search_trace import SearchTrace
-from main.privacy.query_privacy import dealias_value
+from main.privacy.query_privacy import dealias_value, keep_expansion_term
 
 
 _CONJUNCTION_SPLITS = (" versus ", " vs. ", " vs ", " and ", " og ", " & ")
@@ -140,42 +140,69 @@ class GraphSearchAugmenter:
     def _public(self, value):
         return dealias_value(value, self.alias_registry)
 
+    def _expansion_terms(self, detected_entities, limit):
+        """``(raw, de-aliased)`` expansion terms, index-aligned and filtered.
+
+        Both lists, because the de-aliased one is what the request searches and
+        records while the raw one is the suffix an out-of-scope collection's
+        twin needs (``query_privacy.unaliased_expansion_twin``). Filtering is a
+        no-op without a registry, so the unaliased path keeps returning the
+        graph's first ``limit`` terms exactly as before.
+        """
+        raw, public = [], []
+        for term in self.graph.get_expansion_terms(detected_entities):
+            term_public = self._public(term)
+            if not keep_expansion_term(term_public, self.alias_registry):
+                continue
+            raw.append(term)
+            public.append(term_public)
+            if len(public) >= limit:
+                break
+        return raw, public
+
     def augment_query(self, q: str, trace: SearchTrace):
         """Detect entities, build expansion, fetch graph answer.
 
-        Returns ``(search_q, graph_answer, detected_entities)``. When the graph
-        is unavailable returns ``(q, None, [])``. Trace recording is gated by
-        the trace itself — pass a ``NullSearchTrace`` to skip recording.
+        Returns ``(search_q, graph_answer, detected_entities,
+        raw_expansion_terms)``. When the graph is unavailable returns
+        ``(q, None, [], [])``. Trace recording is gated by the trace itself —
+        pass a ``NullSearchTrace`` to skip recording.
+
+        ``raw_expansion_terms`` is the same terms before de-aliasing (identical
+        to the de-aliased ones when no registry is armed); ``detected_entities``
+        stays in RAW graph space because it is a lookup key, while the ids the
+        trace records go through the registry like every other graph string —
+        an `entity:<name>` id is as much a name as the label beside it.
         """
         if self.graph is None:
-            return q, None, []
+            return q, None, [], []
 
         entity_pairs = self.graph.detect_entities(q, with_spans=True)
         detected_entities = [eid for eid, _ in entity_pairs]
         for eid, span in entity_pairs:
             node = self.graph.nodes.get(eid, {})
             trace.add_detected_entity(
-                entity_id=eid,
+                entity_id=self._public(eid),
                 entity_type=node.get("type", ""),
                 label=self._public(node.get("label", "")),
                 matched_span=span,
             )
 
         if not detected_entities:
-            return q, None, []
+            return q, None, [], []
 
         graph_answer = self._public(self.graph.answer_graph_query(detected_entities, q))
         trace.set_graph_answered(graph_answer is not None)
 
-        expansion_terms = self._public(
-            self.graph.get_expansion_terms(detected_entities)[: self.EXPANSION_TERM_LIMIT])
+        raw_terms, expansion_terms = self._expansion_terms(
+            detected_entities, self.EXPANSION_TERM_LIMIT)
         if expansion_terms:
             search_q = q + " " + " ".join(expansion_terms)
             trace.set_expansion(search_q, expansion_terms)
         else:
             search_q = q
 
-        return search_q, graph_answer, detected_entities
+        return search_q, graph_answer, detected_entities, raw_terms
 
     def enrich_results(self, results: list, detected_entities: list) -> None:
         """Annotate each result with ``graph_context`` for entities found in its title.
@@ -221,7 +248,7 @@ class GraphSearchAugmenter:
         if self.graph is not None and detected_entities:
             related: list[str] = []
             for term in self._public(self.graph.get_expansion_terms(detected_entities)):
-                if not term:
+                if not term or not keep_expansion_term(term, self.alias_registry):
                     continue
                 if _contains_word(q, term) or term in related:
                     continue

@@ -381,13 +381,31 @@ class AliasRegistry:
         self._ident_exceptions = {t.lower() for t in ident_exceptions}
         self._warned_unresolved = False
 
-        # The alias vocabulary itself ("dev-06", "fag-01"), i.e. the tokens a
-        # *query* may legitimately contain once a collection is aliased. Read by
-        # main/privacy/query_privacy.py to build the alias-token pattern the
-        # searcher pins on; derived from the map rather than hardcoded, because
-        # the role prefixes are a property of the map and grow with it.
-        self.aliases = frozenset(
-            entry["alias"] for entry in map_data.get("entries", []) if entry.get("alias")
+        # alias -> the entry's canonical `name`, i.e. the inverse of (a). Used by
+        # exactly one caller (`query_privacy.name_space_twin`) for the one text
+        # that has to travel BACK into name space: the corrective-rescue query
+        # handed to an out-of-scope collection, whose index has never contained
+        # an alias token. Nothing built from it is logged, traced or echoed.
+        self._alias_names = {
+            entry["alias"]: entry["name"] for entry in map_data.get("entries", [])
+            if entry.get("alias") and entry.get("name")
+        }
+        # `(?<![\w-])`/`(?![\w-])` rather than `\b`: an alias is `dev-06`, so a
+        # word boundary would happily fire inside `dev-061` or `pre-dev-06`.
+        alternation = "|".join(sorted((re.escape(alias) for alias in self._alias_names),
+                                      key=len, reverse=True))
+        self._name_pattern = re.compile(
+            rf"(?<![\w-])(?:{alternation})(?![\w-])") if alternation else None
+
+        # The first token of every entry `name` and every unmapped label. A bare
+        # given name is deliberately NEVER substituted (`Ada` would alias half
+        # the corpus), so one standing beside its own alias in an expansion term
+        # re-pairs the two; query_privacy drops those.
+        self.given_names = frozenset(
+            literal.split()[0].lower()
+            for literal in [entry.get("name") for entry in map_data.get("entries", [])]
+            + list(map_data.get("unmapped_people_variants", {}))
+            if isinstance(literal, str) and literal.strip()
         )
 
         # normalized literal -> replacement, or None meaning "leave as is"
@@ -494,6 +512,18 @@ class AliasRegistry:
         # Last, so a mapped person's own home directory has already become
         # `/Users/dev-06/` and this only has to deal with the unmapped rest.
         return USER_PATH_RE.sub(USER_PATH_TOKEN, substituted)
+
+    def to_names(self, text: str) -> str:
+        """The inverse of the alias substitution: `dev-06` -> the entry's name.
+
+        Lossy on purpose — one canonical name per alias, and the redaction
+        tokens have no inverse at all. It exists for the single text that has to
+        be turned back into name space (see ``query_privacy.name_space_twin``),
+        never for anything that is stored or returned.
+        """
+        if not text or self._name_pattern is None:
+            return text
+        return self._name_pattern.sub(lambda m: self._alias_names[m.group(0)], text)
 
     def _apply_value(self, value):
         """Alias any JSON value; returns (value, changed). Dict KEYS are left alone.
@@ -734,4 +764,22 @@ def resolve_registry(collection_name, base_path, armed_by_manifest: bool = False
         f"Collection {collection_name!r} is in privacy scope but no alias map was found "
         f"(looked for {map_path or _PRIVATE_MAP_GLOB}). Refusing to build it with real "
         f"names in the index."
+    )
+
+
+def resolve_registry_for_manifest(manifest, collection_name=None,
+                                  map_path: str | None = None) -> AliasRegistry | None:
+    """`resolve_registry` with the three arguments read out of a built manifest.
+
+    The collection name, the reader `basePath` and the `privacy` stamp are the
+    scoping decision's whole input, and every caller that has a manifest was
+    unpacking them by hand — the serving store and the update factory, which
+    MUST agree or a collection is updated aliased and served unaliased.
+    """
+    manifest = manifest or {}
+    return resolve_registry(
+        collection_name or manifest.get("collectionName"),
+        (manifest.get("reader") or {}).get("basePath"),
+        armed_by_manifest=bool(manifest.get("privacy")),
+        map_path=map_path,
     )

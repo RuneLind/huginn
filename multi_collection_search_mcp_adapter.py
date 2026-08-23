@@ -29,6 +29,7 @@ from mcp.server.fastmcp import FastMCP
 from main.core.mcp_search_tool import build_search_tool_fn
 from main.core.trace_store import TRACE_DEFAULT_ENV
 from main.graph.graph_search_augmenter import GraphSearchAugmenter
+from main.privacy.query_privacy import first_armed_registry
 from main.runtime.knowledge_store import get_store
 from main.runtime.stdio_search_args import add_search_tool_args
 from main.utils.env import env_bool
@@ -45,9 +46,13 @@ def register_collection_tools(mcp, searchers, augmenter, alias_registries=None, 
 
     ``alias_registries`` maps collection name -> AliasRegistry|None, so a
     privacy-aliased collection's tool de-aliases the query (see
-    ``main/privacy/query_privacy.py``).
+    ``main/privacy/query_privacy.py``). Every tool also gets the *shared*
+    registry — the first armed one across all served collections — because a
+    real name typed at an out-of-scope collection's tool must not reach the log
+    or the trace either.
     """
     registries = alias_registries or {}
+    shared_registry = first_armed_registry(registries)
     for collection_name, searcher in searchers.items():
         tool_description = (
             f"Search in {collection_name} collection using vector search. "
@@ -55,7 +60,8 @@ def register_collection_tools(mcp, searchers, augmenter, alias_registries=None, 
         )
         search_fn = build_search_tool_fn(
             searcher, collection_name, augmenter,
-            alias_registry=registries.get(collection_name), **tool_kwargs)
+            alias_registry=registries.get(collection_name),
+            shared_registry=shared_registry, **tool_kwargs)
         mcp.tool(name=f"search_{collection_name}", description=tool_description)(search_fn)
 
 

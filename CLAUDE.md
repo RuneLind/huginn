@@ -223,18 +223,30 @@ map stays local.
   reader block reproduces the source's. `--swap` re-checks the stamp, parks the
   live one under `data/prealias/<name>-<date>` (**outside** `data/collections/`, so
   no server glob serves it) and reloads the server — a failed reload exits non-zero.
-  - **The build also rewrites the mapping's `documentPath` prefixes**
+  - **The swap rewrites the mapping's `documentPath` prefixes**
     (`<name>-aliased/documents/…` → `<name>/documents/…`, temp file +
-    `os.replace`), because the swap renames the *directory* and nothing else
-    repoints those paths. Without it `_get_chunk_texts` reads nothing, the
-    cross-encoder scores empty strings as uniform noise and the confidence
-    filter drops every result: perfect retrieval, empty answers, no error
-    anywhere. All three live collections shipped that way. The mapping is the
-    only built artifact holding the collection name (the reverse mapping is
-    keyed by document id, `index_info.json` is a counter, the manifest's
-    `collectionName` is rewritten separately) — but `--swap` re-derives that
-    rather than trusting it, refusing on **any** `indexes/` JSON still spelling
-    the temp name.
+    `os.replace`) — *this* is the canonical write-up of the incident behind it.
+    The swap renames the *directory* and nothing else repointed those paths, so
+    `_get_chunk_texts` read nothing, the cross-encoder scored empty strings as
+    uniform noise and the confidence filter dropped every result: perfect
+    retrieval, empty answers, no error anywhere. All three live collections
+    shipped that way for weeks, past a clean gate at every scan. (Everywhere
+    else — `rebuild_aliased.py`, check 12, `query_privacy.py` — points here.)
+  - **Order: rename → rewrite → verify → reload.** The rewrite happens at SWAP
+    time, after the rename, never at build time: until the directory is `<name>`,
+    `<name>-aliased/documents/…` is the correct answer, and a temp collection
+    served or scanned in place has to read its own aliased documents. The build
+    therefore leaves a collection that names *itself* in both the manifest and
+    every `documentPath` — so a refused build cannot leave a directory whose
+    manifest claims to be another collection, which is exactly what check 12
+    now fails on. `--swap` refuses **before** renaming if there is no
+    `indexes/index_document_mapping.json` to repoint (after the rename there is
+    no live collection to fall back to), and after the rewrite re-derives the
+    stale set rather than trusting it: **any** `indexes/` JSON still spelling
+    the temp name is a non-zero exit naming the parked copy. The mapping is the
+    only built artifact holding the collection name — the reverse mapping is
+    keyed by document id, `index_info.json` is a counter, and the manifest's
+    `collectionName` is rewritten in the same step.
 - **The distribution gate** is `main/privacy/index_scan.py`, driven by
   `.venv/bin/python scripts/audit/scan_index.py --collection <name>` (add
   `--compare <name>` for the pre-alias twin invariants, `--collections-dir` for a
@@ -308,12 +320,27 @@ map stays local.
     document irreversibly.
   - **Check 12** is the only one that walks the *join* rather than the content:
     every `documentPath` in `index_document_mapping.json` must start with
-    `<collectionName>/documents/` and resolve to a file that exists. Every other
+    `<directory name>/documents/` and resolve to a file that exists. Every other
     check reads `documents/*.json` directly and is structurally blind to an index
     that no longer points at them — which is why the swap bug above passed a
     clean gate at every scan for weeks. Its detail carries the offending path
     *prefix* (a collection directory name) and counts, never a path: a document
-    filename is a document id, and ids are never aliased.
+    filename is a document id, and ids are never aliased; a path with no `/` in
+    it is reported as `(unrecognised)` rather than by its filename. On PASS it
+    says how many chunks resolved and under which prefix.
+    - **It keys off the DIRECTORY name, and requires `manifest.collectionName`
+      to equal it.** The searcher resolves `documentPath` against the
+      collections dir and `KnowledgeStore` loads a collection by its directory
+      name, so keying off `collectionName` made the check self-consistent
+      instead of true: a directory renamed or copied under another name (a
+      backup, a scratch copy) agrees with its own manifest and serves nothing.
+      Four backup directories on this machine fail on that mismatch, correctly.
+      The untar path is unaffected — a package unpacks to
+      `data/collections/<name>/`, which is the name its mapping already spells.
+    - **An empty mapping FAILS.** Every other check reads the documents
+      directly, so an index that maps nothing passes all of them, and a check-12
+      that only iterated the mapping passed vacuously too. A `documentPath` of
+      `null` is a failure, not a traceback.
   - Bare given names standing alone stay out of scope (the map's
     `bare_given_name_residual`, a documented campaign decision).
 - **Packaging is the only hand-off path.** `.venv/bin/python
@@ -371,33 +398,65 @@ map stays local.
   rewritten with the **same** substituter — `dealias_query(q, registry)`, which is
   `registry.apply` and therefore idempotent. `KnowledgeStore` resolves one
   registry per served collection at load and at `POST
-  /api/collections/{name}/reload` (`store.alias_registries`); a missing map here
+  /api/collections/{name}/reload` (`store.get_searchers_and_registries` hands
+  the searchers and the registries back from **one** lock hold, so a reload
+  cannot pair a rebuilt searcher with the previous registry); a missing map here
   **logs one error and serves the collection unaliased for querying** — the index
-  on disk is already clean, and only *indexing* may fail closed.
+  on disk is already clean, and only *indexing* may fail closed. A collection
+  whose manifest stamp names a different `map_version` than the map on disk logs
+  one WARNING: queries de-alias with today's map, the index holds yesterday's.
   - Rewritten **per collection**, inside `search_pipeline.search_and_shape`, so a
     mixed request searches an aliased collection in alias space and an
     out-of-scope one in name space (the common case: `/api/search` with no
-    `collection` hits all 30+). The `title_boost_query` follows the same split.
-  - If **any** targeted collection is armed, the request's *shared* text — trace
-    `query.raw`, the query log, `augment_query`, `retryHints`
-    (`detectedEntities`/`narrowerQuery`/`broaderQuery`), `corrective.queriesTried`
-    — is the de-aliased one. That is the whole point: a real name must not
-    persist or echo. Graph augmentation runs once, on the de-aliased text; the
-    name-space twin handed to out-of-scope collections is that same expansion
-    suffix on the raw query.
+    `collection` hits all 30+).
+  - **`title_boost_query` is name space for every collection.** Document
+    filenames are never aliased (an id is a join key), so an alias token cannot
+    legitimately match a title — but `apply_title_boost` tokenises with `\w+`,
+    so `dev-01` contributes the token `01` and boosts every `…-01-…` filename in
+    the collection.
+  - If **any served** collection is armed — not just a targeted one — the
+    request's *shared* text (trace `query.raw`, the query log, `augment_query`,
+    `retryHints`, `corrective.queriesTried`) is the de-aliased one. Scoping a
+    request to an out-of-scope collection does not make the typed name safe to
+    log. The same holds for the MCP seam (`mcp_search_tool.build_search_tool_fn`
+    takes both this collection's registry and the `shared_registry` across all
+    served ones); both transports share one preamble,
+    `query_privacy.prepare_aliased_request`.
+  - **The twins.** Out-of-scope collections get the raw query plus the
+    expansion terms *before* de-aliasing (`augment_query` returns both lists) —
+    not the alias-space suffix, and not conditional on the query itself having
+    changed, because the graph alone can introduce an alias token into a clean
+    query. The corrective rescue query has no typed twin (it is derived from the
+    hints), so it is mapped back through the map's own names
+    (`AliasRegistry.to_names`). An out-of-scope index never receives an alias
+    token on either leg.
   - **The knowledge graph is a pre-alias artifact** — its `*_llm_graph.json`
-    files were extracted before the corpus was aliased, so node labels,
-    expansion terms and entity contexts still spell people by name, and they
-    reach `retryHints.relatedTerms`, `graph_answer`, `graph_context` and the
-    trace's expansion. Measured: 24 leaked terms across the 10-probe sweep. So
-    `GraphSearchAugmenter` takes the same registry (`alias_registry=`) and every
-    string it contributes is de-aliased. A request that touches no aliased
-    collection passes `None` and is byte-identical to before.
+    files were extracted before the corpus was aliased, so node labels, ids
+    (`entity:<name>`), expansion terms and entity contexts still spell people by
+    name, and they reach `retryHints.relatedTerms`, `graph_answer`,
+    `graph_context` and the trace's expansion. Measured 24 leaked terms across
+    the 10-probe sweep (the table is in PR #117). So `GraphSearchAugmenter`
+    takes the same registry (`alias_registry=`) and every string it contributes
+    is de-aliased — the trace's entity ids included, while the lookup keeps
+    using the raw ones. A request that touches no aliased collection passes
+    `None` and is byte-identical to before.
+  - **Two term classes are dropped, not de-aliased**: the redaction tokens
+    (`[~ukjent-person]`, `[~person]`, `@person`) and any term equal to a bare
+    given name of a mapped entry (`AliasRegistry.given_names`). Bare given names
+    are deliberately never substituted, so one surfacing in `relatedTerms`
+    beside its own alias re-pairs the two.
+  - **Other callers of the seam**: `collection_search_cmd_adapter.py` (CLI) and
+    `routes/ingest.py::_find_similar_documents` — the ingest similarity query is
+    document text, which carries names as readily as a typed query does.
   - **An alias query needs nothing else.** `fag-01` reranks and scores normally
     (measured live on the repaired indexes: 5 results, best 0.958). The "the
     cross-encoder scores every candidate as uniform noise" reading was a
-    *symptom* of the swap bug below — `_get_chunk_texts` was reading nothing, so
-    the CE was scoring empty strings. The hot path is unchanged by this seam.
+    *symptom* of the swap bug above — `_get_chunk_texts` was reading nothing, so
+    the CE was scoring empty strings. The hot path is unchanged by this seam,
+    with one honest caveat: the reranker-skip decision
+    (`_should_skip_reranker`) reads the word count and langdetect's verdict on
+    the text that collection is actually searched with, so it can differ between
+    collections in one mixed request.
 
 ## LLM entity extraction (knowledge graph)
 

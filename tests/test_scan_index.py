@@ -467,6 +467,63 @@ def test_a_consistent_mapping_passes(tmp_path, map_file):
     ok = index_scan.scan_collection(tmp_path / "ok-aliased", map_file).check("document_paths")
     assert ok.passed is True
     assert ok.count == 0
+    # A passing check says what it verified, so a clean report is not a blank.
+    assert "2" in ok.detail and "ok-aliased/documents/" in ok.detail
+
+
+def test_the_check_keys_off_the_directory_name_not_the_manifest(tmp_path, map_file):
+    """The searcher resolves `documentPath` against the collection DIRECTORY —
+    that is what the swap renames and what `KnowledgeStore` loads by. Keying the
+    check off `manifest.collectionName` made it self-consistent instead of true:
+    a directory renamed or copied under a new name (a backup, a scratch copy)
+    certified clean while every chunk text it served was empty."""
+    collection = _write_collection(tmp_path, "demo-aliased",
+                                   documents=[_clean_document(0)])
+    collection.rename(tmp_path / "demo-aliased-copy")
+
+    check = index_scan.scan_collection(tmp_path / "demo-aliased-copy",
+                                       map_file).check("document_paths")
+    assert check.passed is False
+    assert "demo-aliased-copy" in check.detail and "demo-aliased" in check.detail
+
+
+def test_a_manifest_naming_another_collection_fails(tmp_path, map_file):
+    collection = _write_collection(tmp_path, "demo-aliased", documents=[_clean_document(0)])
+    manifest = json.loads((collection / "manifest.json").read_text(encoding="utf-8"))
+    manifest["collectionName"] = "something-else"
+    (collection / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    assert _scan(tmp_path, map_file).check("document_paths").passed is False
+
+
+def test_an_empty_mapping_fails_rather_than_passing_vacuously(tmp_path, map_file):
+    """Every other check reads `documents/*.json` directly, so an index that
+    maps nothing at all passes all of them."""
+    collection = _write_collection(tmp_path, "demo-aliased", documents=[_clean_document(0)])
+    (collection / "indexes" / "index_document_mapping.json").write_text(
+        "{}", encoding="utf-8")
+    check = _scan(tmp_path, map_file).check("document_paths")
+    assert check.passed is False
+
+
+def test_a_null_document_path_is_a_failure_rather_than_a_traceback(tmp_path, map_file):
+    collection = _write_collection(tmp_path, "demo-aliased", documents=[_clean_document(0)])
+    (collection / "indexes" / "index_document_mapping.json").write_text(
+        json.dumps({"0": {"documentId": "notat-0.md", "documentPath": None}}),
+        encoding="utf-8")
+    check = _scan(tmp_path, map_file).check("document_paths")
+    assert check.passed is False
+    assert "(unrecognised)" in check.detail
+
+
+def test_a_path_with_no_directory_at_all_is_reported_as_unrecognised(tmp_path, map_file):
+    """The detail carries a collection directory name, never a path — and a
+    documentPath with no `/` in it has no directory name to carry."""
+    _write_collection(tmp_path, "demo-aliased", documents=[_clean_document(0)],
+                      mapping_prefix="", mapping_files=["Ada Example00.md.json"])
+    check = _scan(tmp_path, map_file).check("document_paths")
+    assert check.passed is False
+    assert "(unrecognised)" in check.detail
+    assert "Ada" not in check.detail
 
 
 def test_the_check_detail_never_carries_a_document_id(tmp_path, map_file):

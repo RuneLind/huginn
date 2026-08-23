@@ -5,6 +5,7 @@ live one, so every way it can produce a *silently different* collection has to
 be a hard stop rather than a warning. Names here are invented.
 """
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -163,7 +164,23 @@ class TestGuardsAreActuallyCalled:
         rebuild_aliased.build("demo", "demo-aliased", 1)
         written = json.loads((collections / "demo-aliased" / "manifest.json")
                              .read_text(encoding="utf-8"))
-        assert written["collectionName"] == "demo"
+        # The temp collection keeps naming ITSELF — see TestBuildLeavesTheTempName.
+        assert written.get("collectionName") != "demo"
+
+    def test_a_refusing_build_never_claims_the_real_name(self, tmp_path, monkeypatch):
+        """Ordering: the manifest rewrite used to happen before the last guard,
+        so a refused build left `<name>-aliased/manifest.json` saying it was
+        `<name>` — a directory whose own manifest names another collection, and
+        the state check 12 now fails on."""
+        collections = self._collections(tmp_path, monkeypatch)
+        monkeypatch.setattr(rebuild_aliased.subprocess, "run", lambda *a, **k: None)
+        monkeypatch.setattr(rebuild_aliased, "reader_mismatch",
+                            lambda *a: "reader block differs on ['excludePatterns']")
+        with pytest.raises(SystemExit):
+            rebuild_aliased.build("demo", "demo-aliased", 1)
+        written = json.loads((collections / "demo-aliased" / "manifest.json")
+                             .read_text(encoding="utf-8"))
+        assert written.get("collectionName") != "demo"
 
     def test_swap_refuses_when_the_privacy_stamp_is_stale(self, tmp_path, monkeypatch):
         collections = self._collections(tmp_path, monkeypatch)
@@ -227,7 +244,7 @@ class TestDocumentPathRewrite:
             "indexes/something_else.json"]
 
 
-class TestSwapRefusesAStalePrefix:
+class TestSwapRepointsTheMapping:
 
     def _built(self, tmp_path, monkeypatch, prefix):
         collections = tmp_path / "collections"
@@ -243,25 +260,66 @@ class TestSwapRefusesAStalePrefix:
         monkeypatch.setattr(rebuild_aliased, "current_map_version", lambda: 7)
         return collections
 
-    def test_swap_refuses_a_mapping_that_still_carries_the_temp_prefix(
-            self, tmp_path, monkeypatch):
+    def _swap(self, monkeypatch):
+        reloaded = []
+        monkeypatch.setattr(
+            rebuild_aliased.urllib.request, "urlopen",
+            lambda request, timeout=None: reloaded.append(request) or _NullResponse())
+        rebuild_aliased.swap("demo", "demo-aliased", "http://127.0.0.1:8321")
+        return reloaded
+
+    def test_swap_repoints_the_mapping_after_the_rename(self, tmp_path, monkeypatch):
+        """Rename, then rewrite: the prefixes are repointed at the name the
+        directory now HAS, not at the one it is about to have."""
         collections = self._built(tmp_path, monkeypatch, "demo-aliased")
+        assert self._swap(monkeypatch)
+        assert not (collections / "demo-aliased").exists()
+        mapping = json.loads(
+            (collections / "demo" / "indexes" / "index_document_mapping.json")
+            .read_text(encoding="utf-8"))
+        assert [e["documentPath"] for e in mapping.values()] == [
+            "demo/documents/a.md.json", "demo/documents/b.md.json"]
+        manifest = json.loads((collections / "demo" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        assert manifest["collectionName"] == "demo"
+
+    def test_no_stale_prefix_can_survive_the_swap(self, tmp_path, monkeypatch):
+        """The bug this whole path exists for: a mapping still spelling the temp
+        name resolves to nothing once the directory is renamed, and the searcher
+        serves empty chunk texts with no error anywhere."""
+        collections = self._built(tmp_path, monkeypatch, "demo-aliased")
+        self._swap(monkeypatch)
+        assert rebuild_aliased.stale_temp_paths(collections / "demo", "demo-aliased") == []
+
+    def test_an_already_repointed_mapping_swaps_unchanged(self, tmp_path, monkeypatch):
+        collections = self._built(tmp_path, monkeypatch, "demo")
+        assert self._swap(monkeypatch)
+        assert not (collections / "demo-aliased").exists()
+        assert (collections / "demo" / "indexes" / "index_document_mapping.json").exists()
+
+    def test_swap_refuses_a_build_with_no_indexes_before_moving_anything(
+            self, tmp_path, monkeypatch):
+        """The rewrite happens after the rename, so everything it needs has to
+        be checked before the live collection is parked — otherwise a build that
+        never produced an index leaves no live collection behind either."""
+        collections = self._built(tmp_path, monkeypatch, "demo-aliased")
+        shutil.rmtree(collections / "demo-aliased" / "indexes")
         with pytest.raises(SystemExit) as excinfo:
             rebuild_aliased.swap("demo", "demo-aliased", "http://127.0.0.1:8321")
         assert excinfo.value.code
-        # Nothing moved: a swap that would have served empty chunk texts.
         assert (collections / "demo" / "manifest.json").exists()
         assert not (tmp_path / "prealias").exists()
 
-    def test_swap_proceeds_once_the_prefix_is_the_real_name(self, tmp_path, monkeypatch):
-        collections = self._built(tmp_path, monkeypatch, "demo")
-        reloaded = []
-        monkeypatch.setattr(rebuild_aliased.urllib.request, "urlopen",
-                            lambda request, timeout=None: reloaded.append(request) or _NullResponse())
-        rebuild_aliased.swap("demo", "demo-aliased", "http://127.0.0.1:8321")
-        assert not (collections / "demo-aliased").exists()
-        assert (collections / "demo" / "indexes" / "index_document_mapping.json").exists()
-        assert reloaded
+    def test_swap_refuses_a_build_with_no_mapping_before_moving_anything(
+            self, tmp_path, monkeypatch):
+        collections = self._built(tmp_path, monkeypatch, "demo-aliased")
+        (collections / "demo-aliased" / "indexes"
+         / "index_document_mapping.json").unlink()
+        with pytest.raises(SystemExit) as excinfo:
+            rebuild_aliased.swap("demo", "demo-aliased", "http://127.0.0.1:8321")
+        assert excinfo.value.code
+        assert (collections / "demo" / "manifest.json").exists()
+        assert not (tmp_path / "prealias").exists()
 
 
 class _NullResponse:
@@ -275,7 +333,7 @@ class _NullResponse:
         return b'{"status":"reloaded"}'
 
 
-def test_build_rewrites_the_document_paths_it_just_built(tmp_path, monkeypatch):
+def test_build_leaves_the_temp_collection_naming_itself(tmp_path, monkeypatch):
     collections = tmp_path / "collections"
     (collections / "demo").mkdir(parents=True)
     (collections / "demo" / "manifest.json").write_text(
@@ -293,4 +351,11 @@ def test_build_rewrites_the_document_paths_it_just_built(tmp_path, monkeypatch):
 
     rebuild_aliased.build("demo", "demo-aliased", 1)
 
-    assert rebuild_aliased.stale_temp_paths(collections / "demo-aliased", "demo-aliased") == []
+    # Internally consistent under its OWN name: a temp collection that is served
+    # or scanned in place reads its own aliased documents, and the scan's check
+    # 12 (which keys off the directory name) passes on it. The swap is what
+    # repoints them, after the rename.
+    mapping = json.loads((collections / "demo-aliased" / "indexes"
+                          / "index_document_mapping.json").read_text(encoding="utf-8"))
+    assert all(e["documentPath"].startswith("demo-aliased/documents/")
+               for e in mapping.values())
