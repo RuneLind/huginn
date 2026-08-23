@@ -21,37 +21,26 @@ gitignored private sub-repo. Everything printed to stdout, and everything in
 """
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
+from main.privacy.alias_registry import (  # noqa: E402
+    PrivacyMapMissing, _load_ident_exceptions, discover_map_path,
+)
 from main.privacy.index_scan import scan_collection  # noqa: E402
 
 DEFAULT_COLLECTIONS_DIR = REPO_ROOT / "data" / "collections"
-MAP_GLOB = "huginn-*/privacy/aliases.json"
-EXCEPTIONS_GLOB = "huginn-*/privacy/ident_exceptions.json"
 BIGRAM_ALLOWLIST_GLOB = "huginn-*/privacy/non_person_bigrams.json"
 
-
-# Each of these reads REPO_ROOT at CALL time rather than binding it as a default,
-# so a test can point the whole discovery layer at a tmp dir with one monkeypatch.
-
-def resolve_map(explicit: str | None, repo_root: Path | None = None) -> Path:
-    if explicit:
-        return Path(explicit)
-    map_paths = sorted((repo_root or REPO_ROOT).glob(MAP_GLOB))
-    if len(map_paths) != 1:
-        sys.exit(f"Expected exactly one alias map ({MAP_GLOB}), found {len(map_paths)}")
-    return map_paths[0]
-
-
-def load_exceptions(repo_root: Path | None = None) -> set:
-    exceptions = set()
-    for path in sorted((repo_root or REPO_ROOT).glob(EXCEPTIONS_GLOB)):
-        exceptions |= {t.lower() for t in json.loads(path.read_text(encoding="utf-8"))["tokens"]}
-    return exceptions
+# The map and the ident exceptions are discovered by ``alias_registry`` itself,
+# not by a second copy of the globs here. The gate has to verify with the map the
+# BUILD substituted with; two independent resolvers is how it ends up verifying
+# with a different one. `alias_registry.REPO_ROOT` is what a test repoints.
+DEFAULT_CANDIDATES_DIR = REPO_ROOT / "data" / "privacy"
 
 
 def resolve_allowlist(explicit: str | None, repo_root: Path | None = None):
@@ -78,22 +67,53 @@ def build_parser() -> argparse.ArgumentParser:
                          f"{BIGRAM_ALLOWLIST_GLOB})")
     ap.add_argument("--json-report", default=None,
                     help="Write the machine-readable report (shapes and counts only) here")
-    ap.add_argument("--candidates-out", default=None,
-                    help="Write the unreviewed capitalised pairs here for triage. THIS FILE "
-                         "CONTAINS REAL TEXT — put it in a gitignored private sub-repo.")
+    ap.add_argument("--candidates-out", nargs="?", const="", default=None,
+                    help="Write the unreviewed capitalised pairs for triage. THIS FILE "
+                         "CONTAINS REAL TEXT. With no value it goes to "
+                         "data/privacy/scan_candidates_<collection>.json; an explicit path "
+                         "is refused unless git already ignores it.")
     return ap
+
+
+def candidates_destination(explicit: str | None, collection: str) -> Path:
+    """Where the ONE output with real text in it may be written.
+
+    Default: ``data/privacy/`` — `data/` is gitignored wholesale, so the default
+    cannot land a list of real names in a tracked file. An explicit path is
+    checked with `git check-ignore` and refused if git would track it. The
+    campaign has already had to rewrite history once over a real name in this
+    repo; a `--candidates-out report.json` typo is the same mistake with a
+    shorter fuse.
+    """
+    if not explicit:
+        DEFAULT_CANDIDATES_DIR.mkdir(parents=True, exist_ok=True)
+        return DEFAULT_CANDIDATES_DIR / f"scan_candidates_{collection}.json"
+    path = Path(explicit)
+    ignored = subprocess.run(["git", "check-ignore", "-q", str(path)],
+                             cwd=REPO_ROOT, capture_output=True)
+    # 0 = ignored, 1 = not ignored, 128 = not a git checkout / outside the repo.
+    if ignored.returncode == 1:
+        sys.exit(f"REFUSED: {path} is not gitignored, and --candidates-out is the one output "
+                 f"that contains real names. Write it under data/ or inside a private "
+                 f"huginn-*/ sub-repo.")
+    return path
 
 
 def main() -> None:
     args = build_parser().parse_args()
     collections_dir = Path(args.collections_dir).resolve()
-    map_path = resolve_map(args.map)
+    candidates_out = (candidates_destination(args.candidates_out, args.collection)
+                      if args.candidates_out is not None else None)
+    try:
+        map_path = discover_map_path(args.map)
+    except PrivacyMapMissing as e:
+        sys.exit(f"REFUSED: {e}")
 
     report = scan_collection(
         collections_dir / args.collection,
         map_path,
         compare_dir=(collections_dir / args.compare) if args.compare else None,
-        exceptions=load_exceptions(),
+        exceptions=_load_ident_exceptions(),
         allow_count_drift=args.allow_count_drift,
         allowed_bigrams_path=resolve_allowlist(args.allowed_bigrams),
     )
@@ -106,12 +126,12 @@ def main() -> None:
     if args.json_report:
         Path(args.json_report).write_text(
             json.dumps(report.to_json(), indent=2, ensure_ascii=False), encoding="utf-8")
-    if args.candidates_out:
-        Path(args.candidates_out).write_text(
+    if candidates_out is not None:
+        candidates_out.write_text(
             json.dumps({"collection": report.collection,
                         "candidates": report.candidates}, indent=2, ensure_ascii=False),
             encoding="utf-8")
-        print(f"\ncandidates written to {args.candidates_out} ({len(report.candidates)})")
+        print(f"\ncandidates written to {candidates_out} ({len(report.candidates)})")
 
     # The PASS line states what it does and does NOT certify: an unqualified
     # "PASS" would read as "no real name survives", which is not what was checked.

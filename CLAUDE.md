@@ -187,8 +187,17 @@ map stays local.
   dirs) plus an optional private `huginn-*/privacy/scope.json` for the paths that
   are not public — the same glob convention as `graph_routing.json`. Matching is
   by collection name **or** reader `basePath`, so sibling/backup collections
-  sharing a `basePath` arm too. Everything else gets `alias_registry=None` and
-  behaves exactly as before.
+  sharing a `basePath` arm too; `scoped_base_paths()` additionally reads the
+  reader `basePath` out of every in-scope collection's built `manifest.json`,
+  because scope is declared in two places and they drift. Everything else gets
+  `alias_registry=None` and behaves exactly as before.
+- **Discovery resolves against the repo root, never the CWD.** Every
+  `huginn-*/privacy/*` glob and every relative `basePath` in a scope file goes
+  through `alias_registry.REPO_ROOT` (derived from `__file__`;
+  `HUGINN_PRIVACY_ROOT` relocates it for subprocess tests, and it fails closed).
+  They used to resolve against the process CWD, so from anywhere but the repo
+  root the whole scope evaporated — and `tag_documents.py`'s external-backend
+  guard, whose entire job is to refuse, silently permitted the hosted backend.
 - **Fail closed.** An in-scope collection whose map (`huginn-*/privacy/aliases.json`)
   is missing raises `PrivacyMapMissing` *before* the create path removes the
   collection folder. A clone with no private sub-repos simply builds nothing
@@ -221,8 +230,15 @@ map stays local.
   `numberOfChunks` equal the twin's (`--allow-count-drift` downgrades that to a
   warning; a count the twin's manifest does not record at all is skipped).
   Everything printed and everything in `--json-report` is a shape or a count;
-  `--candidates-out` is the one output with real text in it and belongs in a
-  gitignored private sub-repo.
+  `--candidates-out` is the one output with real text in it. Passed bare it goes
+  to `data/privacy/scan_candidates_<collection>.json` (`data/` is gitignored
+  wholesale); an explicit path is refused unless `git check-ignore` already
+  covers it.
+  - A file the scan cannot read — a truncated `documents/*.json`, an
+    undecodable binary, an unreadable manifest — is a check-8 failure naming the
+    path, never a traceback: the scan can only certify what it has read. So is
+    **any symlink** anywhere under the collection dir, file or directory, and
+    the walk never follows one.
   - **Check 9, capitalised-bigram candidates, is the one that finds people the
     map never knew** — every other check works *from* the map and is blind to
     them. A `Capitalised Capitalised(+)` run is **retained** as a candidate when
@@ -231,43 +247,78 @@ map stays local.
     runtime), then `non_person_labels` and a reviewed allow-list
     (`huginn-*/privacy/non_person_bigrams.json`, gitignored) are subtracted.
     **Retention, not subtraction** — a filter that drops "things that look like
-    names" removes exactly the target category. The public gazetteer must never
-    grow corpus-specific names; a structural test keeps it to one alphabetic
-    token per line, and `test_public_hygiene.py` exempts only that file from the
-    bare-given-name rule (see the comment there for why a list of common names
-    with holes in it is a *reverse* fingerprint).
+    names" removes exactly the target category. EVERY adjacent pair of a
+    capitalised run is evaluated, not just the head pair (a name behind an
+    acronym, a heading word or another name was invisible: recall against the
+    map's own names went 0.53 → 0.72 on the public gazetteer alone); the initial
+    capital is `str.isupper()` rather than `[A-ZÆØÅ]`; a hyphenated given name is
+    probed part by part; a dot may precede the pair and one newline may sit
+    inside it. The union of gazetteer + map given names has its own floor
+    (`MIN_GAZETTEER_ENTRIES`), because a truncated gazetteer retains nothing and
+    "no candidates" is what a clean collection looks like.
+    The public gazetteer must never grow corpus-specific names. Four structural
+    tests hold it: one alphabetic token per line, sorted and duplicate-free, no
+    two lines concatenating into a mapped full name, and a carve-out narrowed to
+    the map's GIVEN-name set plus a capped, runtime-derived set of
+    given-name/surname overlaps — the old carve-out exempted every mononym and
+    bare surname the map knew (see the comment there for why a list of common
+    names with holes in it is a *reverse* fingerprint).
   - **Checks 10 and 11** are new categories rather than map lookups: distributor
     fingerprints (an absolute `/Users/` path or a `.bak` reference anywhere in
     the unit — this found another person's macOS username in a pasted stack
     trace) and `main/privacy/sensitivity_scanner.py`. The sensitivity categories
-    that BLOCK are the ones measured precise enough to block on (fødselsnummer,
-    organisasjonsnummer, bankkonto, credential, ident, dotted handle); email,
-    plaintext-password patterns and phone numbers are reported and do not fail
-    the gate. Anchoring is what makes that affordable: 48 findings across the
-    three collections, against 1 262 for the same detectors without the keyword
-    anchors and leading-digit rules (`benchmarks/pii/RESULTS.md`). The new
+    that BLOCK are the ones measured precise enough to block on AND about
+    something that must not leave the machine: fødselsnummer, bankkonto,
+    credential, ident, dotted handle. Email, plaintext-password patterns, phone
+    numbers **and organisasjonsnummer** are reported and do not fail the gate —
+    an organisation number identifies a company in a public register, is not
+    personal data, is legitimate content in an issue about an employer, and is
+    the category that fires most. Anchoring is what makes that affordable: 23
+    findings across the three collections, against 334 for the same detectors
+    without the keyword anchors and leading-digit rules
+    (`benchmarks/pii/RESULTS.md`, whose §2 is now a reproducible bench). The new
     categories are **never** wired into `PiiSanitizer.sanitize` — that is the
     live Jira ingest write path, where a false positive mangles a stored
     document irreversibly.
   - Bare given names standing alone stay out of scope (the map's
     `bare_given_name_residual`, a documented campaign decision).
 - **Packaging is the only hand-off path.** `.venv/bin/python
-  scripts/audit/package_collection.py --collection <name> [--out dir]` runs the
-  scan and writes `<name>-<date>.tar.gz` **only** when every check passes; a
-  failure prints the report, writes nothing and exits non-zero. The tarball holds
-  `PACKAGE-STAMP.json` (collection, scan date, policy/map version, document
-  count, per-check counts) plus `data/collections/<name>/` at the path it unpacks
-  to — never the map, never `data/prealias/`, never a cache. It refuses outright
-  for a collection out of privacy scope or without a manifest `privacy` stamp:
-  nothing aliased it, so a clean scan would certify nothing. Copying the
-  collection directory by hand is not a supported hand-off.
+  scripts/audit/package_collection.py --collection <name> [--out dir]
+  [--compare <twin>] [--allow-count-drift] [--force]` runs the scan and writes
+  `<name>-<date>-map<map_version>-policy<policy_version>.tar.gz` **only** when
+  every check passes; a failure prints the report, writes nothing and exits
+  non-zero. The date alone made two tarballs built the same day from different
+  maps indistinguishable, and an existing file of the same name is a refusal
+  unless `--force`. It takes the same flags as the CLI so it certifies the same
+  check set, and refuses outright for a collection out of privacy scope or
+  without a manifest `privacy` stamp. Copying the collection directory by hand
+  is not a supported hand-off. Four guarantees, each of which was missing:
+  - **atomic** — built under a temp name in the destination directory and
+    `os.replace`d into place. A half-written `.tar.gz` has the name of a
+    certified package and the contents of an interrupted one;
+  - **exactly what was scanned** — the member list comes from the report
+    (`ScanReport.scanned_members`), not a second walk, and every member's size
+    and mtime is re-checked immediately before the tar. A file that appeared or
+    changed in that window is a `REFUSED:` line, because it would otherwise be
+    tarred without having been read;
+  - **no builder identity** — `uid`/`gid`/`uname`/`gname` are zeroed on every
+    member. That is the same class of fingerprint as the absolute `/Users/` path
+    check 10 looks for, just in the header instead of the content;
+  - **a legible stamp** — `PACKAGE-STAMP.json` carries collection, scan date,
+    policy/map version, document and file counts, `allowlistSha256` and
+    `gazetteerSha256` (a tarball certified against a longer allow-list was
+    certified against a weaker gate), and `scanChecks` as
+    `{check: {passed, count, ran}}` for **every known check**. `ran: false` is
+    what a run without `--compare` reports for checks 3b and 5; a stamp that
+    simply omitted them read exactly like one where they had passed.
 - **`scripts/tagging/tag_documents.py` refuses an external backend on a scoped
   tree.** It reads RAW source markdown and defaults to `--backend claude-cli`,
   which ships an excerpt of every file off the machine. When `--source` resolves
   inside an in-scope basePath (`alias_registry.path_in_scope`, realpath
-  containment) and the backend is not `ollama`, it aborts before opening a single
-  file. Only this script: the two graph extractors read the same trees but are
-  deterministic and local.
+  containment, repo-root-relative, including the basePaths read out of in-scope
+  collections' manifests) and the backend is not `ollama`, it aborts before
+  opening a single file. Only this script: the two graph extractors read the same
+  trees but are deterministic and local.
 - **Derived caches carry pre-alias text.**
   `.venv/bin/python scripts/audit/purge_prealias_caches.py` retires them (LLM graph
   caches deleted, dormant contextual caches renamed to `.pre-alias.bak`). The

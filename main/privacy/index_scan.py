@@ -1,141 +1,106 @@
 """The distribution gate: prove a BUILT collection is safe to hand to someone.
 
 ``scan_collection(collection_dir, map_path, ...)`` returns a :class:`ScanReport`.
-``scripts/audit/scan_index.py`` is the CLI over it, and
-``scripts/audit/package_collection.py`` calls it directly — packaging only
-writes a tarball when the report passes. That is the point of promoting this out
-of a script: a scanner someone has to remember to run is advisory, a scanner the
-packager calls is a gate.
+``scripts/audit/scan_index.py`` is the CLI over it and
+``scripts/audit/package_collection.py`` calls it directly — packaging writes a
+tarball only when the report passes. A scanner someone has to remember to run is
+advisory; a scanner the packager calls is a gate.
 
-The checks, and why each is shaped the way it is:
+The checks: **0** map/stamp agreement, **1** listed person forms in the DECODED
+strings of every artifact, **2** the same forms as consecutive BM25 corpus
+tokens, **3** NAV idents and **3b** their exceptions, **4** dotted handles,
+**5** the exemption invariant against the pre-alias twin, **6** manifest,
+privacy stamp and contextual prefixes, **7** document ids and urls (never
+aliased by design), **8** every file read or the scan fails, **9** capitalised
+bigram candidates, **10** distributor fingerprints, **11**
+``sensitivity_scanner`` categories. ``benchmarks/pii/RESULTS.md`` carries the
+measurements; each check's own docstring carries its reasoning.
 
-0. **map/stamp agreement.** The manifest's privacy stamp must name the SAME map
-   and policy version this run verifies with, and the map must clear
-   MIN_MAP_ENTRIES. A truncated or decoy map certifies everything.
-1. **Listed person forms.** Every entry variant, every unmapped-person variant
-   and every token permutation of every mapped name: zero hits in the DECODED
-   strings of documents/**, both index-mapping files and the manifest. Decoding
-   is not a nicety — scanning raw file bytes reports a JSON ``\\n`` escape before
-   a redacted birth number as an `n000000`-shaped token, i.e. 285 phantom
-   "idents" on one collection. Needles are built with the registry's own
-   ``boundaried()``, per shape: a mononym needle must not fire after a dot, a
-   slug needle must not fire inside a longer dotted path, and a multi-token
-   needle must survive percent-encoding.
-2. **BM25 corpus tokens.** Each needle is tokenized the way the indexer
-   tokenizes and the corpus is searched for that consecutive token sequence. A
-   byte-grep of the pickle is vacuous: `ada example` matches zero bytes while
-   both tokens sit side by side in the token list. Sequences without
-   discriminative power (a single token, or any one-character token) are
-   reported separately — they collide with ordinary prose.
-3. **NAV idents** outside the exceptions file: zero. **3b** (with a compare
-   twin) asserts aliasing moves no exception token.
-4. **Dotted handles** left after the version/package/domain exclusions: zero.
-5. **The exemption invariant** (with a compare twin), checked exactly: apply the
-   registry to the PRE-ALIAS collection's own decoded text and compare exempt
-   label counts before and after. Comparing the two built collections instead
-   would measure build drift.
-6. **Manifest and contextual prefixes**: the prefix block survives, the privacy
-   stamp is present, no cached prefix replayed a real name, and — with a compare
-   twin — document/chunk counts match (``allow_count_drift`` downgrades that to
-   a warning; a count the twin's manifest does not carry at all is skipped
-   rather than compared against ``None``, which used to read as a mismatch and
-   fail every rebuild against an older manifest).
-7. **Document ids and urls** (never aliased by design) contain no mapped name,
-   matched as a token SEQUENCE so ``First-Last.md`` is caught.
-8. **Every remaining file** under the collection directory is scanned as text. A
-   ``.bak`` or an unrecognised binary is a failure in itself: the scan can only
-   certify what it has read.
-9. **Capitalised-bigram candidates — people the map does not know.** This is the
-   headline category and the one the sweep before it could not see at all: every
-   check above works from the map, so a colleague nobody ever added to the map
-   is invisible to all of them. Candidates are `Capitalised Capitalised(+)`
-   token runs whose FIRST token is a plausible given name — the public
-   gazetteer, the given names of the private map, and the map's
-   ``bare_given_name_residual``, unioned. **Retention, not subtraction.** An
-   earlier draft filtered candidates by dropping anything that looked like a
-   name, which removes precisely the category this check exists to find. What is
-   then subtracted is only what has been reviewed: the map's
-   ``non_person_labels`` and an explicit non-person allow-list.
-10. **Distributor fingerprints.** An absolute ``/Users/`` path or a ``.bak``
-   reference anywhere in the unit. The tarball goes to another machine; the
-   builder's home directory should not travel with it, and on the real corpus
-   this check found another person's macOS username inside a pasted stack trace.
-11. **Sensitive tokens** (``main/privacy/sensitivity_scanner``): fødselsnummer,
-   organisasjonsnummer, bank account numbers, credentials block; email,
-   plaintext-password patterns and phone numbers are reported without blocking.
-   Measured on the three in-scope collections, the blocking categories fire 6/18/20
-   times and everything else fires twice, which is triageable; the *unanchored*
-   shapes they replace fired 270/466/66 times, which is not.
-
-SCOPE. Checks 1-8 certify that no *listed* variant, ident or dotted handle
-survives. They deliberately do not cover bare given names — 74 of them remain in
-the corpus by documented campaign decision, because substituting a bare given
-name corrupts far more prose than it protects. Check 9 covers the pairs those
-given names appear in, which is where a bare given name becomes identifying.
-
-Real names are read from the gitignored map and NEVER printed: everything this
-module reports is a shape (letters -> x) or a count. ``ScanReport.candidates``
-is the one exception, and it is returned in memory for a caller to write to a
-gitignored file — it is not part of ``to_json()``.
+SCOPE. Checks 1-8 certify that no *listed* form survives; they do not cover bare
+given names, which the campaign decided not to substitute. Check 9 covers the
+pairs those appear in, and is the only check that can see a person nobody ever
+added to the map. Real names are read from the gitignored map and NEVER printed:
+everything reported is a shape (letters -> x, digits -> 9) or a count.
+``ScanReport.candidates`` is the one exception, returned in memory for a caller
+to write to a gitignored file — it is not part of ``to_json()``.
 """
 
 import itertools
 import json
+import os
 import pickle
 import re
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from main.graph.graph_loader import get_collection_manifest
 from main.indexes.indexers.bm25_indexer import _tokenize
+from main.persisters.disk_persister import DiskPersister
 from main.privacy.alias_registry import (
-    POLICY_VERSION, AliasRegistry, boundaried, is_person_handle,
+    POLICY_VERSION, VARIANT_LEFT_BOUNDARY, VARIANT_RIGHT_BOUNDARY, VARIANT_SEPARATOR,
+    AliasRegistry, boundaried, shape as sanitize,
 )
 from main.privacy.sensitivity_scanner import (
-    ADVISORY_CATEGORIES, BLOCKING_CATEGORIES, SensitivityScanner,
+    ALL_CATEGORIES, BLOCKING_CATEGORIES, SensitivityScanner,
 )
 
 # The real map has 90 entries. A floor rejects a truncated or decoy map before it
 # can certify a collection it knows almost no names from.
 MIN_MAP_ENTRIES = 50
 
+# The same argument for the gazetteer check 9 retains against. A truncated one
+# retains nothing, and "no candidates" is exactly what a clean collection looks
+# like — the failure is silent in the direction that matters.
+MIN_GAZETTEER_ENTRIES = 500
+
 GIVEN_NAMES_FILE = Path(__file__).with_name("given_names.txt")
 
-IDENT_RE = re.compile(r"(?i)(?<!\w)[a-z]\d{6}(?!\w)")
-HANDLE_RE = re.compile(r"(?<![\w.])@[a-zæøå0-9]+(?:\.[a-zæøå0-9]+)+", re.IGNORECASE)
 WORD_SPLIT_RE = re.compile(r"[^\w]+")
 
 # A distributor fingerprint: an absolute macOS home path, or a reference to a
 # backup file. `.bak` as a FILENAME is check 8; this is `.bak` inside content.
 FINGERPRINT_RE = re.compile(r"/Users/[\w.\-]+|(?<![\w])[\w.\-]*\.bak(?![\w])")
 
-# A capitalised name token: an initial capital and letters only. No digits and no
-# underscore, so `MEL-18833` and `H_BUC-er` are not name tokens; an internal
-# hyphen or apostrophe is (`Nord-Hansen`, `O'Brien`). At least two characters —
-# a single initial after a given name (`Ada E`) is prose as often as it is a
-# person, exactly the reason the BM25 check calls such a sequence
-# non-discriminative.
-_NAME_TOKEN = r"[A-ZÆØÅ][^\W\d_](?:[^\W\d_]|['’\-][^\W\d_])*"
-# Horizontal whitespace only: unlike the substituter's variant separator this one
-# must NOT span a newline. The last word of one line and the first of the next
-# are both capitalised often enough that crossing the break invents candidates,
-# and a name that really is line-wrapped is a *listed* form, which check 1 sees.
-BIGRAM_RE = re.compile(rf"(?<![\w.])({_NAME_TOKEN}(?:[^\S\n]+{_NAME_TOKEN}){{1,2}})(?![\w])")
-
 JSON_ARTIFACTS = ("indexes/index_document_mapping.json",
                   "indexes/reverse_index_document_mapping.json",
                   "manifest.json")
 BM25_INDEX = "indexes/indexer_BM25/indexer"
 
-# Checks 3 and 4 own idents and dotted handles; letting the sensitivity scanner
-# report them too would double-count the same finding in two places.
-SENSITIVITY_CATEGORIES = (BLOCKING_CATEGORIES | ADVISORY_CATEGORIES) - {
-    "nav_ident", "dotted_handle"}
+# Every check this module can produce, in report order. The packager stamps a
+# row for each so a reader can tell "passed" from "never ran": 3b and 5 only run
+# with a pre-alias twin, and a stamp that simply omits them is indistinguishable
+# from one where they passed.
+CHECKS = (
+    ("0", "map_stamp"),
+    ("1", "person_forms"),
+    ("2", "bm25_sequences"),
+    ("3", "nav_idents"),
+    ("3b", "ident_exceptions_unmoved"),
+    ("4", "dotted_handles"),
+    ("5", "exempt_labels_unmoved"),
+    ("6", "manifest_and_prefixes"),
+    ("7", "id_url_names"),
+    ("8", "unreadable_files"),
+    ("9", "bigram_candidates"),
+    ("10", "fingerprints"),
+    ("11", "sensitive_tokens"),
+)
+CHECK_NAMES = tuple(name for _, name in CHECKS)
 
+# Checks 3 and 4 own idents and dotted handles, so check 11 does not report them
+# again — but the scanner is still asked for every category, and the findings are
+# split by category here rather than re-implementing two of the matchers inline.
+IDENT_CATEGORY, HANDLE_CATEGORY = "nav_ident", "dotted_handle"
+_OWNED_ELSEWHERE = {IDENT_CATEGORY, HANDLE_CATEGORY}
+CHECK_11_BLOCKING = BLOCKING_CATEGORIES - _OWNED_ELSEWHERE
+CHECK_11_ADVISORY = ALL_CATEGORIES - BLOCKING_CATEGORIES - _OWNED_ELSEWHERE
 
-def sanitize(text: str) -> str:
-    """Letters -> x. Everything printed by the gate goes through this."""
-    return re.sub(r"[^\W\d_]", "x", text)
+# What separates the strings of one file when they are scanned as one blob (see
+# `_check_artifacts`). NUL is not `\w`, not `\s` and not `.`, so no needle
+# boundary, variant separator or name-run gap can span it: joining cannot invent
+# a match that the strings did not carry individually.
+STRING_JOIN = "\x00"
 
 
 @dataclass
@@ -160,6 +125,10 @@ class ScanReport:
     # the caller writes these to a gitignored file for triage. Never in to_json().
     candidates: list = field(default_factory=list)
     candidates_before_allowlist: int = 0
+    # Every file the walk saw, with its size and mtime. The packager tars THIS
+    # list rather than re-walking: a file that appeared or changed between the
+    # scan and the tar was never certified. Real ids, so not in to_json().
+    scanned_members: list = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
@@ -173,6 +142,16 @@ class ScanReport:
 
     def counts(self) -> dict:
         return {check.name: check.count for check in self.checks}
+
+    def check_summary(self) -> dict:
+        """Every KNOWN check, whether it ran or not. See ``CHECKS``."""
+        summary = {}
+        for _, name in CHECKS:
+            check = self.check(name)
+            summary[name] = {"passed": check.passed if check else True,
+                             "count": check.count if check else 0,
+                             "ran": check is not None}
+        return summary
 
     def to_json(self) -> dict:
         """Machine-readable report. Shapes and counts only, no literals."""
@@ -225,64 +204,136 @@ def build_needles(alias_map: dict) -> list:
     return sorted({n for n in needles if n and n.lower() not in exempt}, key=len, reverse=True)
 
 
-def needle_pattern(needles: list) -> re.Pattern:
-    """One alternation, built with the REGISTRY's own per-shape boundaries.
+def scan_boundaried(literal: str) -> str:
+    r"""``boundaried`` widened wherever the SUBSTITUTER's narrowing hides a leak.
 
-    Sharing them is the point in both directions. A form the substituter removes
-    but the scan cannot see (a name fenced by percent-escapes in a query string)
-    would let the scan certify a collection that still carries it; a form the
-    substituter deliberately leaves (a mononym welded onto a dotted path) but
-    the scan flags would block distribution over a non-leak.
+    **The contract is scan >= substituter, not scan == substituter.** Sharing the
+    registry's boundaries verbatim was half right: a form the substituter removes
+    but the scan cannot see (a name fenced by percent escapes) lets the gate
+    certify a collection that still carries it, so the scan must be at least as
+    wide. But the two narrowings the registry applies exist to protect *code*
+    from being rewritten, not to describe what is safe to ship:
+
+    * a slug followed by another dotted label. `no.nav.ada.example.impl` is a
+      package path the substituter must not touch — but `ada.example.md` is the
+      person, in a document id, which is never aliased by design (check 7). The
+      registry's ``(?!\.\w)`` made the gate blind to every one of those.
+    * a mononym after a percent escape. `%20Zylphia` in a query string is the
+      name in the clear; the substituter leaves it because a mononym welded onto
+      a path segment is not a person, and the percent case is the one exception.
+
+    Everything else is `boundaried` exactly, and
+    ``test_the_scan_boundary_never_narrows_the_substituters`` holds the two
+    together.
     """
+    tokens = literal.split()
+    body = VARIANT_SEPARATOR.join(re.escape(t) for t in tokens) if len(tokens) > 1 \
+        else re.escape(literal)
+    slug = ("." in literal or "_" in literal) and len(tokens) == 1
+    if slug:
+        left, right = r"(?<![.\-])", r"(?![\w\-])"
+    elif len(tokens) == 1:
+        left, right = r"(?:(?<![.\w])|(?<=%[0-9A-Fa-f]{2}))", r"(?!\w)"
+    else:
+        left, right = VARIANT_LEFT_BOUNDARY, VARIANT_RIGHT_BOUNDARY
+    prefix = left if literal[:1].isalnum() or literal[:1] == "_" else ""
+    suffix = right if literal[-1:].isalnum() or literal[-1:] == "_" else ""
+    return f"{prefix}{body}{suffix}"
+
+
+def needle_pattern(needles: list) -> re.Pattern:
+    """One alternation over every needle, with the per-shape scan boundaries."""
     if not needles:
         raise ValueError("No needles built from the alias map — the scan would pass vacuously.")
-    return re.compile("|".join(boundaried(n) for n in needles), re.I)
+    return re.compile("|".join(scan_boundaried(n) for n in needles), re.I)
 
 
 _WORD_RE = re.compile(r"[^\W_]+")
-_PERCENT_ESCAPE_RE = re.compile(r"%[0-9A-Fa-f]{2}")
 
 
-def needle_prefilter(needles: list) -> set:
-    """The lowercased FIRST word of every needle.
+class NeedleScanner:
+    r"""The needle alternation, split into buckets keyed on the first word.
 
-    The needle alternation is ~1000 branches, each with its own lookarounds, and
-    Python's engine tries every branch at every position: 332 seconds over one
-    6 MB collection, which makes a gate the packager calls unusable and a gate
-    nobody runs. Every needle begins with an alphanumeric run, so a text
-    containing none of these words cannot match any branch — one cheap
-    ``[^\\W_]+`` pass rejects almost every string before the alternation sees it.
-    The filter is a superset test, so it can only make the scan faster, never
-    make it miss: a text that *does* contain a first word still runs the full
-    alternation.
+    ~1000 branches, each with its own lookarounds, and Python's engine tries
+    every branch at every position: 83 seconds over one 16 MB collection, which
+    makes a gate the packager calls unusable and a gate nobody runs.
+
+    Every needle begins with an alphanumeric run, so a text that does not contain
+    that word cannot match any branch of that needle's bucket. The word is looked
+    for as a **substring** of ``text.lower()``, not as a token — that is what
+    keeps the filter a superset. The predecessor tokenised the text and compared
+    whole words, which is not:
+
+    * `xyzada.example` — the slug boundary allows a preceding word character (a
+      dotted name appears percent-encoded in URLs), so the needle matches while
+      the first word is not a token of the text;
+    * `50%Beate Example` — the old filter stripped percent escapes first, and
+      `%Be` is a syntactically valid escape, so it ate the first two letters of
+      the name it was supposed to find.
+
+    100 of 100 fuzz cases over the real map went missing that way, and a miss
+    here is a silent PASS.
     """
-    words = set()
-    for needle in needles:
-        match = _WORD_RE.search(needle)
-        if match:
-            words.add(match.group(0).lower())
-    return words
 
+    def __init__(self, needles: list):
+        if not needles:
+            raise ValueError("No needles built from the alias map — the scan would pass "
+                             "vacuously.")
+        buckets: dict[str, list] = {}
+        for needle in needles:
+            match = _WORD_RE.search(needle)
+            if match:
+                buckets.setdefault(match.group(0).lower(), []).append(needle)
+        self._patterns = []
+        for word in sorted(buckets):
+            group = buckets[word]
+            pattern = re.compile("|".join(scan_boundaried(n) for n in group), re.I)
+            # Every needle in this bucket begins WITH the bucket word, so every
+            # match must begin at an occurrence of it: the alternation can be
+            # tried at those positions only, instead of at all four million
+            # positions of a collection. `Pattern.match(text, pos)` still
+            # evaluates lookbehinds against the text before `pos`, which is what
+            # keeps the boundaries meaningful. A bucket whose needles do not all
+            # start with the word (a literal opening with punctuation) falls back
+            # to a full scan rather than to a wrong answer.
+            anchorable = all(n.lower().startswith(word) for n in group)
+            self._patterns.append((word, pattern, anchorable))
 
-def may_contain_needle(text: str, prefilter: set) -> bool:
-    """Superset test: False only when no needle can possibly match.
+    @property
+    def buckets(self) -> int:
+        return len(self._patterns)
 
-    Percent escapes are replaced by a space first, and that is what makes the
-    test sound rather than merely fast. `?f=%2CAda%20Example` tokenizes to
-    `['f', '2CAda', '20Example']` — the needle's first word is welded to the
-    escape's hex digits and the filter rejects a text the needle regex matches.
-    Stripping escapes is also exhaustive, not a patch for one case: a percent
-    escape is the ONLY reason the registry's boundaries admit a match that
-    starts after a word character at all (see `VARIANT_LEFT_BOUNDARY` and the
-    slug branch of `boundaried`), so with escapes gone, every needle match
-    begins at a token start.
-    """
-    if "%" in text:
-        text = _PERCENT_ESCAPE_RE.sub(" ", text)
-    for match in _WORD_RE.finditer(text):
-        if match.group(0).lower() in prefilter:
-            return True
-    return False
+    def _active(self, text: str) -> list:
+        lowered = text.lower()
+        return [entry for entry in self._patterns if entry[0] in lowered]
+
+    def _matches(self, text: str, lowered: str, entry):
+        word, pattern, anchorable = entry
+        if not anchorable:
+            yield from pattern.finditer(text)
+            return
+        start = lowered.find(word)
+        while start != -1:
+            match = pattern.match(text, start)
+            if match:
+                yield match
+            start = lowered.find(word, start + 1)
+
+    def findall(self, text: str) -> list:
+        lowered = text.lower()
+        hits = []
+        for entry in self._patterns:
+            if entry[0] in lowered:
+                hits.extend(m.group(0) for m in self._matches(text, lowered, entry))
+        return hits
+
+    def search(self, text: str):
+        lowered = text.lower()
+        for entry in self._patterns:
+            if entry[0] in lowered:
+                for match in self._matches(text, lowered, entry):
+                    return match
+        return None
 
 
 def token_sequences(needles: list) -> dict:
@@ -296,8 +347,12 @@ def token_sequences(needles: list) -> dict:
 
 
 def contains_sequence(tokens, sequences) -> bool:
+    # The set of sequence lengths is a property of the needle set, not of the
+    # position being probed; rebuilding it inside the loop rebuilt it once per
+    # token of every document id in the collection.
+    lengths = {len(s) for s in sequences}
     for position in range(len(tokens)):
-        for length in {len(s) for s in sequences}:
+        for length in lengths:
             if tuple(tokens[position:position + length]) in sequences:
                 return True
     return False
@@ -306,30 +361,44 @@ def contains_sequence(tokens, sequences) -> bool:
 # --- given names ------------------------------------------------------------
 
 def load_public_given_names(path: Path = GIVEN_NAMES_FILE) -> set:
-    if not path.exists():
+    if not Path(path).exists():
         return set()
-    return {line.strip().lower() for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip() and not line.startswith("#")}
+    names = set()
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        # Strip FIRST, then test for a comment. Testing the raw line let an
+        # indented `# …` through as a name, and disagreed with the structural
+        # test in tests/test_public_hygiene.py, which strips first.
+        entry = line.strip()
+        if entry and not entry.startswith("#"):
+            names.add(entry.lower())
+    return names
 
 
 def map_given_names(alias_map: dict) -> set:
     """The given names the PRIVATE map knows, loaded at runtime and never shipped.
 
-    Three sources: the first token of every multi-token entry variant, the same
-    for the unmapped people, and every key of ``bare_given_name_residual`` — the
-    given names the campaign decided not to substitute. That last set is exactly
-    the population this check has to be able to retain: a residual given name
-    followed by a surname is a full name nobody aliased.
+    Four sources: the first token of every multi-token entry variant, the first
+    token of the entry's ``name`` (the only field guaranteed to spell the person
+    `First Last` — a map whose variants are all `Last, First` and slugs
+    contributed nothing), the same for the unmapped people, and every key of
+    ``bare_given_name_residual``. That last set is exactly the population this
+    check has to be able to retain: a residual given name followed by a surname
+    is a full name nobody aliased.
     """
     names = set()
+
+    def add_first_token(literal):
+        if isinstance(literal, str) and " " in literal.strip():
+            names.add(literal.split()[0].lower())
+
     for entry in alias_map.get("entries", []):
+        add_first_token(entry.get("name"))
         for variant in entry.get("variants", []):
-            if " " in variant:
-                names.add(variant.split()[0].lower())
-    for variants in alias_map.get("unmapped_people_variants", {}).values():
+            add_first_token(variant)
+    for label, variants in alias_map.get("unmapped_people_variants", {}).items():
+        add_first_token(label)
         for variant in variants:
-            if " " in variant:
-                names.add(variant.split()[0].lower())
+            add_first_token(variant)
     names |= {name.lower() for name in alias_map.get("bare_given_name_residual", {})}
     return {name for name in names if name}
 
@@ -337,11 +406,11 @@ def map_given_names(alias_map: dict) -> set:
 def load_allowed_bigrams(path) -> set:
     """Explicitly reviewed non-person capitalised pairs, from a gitignored file.
 
-    Seeded from a real corpus run and reviewed one by one: place names
-    (`Jan Mayen`), design-system components whose first word is also a given
-    name, sentence-initial Norwegian words that happen to be given names
-    (`Andre …`, `Endre …`, `Per …`), and the national synthetic test persons.
-    Missing file => nothing is allow-listed, which fails towards reporting.
+    Seeded from a real corpus run and reviewed one by one: place names, design
+    system components whose first word is also a given name, sentence-initial
+    Norwegian words that happen to be given names, and the national synthetic
+    test persons. Missing file => nothing is allow-listed, which fails towards
+    reporting.
     """
     if not path or not Path(path).exists():
         return set()
@@ -349,18 +418,88 @@ def load_allowed_bigrams(path) -> set:
     return {b.strip().lower() for b in data.get("bigrams", []) if isinstance(b, str) and b.strip()}
 
 
+# --- check 9: capitalised name runs -----------------------------------------
+
+# A name token: letters only, at least two characters, an internal hyphen or
+# apostrophe allowed (`Nord-Hansen`, `O'Brien`). No digits and no underscore, so
+# an issue key (`ABC-12345`) and an underscored identifier are not name tokens. The initial capital is tested
+# with `str.isupper()` rather than an `[A-ZÆØÅ]` class: that class is a Norwegian
+# keyboard's alphabet, and the corpora are not — `Áilu` and `Łukasz` fell out of
+# check 9 entirely, which is the one check that can see an unmapped person.
+_NAME_TOKEN_RE = re.compile(r"[^\W\d_](?:[^\W\d_]|['’\-][^\W\d_])*")
+
+# What may separate two tokens of one name. Horizontal whitespace, or ONE
+# newline: a hard-wrapped `First\nLast` is the same name, and it is exactly the
+# form the substituter's own VARIANT_SEPARATOR accepts. A blank line is a
+# paragraph break and does not join.
+_NAME_GAP_RE = re.compile(r"(?:[^\S\n]+|[^\S\n]*\n[^\S\n]*)")
+
+_GIVEN_NAME_PART_RE = re.compile(r"[^\W\d_]{2,}")
+
+
+def _name_tokens(text: str):
+    """(token, start, end) for every token that can take part in a name run."""
+    length = len(text)
+    for match in _NAME_TOKEN_RE.finditer(text):
+        token = match.group(0)
+        if len(token) < 2 or not token[0].isupper():
+            continue
+        start, end = match.start(), match.end()
+        # A digit or `_` welded to either side means this is an identifier
+        # fragment, not a word: `id4711Ada`, `Ada_02`.
+        if start and (text[start - 1].isdigit() or text[start - 1] == "_"):
+            continue
+        if end < length and (text[end].isdigit() or text[end] == "_"):
+            continue
+        yield token, start, end
+
+
+def name_runs(text: str):
+    """Maximal runs of two or more consecutive capitalised name tokens."""
+    run, previous_end = [], 0
+    for token, start, end in _name_tokens(text):
+        if run and _NAME_GAP_RE.fullmatch(text, previous_end, start):
+            run.append(token)
+        else:
+            if len(run) > 1:
+                yield run
+            run = [token]
+        previous_end = end
+    if len(run) > 1:
+        yield run
+
+
+def _is_given_name(token: str, given_names: set) -> bool:
+    """True when the token, or any hyphen/apostrophe-separated part of it, is a
+    plausible given name. `Anne-Marie` is one name to a reader and two entries to
+    a gazetteer, and probing only the whole token dropped every compound."""
+    lowered = token.lower()
+    if lowered in given_names:
+        return True
+    return any(part in given_names for part in _GIVEN_NAME_PART_RE.findall(lowered))
+
+
 def bigram_candidates(texts, given_names: set, exempt: set, allowed: set):
-    """(surviving Counter, count before the allow-list was applied)."""
+    """(surviving Counter, count before the allow-list was applied).
+
+    EVERY adjacent pair inside a capitalised run is evaluated, not just the one
+    at its head. Probing only the head meant a name behind any other capitalised
+    word was invisible — an acronym (`NAV Kari Example`), a heading word
+    (`## Referat Kari Example`), or simply another name.
+    """
     retained, before = Counter(), Counter()
     for text in texts:
-        for match in BIGRAM_RE.finditer(text):
-            candidate = re.sub(r"[^\S\n]+", " ", match.group(1))
-            lowered = candidate.lower()
-            if candidate.split()[0].lower() not in given_names or lowered in exempt:
-                continue
-            before[candidate] += 1
-            if lowered not in allowed:
-                retained[candidate] += 1
+        for run in name_runs(text):
+            for first, second in zip(run, run[1:]):
+                if not _is_given_name(first, given_names):
+                    continue
+                candidate = f"{first} {second}"
+                lowered = candidate.lower()
+                if lowered in exempt:
+                    continue
+                before[candidate] += 1
+                if lowered not in allowed:
+                    retained[candidate] += 1
     return retained, before
 
 
@@ -406,64 +545,106 @@ def _scan_vectors(path: Path):
 
 
 def collection_files(root: Path):
-    for path in sorted(root.rglob("*")):
-        if path.is_file():
-            yield path, classify(path.relative_to(root))
+    """(path, kind) for everything under `root`, symlinks flagged, never followed.
+
+    ``os.walk(followlinks=False)`` plus an explicit ``is_symlink()`` on each
+    entry. A symlinked FILE would be scanned as its target — a file that is not
+    part of the collection at all, and that the recipient will not receive — and
+    a symlinked DIRECTORY would have the whole subtree walked and certified while
+    the tarball carries a dangling link. Either one means the directory is not
+    what the gate thinks it is, so both are check-8 failures.
+    """
+    entries = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        here = Path(dirpath)
+        linked_dirs = [name for name in dirnames if (here / name).is_symlink()]
+        entries.extend((here / name, "symlink") for name in linked_dirs)
+        dirnames[:] = sorted(name for name in dirnames if name not in linked_dirs)
+        for name in filenames:
+            path = here / name
+            entries.append((path, "symlink" if path.is_symlink()
+                            else classify(path.relative_to(root))))
+    return sorted(entries, key=lambda entry: entry[0].as_posix())
+
+
+def _read_json(path: Path):
+    """(payload, problem). A file the gate cannot decode is a check-8 failure
+    with a path on it, never a traceback out of the middle of the scan."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8")), None
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+        return None, f"unreadable ({type(e).__name__})"
 
 
 def documents_of(root: Path):
+    """Decoded documents. Unreadable ones are skipped — check 8 reports them."""
     for path in sorted((root / "documents").rglob("*.json")):
-        yield json.loads(path.read_text(encoding="utf-8"))
+        if path.is_symlink():
+            continue
+        payload, problem = _read_json(path)
+        if problem is None:
+            yield payload
 
 
 # --- the checks -------------------------------------------------------------
 
-def _check_map_stamp(root: Path, alias_map: dict) -> Check:
+def _check_map_stamp(alias_map: dict, manifest) -> Check:
     entries = len(alias_map["entries"])
-    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    stamp = manifest.get("privacy") or {}
     problems = []
     if entries < MIN_MAP_ENTRIES:
         problems.append(f"map has {entries} entries, below the {MIN_MAP_ENTRIES} floor")
-    if stamp.get("map_version") != alias_map.get("version"):
-        problems.append(f"manifest map_version {stamp.get('map_version')} "
-                        f"!= {alias_map.get('version')}")
-    if stamp.get("policy_version") != POLICY_VERSION:
-        problems.append(f"manifest policy_version {stamp.get('policy_version')} "
-                        f"!= {POLICY_VERSION}")
+    if manifest is None:
+        problems.append("manifest.json is missing or unreadable")
+        stamp = {}
+    else:
+        stamp = manifest.get("privacy") or {}
+    if manifest is not None:
+        if stamp.get("map_version") != alias_map.get("version"):
+            problems.append(f"manifest map_version {stamp.get('map_version')} "
+                            f"!= {alias_map.get('version')}")
+        if stamp.get("policy_version") != POLICY_VERSION:
+            problems.append(f"manifest policy_version {stamp.get('policy_version')} "
+                            f"!= {POLICY_VERSION}")
     return Check("0", "map_stamp", not problems, len(problems),
                  f"({entries} entries, map v{alias_map.get('version')}, "
                  f"policy v{POLICY_VERSION}) {'; '.join(problems) or 'ok'}")
 
 
-def _check_artifacts(root: Path, needle_re, prefilter, sequences, exceptions, sensitivity,
-                     given_names, exempt, allowed) -> list:
+def _check_artifacts(root: Path, scanner: NeedleScanner, sequences, sensitivity,
+                     given_names, exempt, allowed):
     """Checks 1, 3, 4, 7, 8, 9, 10 and 11 — one walk over every file."""
-    per_artifact, idents, handles = Counter(), Counter(), Counter()
+    per_artifact, examples = Counter(), {}
+    idents, handles = Counter(), Counter()
     fingerprints, sensitive = Counter(), Counter()
-    id_url_hits, unreadable, texts = [], [], []
+    id_url_hits, unreadable, texts, members = [], [], [], []
     scanned = 0
 
-    def scan_text(label, text):
-        if may_contain_needle(text, prefilter):
-            hits = needle_re.findall(text)
-            if hits:
-                per_artifact[label] += len(hits)
-        for token in IDENT_RE.findall(text):
-            if token.lower() not in exceptions:
-                idents[token] += 1
-        for match in HANDLE_RE.finditer(text):
-            if is_person_handle(match.group(0)):
-                handles[match.group(0)] += 1
-        for match in FINGERPRINT_RE.finditer(text):
-            fingerprints[sanitize(match.group(0))] += 1
-        for finding in sensitivity.detect(text):
-            sensitive[finding.category] += 1
-        texts.append(text)
+    def scan_strings(strings):
+        """The cheap per-string detectors."""
+        for text in strings:
+            for finding in sensitivity.detect(text):
+                sensitive[finding.category] += 1
+                if finding.category == IDENT_CATEGORY:
+                    idents[finding.shape] += 1
+                elif finding.category == HANDLE_CATEGORY:
+                    handles[finding.shape] += 1
+            for match in FINGERPRINT_RE.finditer(text):
+                fingerprints[sanitize(match.group(0))] += 1
 
     for path, kind in collection_files(root):
         relative = path.relative_to(root).as_posix()
         label = "documents" if relative.startswith("documents/") else relative
+        try:
+            stat = os.lstat(path)
+            members.append({"path": relative, "size": stat.st_size,
+                            "mtime": stat.st_mtime_ns})
+        except OSError as e:
+            unreadable.append(f"{relative}: unstattable ({type(e).__name__})")
+            continue
+
+        if kind == "symlink":
+            unreadable.append(f"{relative}: symlink (not followed)")
+            continue
         if kind == "bak":
             unreadable.append(relative)
             continue
@@ -475,39 +656,60 @@ def _check_artifacts(root: Path, needle_re, prefilter, sequences, exceptions, se
                 unreadable.append(f"{relative}: {problem}")
             scanned += 1
             continue
+
         scanned += 1
         if kind == "json":
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            for text in walk_strings(payload):
-                scan_text(label, text)
-            if relative.startswith("documents/"):
+            payload, problem = _read_json(path)
+            if problem:
+                unreadable.append(f"{relative}: {problem}")
+                continue
+            strings = list(walk_strings(payload))
+            if relative.startswith("documents/") and isinstance(payload, dict):
                 for field_name in ("id", "url"):
                     value = payload.get(field_name) or ""
                     tokens = [t.lower() for t in WORD_SPLIT_RE.split(value) if t]
                     if contains_sequence(tokens, sequences):
                         id_url_hits.append(sanitize(value))
-            continue
-        try:
-            scan_text(label, path.read_text(encoding="utf-8"))
-        except (UnicodeDecodeError, OSError):
-            unreadable.append(relative)
+        else:
+            try:
+                strings = [path.read_text(encoding="utf-8")]
+            except (UnicodeDecodeError, OSError) as e:
+                unreadable.append(f"{relative}: unreadable ({type(e).__name__})")
+                continue
+
+        scan_strings(strings)
+        # The needle alternation and the name-run walk run ONCE per file over the
+        # joined strings rather than once per string. STRING_JOIN is NUL, which
+        # no boundary, separator or gap in either pattern can cross, so the
+        # result is identical and the per-string overhead (a `.lower()` and a
+        # bucket sweep each) is paid once.
+        blob = STRING_JOIN.join(strings)
+        hits = scanner.findall(blob)
+        if hits:
+            per_artifact[label] += len(hits)
+            examples.setdefault(label, []).extend(sanitize(h) for h in hits[:3])
+        texts.append(blob)
 
     retained, before = bigram_candidates(texts, given_names, exempt, allowed)
-    blocking = {c: n for c, n in sensitive.items() if c in BLOCKING_CATEGORIES}
-    advisory = {c: n for c, n in sensitive.items() if c not in BLOCKING_CATEGORIES}
+    blocking = {c: n for c, n in sensitive.items() if c in CHECK_11_BLOCKING}
+    advisory = {c: n for c, n in sensitive.items() if c in CHECK_11_ADVISORY}
 
     checks = [
         Check("1", "person_forms", not per_artifact, sum(per_artifact.values()),
-              f"in {scanned} scanned files {dict(per_artifact) or '(clean)'}"),
+              f"in {scanned} scanned files {dict(per_artifact) or '(clean)'}",
+              # A bare count says a listed name survived somewhere in 543 files.
+              # The masked shapes say which FORM it was, which is what tells the
+              # operator whether to look at a slug, a permutation or prose.
+              notes=[f"{label}: {sorted(set(shapes))[:3]}"
+                     for label, shapes in sorted(examples.items())]),
         Check("3", "nav_idents", not idents, sum(idents.values()),
-              f"non-exempt ident tokens {[sanitize(t) for t in list(idents)[:10]]}"),
+              f"non-exempt ident tokens {list(idents)[:10]}"),
         Check("4", "dotted_handles", not handles, sum(handles.values()),
-              f"after version/package/domain exclusions "
-              f"{[sanitize(h) for h in list(handles)[:5]]}"),
+              f"after version/package/domain exclusions {list(handles)[:5]}"),
         Check("7", "id_url_names", not id_url_hits, len(id_url_hits),
               f"ids/urls containing a mapped name {id_url_hits[:3]}"),
         Check("8", "unreadable_files", not unreadable, len(unreadable),
-              f".bak / uncertifiable files {unreadable[:5]}"),
+              f".bak / symlinked / uncertifiable files {unreadable[:5]}"),
         Check("9", "bigram_candidates", not retained, len(retained),
               f"unreviewed capitalised pairs with a plausible given name "
               f"({len(before)} before the allow-list, "
@@ -521,7 +723,7 @@ def _check_artifacts(root: Path, needle_re, prefilter, sequences, exceptions, se
               f"blocking categories {blocking or '(clean)'}",
               notes=[f"advisory (not blocking): {advisory}"] if advisory else []),
     ]
-    return checks, retained, len(before)
+    return checks, retained, len(before), members
 
 
 def _discriminative(tokens) -> bool:
@@ -537,9 +739,21 @@ def _discriminative(tokens) -> bool:
             and sum(len(t) for t in tokens) >= 8)
 
 
+def _corpus_tokens(root: Path):
+    """The BM25 corpus, read the way the searcher reads it.
+
+    ``DiskPersister`` owns the unpickling and turns a truncated artifact into a
+    ``CorruptArtifactError`` naming the file, instead of an ``EOFError`` from the
+    middle of the gate.
+    """
+    return DiskPersister(str(root.parent)).read_bin_file(
+        f"{root.name}/{BM25_INDEX}")["corpus_tokens"]
+
+
 def _check_bm25(root: Path, needles, compare_root: Path | None) -> Check:
-    path = root / BM25_INDEX
-    if not path.exists():
+    """Check 2. A byte-grep of the pickle is vacuous: `ada example` matches zero
+    bytes while both tokens sit side by side in ``corpus_tokens``."""
+    if not (root / BM25_INDEX).exists():
         return Check("2", "bm25_sequences", True, 0, "no index, skipped")
 
     sequences, weak = {}, {}
@@ -556,8 +770,7 @@ def _check_bm25(root: Path, needles, compare_root: Path | None) -> Check:
         weak_by_first.setdefault(tokens[0], []).append(tokens)
 
     def count(target: Path):
-        with open(target / BM25_INDEX, "rb") as f:
-            corpus = pickle.load(f)["corpus_tokens"]
+        corpus = _corpus_tokens(target)
         strong_hits, weak_hits = Counter(), 0
         for doc_tokens in corpus:
             for position, token in enumerate(doc_tokens):
@@ -585,13 +798,21 @@ def _check_exemption_invariant(compare_root: Path, alias_map, exceptions, regist
     Exact, because both sides are the SAME text: the pre-alias collection's own
     decoded documents, before and after `registry.apply`.
     """
+    terms = sorted({*alias_map["non_person_labels"], *exceptions}, key=len, reverse=True)
+    if not terms:
+        # `"|".join([])` is the EMPTY pattern, which matches at every position:
+        # the invariant would then compare a count of characters on each side and
+        # report a "moved exempt label" for any text the registry shortened.
+        detail = "no exempt labels and no ident exceptions to hold invariant"
+        return [Check("5", "exempt_labels_unmoved", True, 0, detail),
+                Check("3b", "ident_exceptions_unmoved", True, 0, detail)]
+
     before_text = []
     for document in documents_of(compare_root):
         before_text.extend(walk_strings(document))
     joined_before = "\n".join(before_text)
     joined_after = registry.apply(joined_before)
 
-    terms = sorted({*alias_map["non_person_labels"], *exceptions}, key=len, reverse=True)
     pattern = re.compile("|".join(r"(?<!\w)" + re.escape(t) + r"(?!\w)" for t in terms), re.I)
 
     def counts(text):
@@ -613,21 +834,27 @@ def _check_exemption_invariant(compare_root: Path, alias_map, exceptions, regist
     ]
 
 
-def _check_manifest_and_prefixes(root: Path, compare_root: Path | None, needle_re, prefilter,
-                                 allow_count_drift: bool) -> Check:
-    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+def _check_manifest_and_prefixes(root: Path, manifest, compare_root: Path | None,
+                                 scanner: NeedleScanner, allow_count_drift: bool) -> Check:
+    problems, notes = [], []
+    if manifest is None:
+        return Check("6", "manifest_and_prefixes", False, 1,
+                     "manifest.json is missing or unreadable")
+
     privacy = manifest.get("privacy")
     prefix_block = manifest.get("contextualPrefix")
-    ok = privacy is not None
-    notes = [f"privacy stamp: {privacy}"]
+    if privacy is None:
+        problems.append("no privacy stamp in the manifest")
+    notes.append(f"privacy stamp: {privacy}")
 
     if compare_root is not None:
-        before = json.loads((compare_root / "manifest.json").read_text(encoding="utf-8"))
+        before = get_collection_manifest(compare_root.parent, compare_root.name) or {}
         expected_model = (before.get("contextualPrefix") or {}).get("model")
         if expected_model:
-            ok = ok and (prefix_block or {}).get("model") == expected_model
-            notes.append(f"contextualPrefix model: {(prefix_block or {}).get('model')} "
-                         f"(was {expected_model})")
+            actual_model = (prefix_block or {}).get("model")
+            if actual_model != expected_model:
+                problems.append("contextualPrefix model differs from the twin's")
+            notes.append(f"contextualPrefix model: {actual_model} (was {expected_model})")
         for key in ("numberOfDocuments", "numberOfChunks"):
             new, old = manifest.get(key), before.get(key)
             if new is None or old is None:
@@ -642,7 +869,8 @@ def _check_manifest_and_prefixes(root: Path, compare_root: Path | None, needle_r
                 continue
             notes.append(f"{'WARN' if allow_count_drift else 'FAIL'} {key}: {new} (was {old}) "
                          f"— the rebuild did not index the same set of documents")
-            ok = ok and allow_count_drift
+            if not allow_count_drift:
+                problems.append(f"{key} drifted from the twin")
 
     dirty = 0
     if prefix_block:
@@ -653,11 +881,17 @@ def _check_manifest_and_prefixes(root: Path, compare_root: Path | None, needle_r
                 if not prefix:
                     continue
                 prefixed += 1
-                if may_contain_needle(prefix, prefilter) and needle_re.search(prefix):
+                if scanner.search(prefix):
                     dirty += 1
         notes.append(f"chunks carrying a contextual prefix: {prefixed}; "
                      f"prefixes naming a mapped person: {dirty}")
-    return Check("6", "manifest_and_prefixes", ok and dirty == 0, dirty, "", notes=notes)
+        if dirty:
+            problems.append(f"{dirty} cached prefixes replayed a mapped name")
+
+    # `count` used to be `dirty` unconditionally, so a missing stamp reported
+    # "0 [FAIL]" — a count of the one thing that did NOT go wrong.
+    return Check("6", "manifest_and_prefixes", not problems, len(problems),
+                 "; ".join(problems), notes=notes)
 
 
 # --- entry point ------------------------------------------------------------
@@ -677,36 +911,39 @@ def scan_collection(collection_dir, map_path, *, compare_dir=None, exceptions=()
     alias_map = json.loads(Path(map_path).read_text(encoding="utf-8"))
     registry = AliasRegistry.load(str(map_path))
     exceptions = {t.lower() for t in exceptions}
+    manifest = get_collection_manifest(root.parent, root.name)
 
     needles = build_needles(alias_map)
-    needle_re = needle_pattern(needles)
-    prefilter = needle_prefilter(needles)
+    scanner = NeedleScanner(needles)
     sequences = token_sequences(needles)
 
     given_names = load_public_given_names(given_names_file) | map_given_names(alias_map)
+    if len(given_names) < MIN_GAZETTEER_ENTRIES:
+        raise ValueError(
+            f"the given-name gazetteer has {len(given_names)} entries, below the "
+            f"{MIN_GAZETTEER_ENTRIES} floor — check 9 would retain almost nothing and "
+            f"report a clean collection.")
     exempt = {label.lower() for label in alias_map.get("non_person_labels", [])}
     allowed = load_allowed_bigrams(allowed_bigrams_path)
-    sensitivity = SensitivityScanner(categories=SENSITIVITY_CATEGORIES,
-                                     ident_exceptions=exceptions)
+    sensitivity = SensitivityScanner(categories=ALL_CATEGORIES, ident_exceptions=exceptions)
 
     report = ScanReport(collection=root.name, map_version=alias_map.get("version"),
                         policy_version=POLICY_VERSION, map_entries=len(alias_map["entries"]))
-    report.checks.append(_check_map_stamp(root, alias_map))
+    report.checks.append(_check_map_stamp(alias_map, manifest))
 
-    artifact_checks, candidates, before = _check_artifacts(
-        root, needle_re, prefilter, sequences, exceptions, sensitivity,
-        given_names, exempt, allowed)
+    artifact_checks, candidates, before, members = _check_artifacts(
+        root, scanner, sequences, sensitivity, given_names, exempt, allowed)
     report.checks.extend(artifact_checks)
     report.candidates = [{"text": text, "occurrences": count}
                          for text, count in candidates.most_common()]
     report.candidates_before_allowlist = before
+    report.scanned_members = members
 
     report.checks.append(_check_bm25(root, needles, compare_root))
     if compare_root is not None:
         report.checks.extend(
             _check_exemption_invariant(compare_root, alias_map, exceptions, registry))
     report.checks.append(
-        _check_manifest_and_prefixes(root, compare_root, needle_re, prefilter,
-                                     allow_count_drift))
+        _check_manifest_and_prefixes(root, manifest, compare_root, scanner, allow_count_drift))
     report.checks.sort(key=lambda c: (int(re.match(r"\d+", c.number).group(0)), c.number))
     return report

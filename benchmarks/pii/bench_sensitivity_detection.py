@@ -24,15 +24,16 @@ name, and nothing read from the private map is returned.
 """
 
 import json
+import re
 import time
 from pathlib import Path
 
 from benchmarks.results import BenchmarkResult
 from main.privacy.index_scan import (
-    BIGRAM_RE, bigram_candidates, load_allowed_bigrams, load_public_given_names,
-    map_given_names,
+    bigram_candidates, load_allowed_bigrams, load_public_given_names, map_given_names,
+    name_runs,
 )
-from main.privacy.sensitivity_scanner import ALL_CATEGORIES, SensitivityScanner
+from main.privacy.sensitivity_scanner import ALL_CATEGORIES, SensitivityScanner, _mod11
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MAP_GLOB = "huginn-*/privacy/aliases.json"
@@ -46,13 +47,16 @@ CASES = [
     ("arbeidsgiver med orgnr 888888888", {"organisasjonsnummer"}),
     ("Foretaksnummer 987 654 325 i registeret", {"organisasjonsnummer"}),
     ("987 654 325", {"organisasjonsnummer"}),              # published grouping, no anchor
+    ("987\u00a0654\u00a0325", {"organisasjonsnummer"}),    # …pasted with NBSP separators
+    ("974 760002", set()),                                 # ONE separator: a wrapped id
     ("confluence.example.no/pages/viewpage.action?pageId=987654325", set()),
     ("Org. nr.: 912345670 finnes ikke", set()),            # anchored, MOD11 fails
     ("referanse 123456789 i saken", set()),                # no anchor, no grouping
     # --- bankkonto -----------------------------------------------------------
     ("kontonummer 1234.56.78903", {"bankkonto"}),
     ("Kontonr 12345678903 for utbetaling", {"bankkonto"}),
-    ("versjon 1234.56.78903 av skjemaet", {"bankkonto"}),  # grouped form is the signal
+    ("1234.56.78903 er kontoen", {"bankkonto"}),           # grouped form is the anchor
+    ("versjon 1234.56.00000 av skjemaet", set()),          # grouped, check digit fails
     ("id 12345678903 i loggen", set()),                    # 11 digits, no anchor
     # --- telefon -------------------------------------------------------------
     ("ring +47 91234567 ved feil", {"telefon"}),
@@ -64,6 +68,9 @@ CASES = [
     ("api_key = A1b2C3d4E5f6G7h8J9k0L1m2", {"credential"}),
     ("client_secret: 'zzzzzzzzzzzzzzzzzzzzzzzz'", {"credential"}),
     ("https://svc:hunter2secret@intern.example.no/api", {"credential", "email"}),
+    ("Authorization: Bearer A1b2C3d4E5f6G7h8J9k0L1m2N3o4", {"credential"}),
+    ("-----BEGIN RSA PRIVATE KEY-----", {"credential"}),
+    ("private_key: /etc/ssl/private/service-account-signing.pem", set()),
     ("token count was 24000 for the run", set()),
     ("secret_key = short", set()),                          # too short to be a key
     # --- personnummer (PiiSanitizer, reused through detect) ------------------
@@ -184,7 +191,9 @@ def bench_bigram_detector(ctx=None) -> BenchmarkResult:
             payload = json.loads(path.read_text(encoding="utf-8"))
             text = payload.get("text") or ""
             texts.append(text)
-            pairs += len(BIGRAM_RE.findall(text))
+            # Every ADJACENT pair of a capitalised run is a pair the detector
+            # evaluates, so the denominator counts pairs, not runs.
+            pairs += sum(len(run) - 1 for run in name_runs(text))
         exempt = {label.lower() for label in alias_map.get("non_person_labels", [])}
         retained, _ = bigram_candidates(texts, public | private, exempt, set())
         allowed = load_allowed_bigrams(_allowlist_path())
@@ -207,8 +216,83 @@ def bench_bigram_detector(ctx=None) -> BenchmarkResult:
                            duration_ms=(time.monotonic() - start) * 1000)
 
 
+# --- the anchoring comparison, on the real in-scope collections --------------
+#
+# §2 of RESULTS.md used to be a hand measurement with no way to re-run it. The
+# three variants are reimplemented here rather than parameterised into
+# SensitivityScanner on purpose: they are the STRAWMEN the shipped detector
+# replaced (a detector written from the format description alone), and putting a
+# "no precision" mode into the production class is how one gets used by accident.
+_V_ORGNR_SHAPE = re.compile(r"(?<!\d)(\d{9})(?!\d)")
+_V_PHONE_SHAPE = re.compile(r"(?<![\w+])(\d{8})(?![\d\w])")
+_V_BANK_SHAPE = re.compile(r"(?<![\d./])(\d{11})(?![\d./])")
+_ORG_WEIGHTS = [3, 2, 7, 6, 5, 4, 3, 2]
+_BANK_WEIGHTS = [5, 4, 3, 2, 7, 6, 5, 4, 3, 2]
+
+
+def _scope_collections() -> list:
+    scope = json.loads((REPO_ROOT / "main" / "privacy" / "scope.json").read_text("utf-8"))
+    return sorted(scope.get("collections", []))
+
+
+def _document_texts(collection: Path):
+    for path in sorted((collection / "documents").rglob("*.json")):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        yield payload.get("text") or ""
+
+
+def _variant_counts(text: str) -> dict:
+    """`no anchor` (check digit + leading digit) and `shape` (check digit only)."""
+    counts = {"orgnr_no_anchor": 0, "orgnr_shape": 0,
+              "telefon_no_anchor": 0, "bankkonto_no_anchor": 0}
+    for match in _V_ORGNR_SHAPE.finditer(text):
+        if not _mod11(match.group(1), _ORG_WEIGHTS):
+            continue
+        counts["orgnr_shape"] += 1
+        if match.group(1)[0] in "89":
+            counts["orgnr_no_anchor"] += 1
+    counts["telefon_no_anchor"] = len(_V_PHONE_SHAPE.findall(text))
+    for match in _V_BANK_SHAPE.finditer(text):
+        if _mod11(match.group(1), _BANK_WEIGHTS):
+            counts["bankkonto_no_anchor"] += 1
+    return counts
+
+
+def bench_anchoring_on_corpus(ctx=None) -> BenchmarkResult:
+    """What each precision requirement buys, per in-scope collection.
+
+    Collections are reported as A/B/C in sorted scope order; the mapping is not
+    written down here, because a per-collection finding count is a statement
+    about a named corpus and RESULTS.md is a tracked file.
+    """
+    start = time.monotonic()
+    scanner = SensitivityScanner()
+    metrics = {}
+    for index, name in enumerate(_scope_collections()):
+        collection = REPO_ROOT / "data" / "collections" / name
+        if not (collection / "documents").exists():
+            continue
+        label = chr(ord("A") + index)
+        anchored = {c: 0 for c in ALL_CATEGORIES}
+        variants = {"orgnr_no_anchor": 0, "orgnr_shape": 0,
+                    "telefon_no_anchor": 0, "bankkonto_no_anchor": 0}
+        for text in _document_texts(collection):
+            for finding in scanner.detect(text):
+                anchored[finding.category] += 1
+            for key, value in _variant_counts(text).items():
+                variants[key] += value
+        for category in ("organisasjonsnummer", "telefon", "bankkonto",
+                         "personnummer", "credential", "email", "password"):
+            metrics[f"{label}_{category}_anchored"] = anchored[category]
+        for key, value in variants.items():
+            metrics[f"{label}_{key}"] = value
+    return BenchmarkResult(name="anchoring_on_corpus", category="pii", metrics=metrics,
+                           duration_ms=(time.monotonic() - start) * 1000)
+
+
 if __name__ == "__main__":
-    for result in (bench_sensitivity_detection(), bench_bigram_detector()):
+    for result in (bench_sensitivity_detection(), bench_bigram_detector(),
+                   bench_anchoring_on_corpus()):
         print(f"\n{result.name} ({result.duration_ms:.0f} ms)")
         for key, value in result.metrics.items():
             print(f"  {key}: {value:.4f}" if isinstance(value, float) else f"  {key}: {value}")

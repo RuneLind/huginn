@@ -9,9 +9,12 @@ aliased must not be packaged at all.
 Every name is invented ("Kari Ukjent", "Ada Example"); the fixtures come from
 tests/test_scan_index.py.
 """
+import getpass
 import json
+import subprocess
 import sys
 import tarfile
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -28,10 +31,12 @@ from tests.test_scan_index import _clean_document, _document, _map, _write_colle
 def workspace(tmp_path, monkeypatch):
     """A tmp repo root whose scope, map and collections are all discoverable.
 
-    `monkeypatch.chdir` is what makes `resolve_registry` see the tmp scope file:
-    the private scope and map globs are resolved against the process CWD, the
-    same way every other privacy path in this repo is.
+    `alias_registry.REPO_ROOT` is what makes `resolve_registry` see the tmp scope
+    file: the private scope and map globs resolve against the repo root, not the
+    process CWD, so that a guard built on them arms wherever it is called from.
+    `chdir` stays so a CWD-relative read would still show up as a failure.
     """
+    from main.privacy import alias_registry
     privacy = tmp_path / "huginn-x" / "privacy"
     privacy.mkdir(parents=True)
     (privacy / "aliases.json").write_text(json.dumps(_map()), encoding="utf-8")
@@ -39,8 +44,10 @@ def workspace(tmp_path, monkeypatch):
         json.dumps({"collections": ["demo-aliased"], "basePaths": []}), encoding="utf-8")
     (tmp_path / "collections").mkdir()
     (tmp_path / "out").mkdir()
+    monkeypatch.setattr(alias_registry, "REPO_ROOT", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(pkg, "REPO_ROOT", tmp_path)
     return tmp_path
 
 
@@ -52,10 +59,11 @@ def _package(workspace, monkeypatch, name="demo-aliased", extra=()):
         "--map", str(workspace / "huginn-x" / "privacy" / "aliases.json"),
         *extra,
     ])
-    with pytest.raises(SystemExit) as excinfo:
+    try:
         pkg.main()
-        return 0
-    return excinfo.value.code
+    except SystemExit as e:      # every refusal path is a sys.exit("REFUSED: …")
+        return e.code
+    return 0
 
 
 def _combined(capsys, code) -> str:
@@ -98,14 +106,15 @@ def test_a_clean_collection_is_packaged(workspace, monkeypatch, capsys):
     assert stamp["collection"] == "demo-aliased"
     assert stamp["map_version"] == 7 and stamp["policy_version"] == 1
     assert stamp["numberOfDocuments"] == 1
-    assert stamp["scanChecks"]["bigram_candidates"] == 0
+    assert stamp["scanChecks"]["bigram_candidates"] == {"passed": True, "count": 0,
+                                                        "ran": True}
 
 
 @pytest.mark.parametrize("text,failing_check", [
     ("Notatet ble skrevet av Kari Ukjent.", "bigram_candidates"),
     ("bygget fra /Users/someone/source/huginn", "fingerprints"),
     ("gjenopprett fra manifest.json.bak først", "fingerprints"),
-    ("Arbeidsgiver med orgnr 987654325.", "sensitive_tokens"),
+    ("kontonummer 1234.56.78903 for utbetaling", "sensitive_tokens"),
     ("Ada Example00 skrev dette.", "person_forms"),
 ])
 def test_a_failing_scan_writes_nothing(workspace, monkeypatch, capsys, text, failing_check):
@@ -158,8 +167,9 @@ def test_a_symlink_inside_the_collection_is_refused(workspace, monkeypatch):
                                    documents=[_clean_document(0)])
     (workspace / "elsewhere.txt").write_text("x", encoding="utf-8")
     (collection / "documents" / "link.json").symlink_to(workspace / "elsewhere.txt")
-    with pytest.raises(ValueError, match="non-regular file"):
-        list(pkg.archive_members(collection, "demo-aliased"))
+    members = [{"path": "documents/link.json", "size": 1, "mtime": 0}]
+    with pytest.raises(pkg.Refused, match="non-regular file"):
+        list(pkg.archive_members(collection, "demo-aliased", members))
 
 
 def test_the_package_stamp_carries_no_literals(workspace, monkeypatch):
@@ -179,3 +189,181 @@ def test_the_package_stamp_carries_no_literals(workspace, monkeypatch):
     assert "Ada" not in stamp and "Zylphia" not in stamp
     # And the temporary stamp file is not left lying next to the tarball.
     assert [p.name for p in (workspace / "out").iterdir()] == [tarball.name]
+
+
+# --- the tarball is produced atomically --------------------------------------
+
+def test_a_failure_midway_through_the_tar_leaves_nothing_behind(
+        workspace, monkeypatch, capsys):
+    """A half-written `.tar.gz` is the worst possible artifact: it has the name
+    of a certified package and the contents of an interrupted one. The tar is
+    built under a temp name in the same directory and `os.replace`d into place,
+    so the final path either does not exist or is complete."""
+    _write_collection(workspace / "collections", "demo-aliased",
+                      documents=[_clean_document(0)])
+    real_add = tarfile.TarFile.add
+    calls = []
+
+    def exploding_add(self, *args, **kwargs):
+        calls.append(args)
+        if len(calls) == 3:
+            raise OSError("disk full")
+        return real_add(self, *args, **kwargs)
+
+    monkeypatch.setattr(tarfile.TarFile, "add", exploding_add)
+    with pytest.raises(OSError, match="disk full"):
+        _package(workspace, monkeypatch)
+    assert len(calls) == 3
+    assert list((workspace / "out").iterdir()) == []
+
+
+# --- the tar contains exactly what the scan read ------------------------------
+
+def test_a_file_that_appeared_after_the_scan_refuses_the_package(
+        workspace, monkeypatch, capsys):
+    """Between the scan and the tar the collection is unlocked. A nightly
+    reindex finishing in that window would put a document nobody scanned inside
+    a tarball stamped as scanned, so the packager tars the member list the scan
+    returned and refuses if the directory no longer matches it."""
+    collection = _write_collection(workspace / "collections", "demo-aliased",
+                                   documents=[_clean_document(0)])
+    real_scan = pkg.scan_collection
+
+    def scan_then_meddle(*args, **kwargs):
+        report = real_scan(*args, **kwargs)
+        (collection / "documents" / "sneaked.json").write_text(
+            json.dumps(_document(9, "Kari Ukjentsen skrev dette.")), encoding="utf-8")
+        return report
+
+    monkeypatch.setattr(pkg, "scan_collection", scan_then_meddle)
+    code = _package(workspace, monkeypatch)
+    out = _combined(capsys, code)
+    assert code != 0
+    assert "REFUSED" in out and "sneaked.json" in out
+    assert _tarballs(workspace) == []
+
+
+def test_a_file_that_changed_after_the_scan_refuses_the_package(
+        workspace, monkeypatch, capsys):
+    collection = _write_collection(workspace / "collections", "demo-aliased",
+                                   documents=[_clean_document(0)])
+    real_scan = pkg.scan_collection
+
+    def scan_then_meddle(*args, **kwargs):
+        report = real_scan(*args, **kwargs)
+        (collection / "documents" / "doc0.json").write_text(
+            json.dumps(_document(0, "Kari Ukjentsen skrev dette i stedet.")),
+            encoding="utf-8")
+        return report
+
+    monkeypatch.setattr(pkg, "scan_collection", scan_then_meddle)
+    code = _package(workspace, monkeypatch)
+    assert code != 0 and "doc0.json" in _combined(capsys, code)
+    assert _tarballs(workspace) == []
+
+
+# --- the tar carries no identity ---------------------------------------------
+
+def test_the_tarball_carries_no_owner_names(workspace, monkeypatch):
+    """`tar` records the BUILDER's uid, gid and login name on every member. That
+    is the same class of distributor fingerprint as an absolute `/Users/` path
+    (check 10), just in the header rather than the content."""
+    _write_collection(workspace / "collections", "demo-aliased",
+                      documents=[_clean_document(0)])
+    _package(workspace, monkeypatch)
+    tarball = next((workspace / "out").glob("*.tar.gz"))
+    with tarfile.open(tarball) as tar:
+        members = tar.getmembers()
+    assert members
+    for member in members:
+        assert member.uname == "" and member.gname == ""
+        assert member.uid == 0 and member.gid == 0
+    listing = subprocess.run(["tar", "-tvf", str(tarball)],
+                             capture_output=True, text=True, check=True).stdout
+    assert getpass.getuser() not in listing
+
+
+# --- the same check set as the CLI -------------------------------------------
+
+def test_the_packager_runs_the_compare_checks_when_asked(workspace, monkeypatch, capsys):
+    """The CLI and the packager must not certify different things. Without
+    `--compare` the exemption invariant and the ident-exception twin never run,
+    and a stamp that simply omits them reads exactly like one where they passed.
+    """
+    _write_collection(workspace / "collections", "demo", documents=[_clean_document(0)])
+    _write_collection(workspace / "collections", "demo-aliased",
+                      documents=[_clean_document(0)])
+    _package(workspace, monkeypatch, extra=("--compare", "demo"))
+    tarball = next((workspace / "out").glob("*.tar.gz"))
+    with tarfile.open(tarball) as tar:
+        stamp = json.loads(tar.extractfile("PACKAGE-STAMP.json").read().decode())
+    checks = stamp["scanChecks"]
+    assert set(checks) == set(pkg.CHECK_NAMES)
+    assert checks["exempt_labels_unmoved"] == {"passed": True, "count": 0, "ran": True}
+    assert checks["person_forms"]["ran"] is True
+    assert stamp["allowlistSha256"] is not None
+    assert stamp["gazetteerSha256"] is not None
+
+
+def test_a_check_that_did_not_run_is_stamped_as_such(workspace, monkeypatch):
+    _write_collection(workspace / "collections", "demo-aliased",
+                      documents=[_clean_document(0)])
+    _package(workspace, monkeypatch)
+    tarball = next((workspace / "out").glob("*.tar.gz"))
+    with tarfile.open(tarball) as tar:
+        stamp = json.loads(tar.extractfile("PACKAGE-STAMP.json").read().decode())
+    assert stamp["scanChecks"]["exempt_labels_unmoved"]["ran"] is False
+    assert stamp["scanChecks"]["person_forms"]["ran"] is True
+
+
+def test_count_drift_against_the_twin_refuses_unless_allowed(workspace, monkeypatch, capsys):
+    _write_collection(workspace / "collections", "demo", documents=[_clean_document(0)])
+    _write_collection(workspace / "collections", "demo-aliased",
+                      documents=[_clean_document(0), _clean_document(1)])
+    code = _package(workspace, monkeypatch, extra=("--compare", "demo"))
+    assert code != 0 and _tarballs(workspace) == []
+    _package(workspace, monkeypatch,
+             extra=("--compare", "demo", "--allow-count-drift"))
+    assert len(_tarballs(workspace)) == 1
+
+
+# --- the filename says what is inside -----------------------------------------
+
+def test_the_filename_carries_the_map_and_policy_version(workspace, monkeypatch):
+    """`nav-wiki-2026-08-23.tar.gz` says nothing about which map certified it, so
+    two tarballs built the same day from different maps are indistinguishable."""
+    _write_collection(workspace / "collections", "demo-aliased",
+                      documents=[_clean_document(0)])
+    _package(workspace, monkeypatch)
+    today = date.today().isoformat()
+    assert _tarballs(workspace) == [f"demo-aliased-{today}-map7-policy1.tar.gz"]
+
+
+def test_a_second_package_the_same_day_refuses_without_force(workspace, monkeypatch, capsys):
+    """Same collection, same day, same map: the name collides, and silently
+    overwriting means the tarball someone already copied out no longer matches
+    the one on disk."""
+    _write_collection(workspace / "collections", "demo-aliased",
+                      documents=[_clean_document(0)])
+    _package(workspace, monkeypatch)
+    code = _package(workspace, monkeypatch)
+    assert code != 0
+    assert "already exists" in _combined(capsys, code) and "--force" in _combined(capsys, code)
+    _package(workspace, monkeypatch, extra=("--force",))
+    assert len(_tarballs(workspace)) == 1
+
+
+# --- a non-regular file is a refusal, not a traceback -------------------------
+
+def test_a_symlink_in_the_tree_prints_a_refusal(workspace, monkeypatch, capsys):
+    """`archive_members` raising ValueError out of `main()` printed a traceback,
+    which reads as a broken tool rather than as the gate doing its job."""
+    collection = _write_collection(workspace / "collections", "demo-aliased",
+                                   documents=[_clean_document(0)])
+    (workspace / "elsewhere.txt").write_text("x", encoding="utf-8")
+    (collection / "documents" / "link.json").symlink_to(workspace / "elsewhere.txt")
+    code = _package(workspace, monkeypatch)
+    out = _combined(capsys, code)
+    assert code != 0 and "REFUSED" in out
+    assert "Traceback" not in out
+    assert _tarballs(workspace) == []

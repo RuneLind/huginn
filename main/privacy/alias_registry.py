@@ -88,10 +88,36 @@ _SEPARATOR_RUN = re.compile(r"(?:\s|%20)+", re.IGNORECASE)
 VARIANT_LEFT_BOUNDARY = r"(?:(?<!\w)|(?<=%[0-9A-Fa-f]{2}))"
 VARIANT_RIGHT_BOUNDARY = r"(?:(?!\w)|(?=%[0-9A-Fa-f]{2}))"
 
+# The repo root, derived from this file rather than from the process CWD.
+# EVERY private-file glob and every relative scope path resolves against it.
+# CWD-relative discovery meant the whole privacy layer silently found nothing
+# from any other working directory — and `tag_documents.py`'s external-backend
+# guard, whose entire job is to refuse, therefore no-opped and called the hosted
+# backend when run from /tmp. Module-level so a test can point it at a tmp dir.
+#
+# ``HUGINN_PRIVACY_ROOT`` relocates it, for tests that drive an entry point as a
+# subprocess. It fails CLOSED: the public scope file is read from ``__file__``
+# and is unaffected, so pointing the root at an empty directory still puts the
+# public collections in scope and then finds no map — PrivacyMapMissing, not a
+# silent unaliased build.
+REPO_ROOT = os.environ.get("HUGINN_PRIVACY_ROOT") or os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 _SCOPE_FILE = os.path.join(os.path.dirname(__file__), "scope.json")
 _PRIVATE_SCOPE_GLOB = "huginn-*/privacy/scope.json"
 _PRIVATE_MAP_GLOB = "huginn-*/privacy/aliases.json"
 _PRIVATE_IDENT_EXCEPTIONS_GLOB = "huginn-*/privacy/ident_exceptions.json"
+_COLLECTIONS_DIR = os.path.join("data", "collections")
+
+
+def _private_glob(pattern: str) -> list:
+    """Sorted matches of a private-sub-repo glob, resolved against REPO_ROOT."""
+    return sorted(glob.glob(os.path.join(REPO_ROOT, pattern)))
+
+
+def _repo_path(path: str) -> str:
+    """Absolutise a possibly-relative configured path against REPO_ROOT."""
+    return path if os.path.isabs(path) else os.path.join(REPO_ROOT, path)
 
 # A NAV ident is one letter and six digits. Either bare or inside the Jira
 # mention wrapper `[~Q000124]`, which is consumed together with the token so the
@@ -99,11 +125,20 @@ _PRIVATE_IDENT_EXCEPTIONS_GLOB = "huginn-*/privacy/ident_exceptions.json"
 _IDENT_ALTERNATIVE = r"\[~\s*[A-Za-z]\d{6}\s*\]|(?<![\w])[A-Za-z]\d{6}(?![\w])"
 _IDENT_INNER = re.compile(r"[A-Za-z]\d{6}")
 
+# A bare NAV ident, as a standalone scanner. The substituter uses
+# _IDENT_ALTERNATIVE above (which also consumes the `[~…]` wrapper); this is the
+# form main/privacy/index_scan.py and main/privacy/sensitivity_scanner.py need,
+# and it lives here so there is exactly one copy of the shape.
+IDENT_RE = re.compile(r"(?i)(?<!\w)[a-z]\d{6}(?!\w)")
+
 # `(?<![\w.])` is what keeps an email's own domain out: in "ola@firma.internal"
 # the `@` is preceded by a word character, so the domain never enters this pass
 # at all and no TLD allow-list has to know "internal". The local part is handled
 # separately by _EMAIL_LOCAL_RE, which fires only on a *dotted* local part.
-_HANDLE_RE = re.compile(r"(?<![\w.])@[a-zæøå0-9]+(?:\.[a-zæøå0-9]+)+", re.IGNORECASE)
+# Public for the same reason as IDENT_RE: the gate must count exactly what the
+# substituter would have redacted.
+HANDLE_RE = re.compile(r"(?<![\w.])@[a-zæøå0-9]+(?:\.[a-zæøå0-9]+)+", re.IGNORECASE)
+_HANDLE_RE = HANDLE_RE
 
 # A dotted local part only counts as an email local part when what follows the
 # `@` is a real domain: at least one dot and an alphabetic last label. Without
@@ -147,10 +182,19 @@ def _lookup_key(literal: str) -> str:
     return _SEPARATOR_RUN.sub(" ", literal).casefold()
 
 
-def _shape(literal: str) -> str:
+def shape(literal: str) -> str:
     """Letters -> x, digits -> 9. Map literals are real names; anything this
-    module raises or logs has to stay safe to paste into a public issue."""
+    module raises or logs has to stay safe to paste into a public issue.
+
+    The ONE masking helper for the whole privacy package — index_scan and
+    sensitivity_scanner import it rather than keeping their own. The gate's copy
+    used to mask letters only, so a shape printed from it still carried the six
+    birth-date digits of a fødselsnummer.
+    """
     return re.sub(r"\d", "9", re.sub(r"[^\W\d_]", "x", literal))
+
+
+_shape = shape
 
 
 def _case_key(literal: str) -> str:
@@ -278,6 +322,14 @@ def _validate(map_data: dict) -> None:
         if (not isinstance(entry, dict) or not entry.get("alias")
                 or not isinstance(entry.get("variants"), list)):
             raise PrivacyMapInvalid("every entry needs an 'alias' and a 'variants' list")
+        # `name` is not optional even though the substituter never reads it: the
+        # distribution gate builds its token-permutation needles from it, and a
+        # map without it raised KeyError halfway through a scan instead of being
+        # refused up front. It is also the only field guaranteed to spell the
+        # person `First Last` — `variants` may only carry `Last, First`.
+        if not isinstance(entry.get("name"), str) or not entry["name"].strip():
+            raise PrivacyMapInvalid("every entry needs a non-empty 'name'; the gate builds "
+                                    "its permutation needles from it")
         for variant in entry["variants"]:
             _require_literal(variant)
             # `.strip()` first: `" Ada "` is the same bare given name as `"Ada"`,
@@ -494,10 +546,14 @@ def _load_json(path):
         return None
 
 
-def _load_ident_exceptions(path: str | None) -> set:
+def _load_ident_exceptions(path: str | None = None) -> set:
     """Literal ident-shaped tokens that are NOT people (git SHAs, document type
-    ids, test users). Missing file => no exceptions, i.e. redact everything."""
-    candidates = [path] if path else sorted(glob.glob(_PRIVATE_IDENT_EXCEPTIONS_GLOB))
+    ids, test users). Missing file => no exceptions, i.e. redact everything.
+
+    Public-by-convention despite the underscore: ``scripts/audit/scan_index.py``
+    calls it rather than keeping a second copy of the glob and the schema.
+    """
+    candidates = [path] if path else _private_glob(_PRIVATE_IDENT_EXCEPTIONS_GLOB)
     tokens = set()
     for candidate in candidates:
         if not candidate or not os.path.exists(candidate):
@@ -515,11 +571,17 @@ def load_scope() -> tuple[set, set]:
     The public file names only collections and source dirs that are already
     public in CLAUDE.md. Private sub-repos extend it through
     `huginn-*/privacy/scope.json`, mirroring how graph_routing.json is
-    discovered. Relative basePaths resolve against the process CWD, the same way
-    FilesDocumentReader and the update factory read them.
+    discovered.
+
+    Relative basePaths resolve against **REPO_ROOT**, not the process CWD. They
+    are written relative to the repo (`./data/sources/…`) and the callers are
+    not all servers started from it: resolving them against the CWD made the
+    whole scope evaporate for anything run from elsewhere, which turns every
+    fail-closed guard built on this function into a no-op exactly where it
+    matters.
     """
     collections, base_paths = set(), set()
-    for path in [_SCOPE_FILE, *sorted(glob.glob(_PRIVATE_SCOPE_GLOB))]:
+    for path in [_SCOPE_FILE, *_private_glob(_PRIVATE_SCOPE_GLOB)]:
         if not os.path.exists(path):
             continue
         data = _load_json(path)
@@ -528,8 +590,36 @@ def load_scope() -> tuple[set, set]:
         collections.update(c for c in data.get("collections", []) if isinstance(c, str) and c)
         for base_path in data.get("basePaths", []):
             if isinstance(base_path, str) and base_path:
-                base_paths.add(os.path.realpath(base_path))
+                base_paths.add(os.path.realpath(_repo_path(base_path)))
     return collections, base_paths
+
+
+def scoped_base_paths() -> set:
+    """Every source tree in scope: the declared basePaths PLUS the reader
+    basePath of every in-scope collection's built manifest.
+
+    The two lists say the same thing in different places and they drift: a
+    collection is put in scope by NAME, its `basePaths` entry is forgotten, and
+    the source tree is then out of scope for every path-based guard while the
+    built index is aliased. The manifests under ``data/collections/`` are the
+    record of what each in-scope collection actually reads, so they are read
+    here rather than trusted to be mirrored by hand.
+    """
+    collections, base_paths = load_scope()
+    root = os.path.join(REPO_ROOT, _COLLECTIONS_DIR)
+    for name in collections:
+        path = os.path.join(root, name, "manifest.json")
+        # Quietly: a collection in scope that is simply not built on this machine
+        # is the normal case, not a warning worth one log line per call.
+        if not os.path.exists(path):
+            continue
+        manifest = _load_json(path)
+        if not isinstance(manifest, dict):
+            continue
+        base_path = (manifest.get("reader") or {}).get("basePath")
+        if isinstance(base_path, str) and base_path:
+            base_paths.add(os.path.realpath(_repo_path(base_path)))
+    return base_paths
 
 
 def path_in_scope(path: str) -> bool:
@@ -543,10 +633,27 @@ def path_in_scope(path: str) -> bool:
     """
     if not path:
         return False
-    _, base_paths = load_scope()
     resolved = os.path.realpath(path)
     return any(resolved == base or resolved.startswith(base + os.sep)
-               for base in base_paths)
+               for base in scoped_base_paths())
+
+
+def discover_map_path(explicit: str | None = None) -> str:
+    """The one alias map on this machine, or a PrivacyMapMissing saying why not.
+
+    Shared with ``scripts/audit/scan_index.py`` so the gate verifies with the
+    same map the build substituted with, discovered by the same rule. Two
+    matches are ambiguous rather than first-wins: which map applied would
+    otherwise depend on directory order.
+    """
+    if explicit:
+        return explicit
+    candidates = _private_glob(_PRIVATE_MAP_GLOB)
+    if len(candidates) != 1:
+        raise PrivacyMapMissing(
+            f"expected exactly one alias map ({_PRIVATE_MAP_GLOB} under {REPO_ROOT}), "
+            f"found {len(candidates)}")
+    return candidates[0]
 
 
 def resolve_registry(collection_name, base_path, armed_by_manifest: bool = False,
@@ -571,7 +678,7 @@ def resolve_registry(collection_name, base_path, armed_by_manifest: bool = False
     if not in_scope:
         return None
 
-    candidates = [map_path] if map_path else sorted(glob.glob(_PRIVATE_MAP_GLOB))
+    candidates = [map_path] if map_path else _private_glob(_PRIVATE_MAP_GLOB)
     if len(candidates) > 1:
         # Picking the first would make which map applies depend on directory
         # order — a silently different substitution, which is the one failure

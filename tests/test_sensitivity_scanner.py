@@ -25,6 +25,12 @@ from scripts.jira.sanitizers.pii_sanitizer import PiiSanitizer
 VALID_ORGNR = "987654325"
 INVALID_ORGNR = "912345670"          # leading 9, anchored, MOD11 fails
 VALID_BANK = "12345678903"
+# The published groupings, MOD11-valid and MOD11-invalid.
+GROUPED_BANK = "1234.56.78903"
+GROUPED_BANK_BAD_CHECK = "1234.56.00000"
+# MOD11-valid, leading 9, but only ONE separator: not the published grouping.
+HALF_GROUPED_ORGNR = "974 760002"
+NBSP = "\u00a0"
 
 
 @pytest.fixture
@@ -61,11 +67,17 @@ def test_a_number_that_only_looks_like_one_is_not(scanner, text):
 
 # --- bankkonto --------------------------------------------------------------
 
-@pytest.mark.parametrize("text", ["kontonummer 1234.56.78903",
+@pytest.mark.parametrize("text", [f"kontonummer {GROUPED_BANK}",
                                   f"Kontonr {VALID_BANK} for utbetaling",
-                                  "versjon 1234.56.78903 av skjemaet"])
+                                  f"{GROUPED_BANK} er kontoen"])
 def test_a_bank_account_is_detected(scanner, text):
     assert "bankkonto" in categories(scanner, text)
+
+
+def test_a_grouped_number_that_fails_mod11_is_not_an_account(scanner):
+    """The grouping alone is the anchor for this category, so the check digit is
+    the ONLY thing separating an account number from `versjon 1234.56.00000`."""
+    assert "bankkonto" not in categories(scanner, f"kontonummer {GROUPED_BANK_BAD_CHECK}")
 
 
 def test_eleven_bare_digits_without_an_anchor_are_not_an_account(scanner):
@@ -132,9 +144,14 @@ def test_no_finding_carries_the_matched_text(scanner):
     fine for something pasted into a PR."""
     text = (f"Fødselsnummer: 01010100050, orgnr {VALID_ORGNR}, "
             f"api_key = A1b2C3d4E5f6G7h8J9k0L1m2")
-    for finding in scanner.detect(text):
-        assert not any(char.isdigit() and char != "9" for char in finding.shape)
-        assert "A1b2C3d4" not in finding.shape
+    # Spelled out rather than asserted by rule: "no digit other than 9" is
+    # satisfied by the empty string, by a shape the masking dropped characters
+    # from, and by anything the detector simply stopped finding.
+    assert [(f.category, f.shape) for f in scanner.detect(text)] == [
+        ("personnummer", "999999*****"),
+        ("organisasjonsnummer", "999999999"),
+        ("credential", "xxx_xxx = x9x9x9x9x9x9x9x9x9x9x9x9"),
+    ]
 
 
 def test_the_new_categories_are_not_wired_into_the_sanitize_write_path():
@@ -154,11 +171,13 @@ def test_the_new_categories_are_not_wired_into_the_sanitize_write_path():
 def test_blocking_and_advisory_categories_are_disjoint_and_complete():
     assert BLOCKING_CATEGORIES & ADVISORY_CATEGORIES == set()
     assert BLOCKING_CATEGORIES | ADVISORY_CATEGORIES == ALL_CATEGORIES
-    # The categories measured precise enough to stop a hand-off.
-    assert {"personnummer", "organisasjonsnummer", "bankkonto",
-            "credential"} <= BLOCKING_CATEGORIES
-    # …and the ones that would fail every real collection if they blocked.
-    assert {"email", "telefon"} <= ADVISORY_CATEGORIES
+    # The categories measured precise enough to stop a hand-off, and about
+    # something that must not leave the machine in the first place.
+    assert {"personnummer", "bankkonto", "credential"} <= BLOCKING_CATEGORIES
+    # …and the ones that would fail every real collection if they blocked, or
+    # are not personal data at all (an organisation number is public register
+    # data about a company).
+    assert {"email", "telefon", "organisasjonsnummer"} <= ADVISORY_CATEGORIES
 
 
 def test_findings_carry_the_line_they_were_found_on(scanner):
@@ -172,3 +191,85 @@ def test_shape_masks_letters_and_digits():
 
 def test_empty_text_is_not_scanned(scanner):
     assert scanner.detect("") == []
+
+
+# --- separators, groupings and the categories that block ---------------------
+
+def test_a_non_breaking_space_separates_an_organisasjonsnummer(scanner):
+    """`[  ]` in the source was two ASCII spaces, not space-and-NBSP.
+
+    Copy-paste out of Confluence and Word produces U+00A0 between the groups,
+    which is precisely the published `NNN NNN NNN` form the detector treats as
+    its own anchor — so the shape it was written for was the one it missed.
+    """
+    assert "organisasjonsnummer" in categories(scanner, f"987{NBSP}654{NBSP}325")
+
+
+def test_a_non_breaking_space_separates_a_phone_number(scanner):
+    assert "telefon" in categories(scanner, f"tlf: 22{NBSP}33{NBSP}44{NBSP}55")
+
+
+def test_one_separator_is_not_the_published_grouping(scanner):
+    """`974 760002` is a line-wrapped id, not `NNN NNN NNN`. Accepting a single
+    separator made the grouping rule — which stands in for a keyword anchor —
+    fire on half the digit strings a table cell wraps."""
+    assert "organisasjonsnummer" not in categories(scanner, HALF_GROUPED_ORGNR)
+    assert "organisasjonsnummer" in categories(scanner, f"orgnr {HALF_GROUPED_ORGNR}")
+
+
+def test_an_organisasjonsnummer_is_advisory(scanner):
+    """A Norwegian organisation number is public register data about a company.
+
+    It is not personal data, it is legitimate content in a Jira issue about an
+    employer, and it fired 6/18/20 times across the three in-scope collections.
+    Blocking the hand-off on it makes the gate unpassable for the thing the
+    corpus is *about*, which is how a gate gets switched off.
+    """
+    from main.privacy.sensitivity_scanner import ADVISORY_CATEGORIES, BLOCKING_CATEGORIES
+    assert "organisasjonsnummer" in ADVISORY_CATEGORIES
+    assert "organisasjonsnummer" not in BLOCKING_CATEGORIES
+
+
+# --- credentials -------------------------------------------------------------
+
+def test_an_authorization_bearer_header_is_a_credential(scanner):
+    """The keyword rule wanted `bearer` followed by `:` or `=`; the header puts
+    the colon after `Authorization` and the token after the word `Bearer`."""
+    assert "credential" in categories(
+        scanner, "Authorization: Bearer A1b2C3d4E5f6G7h8J9k0L1m2N3o4")
+
+
+def test_a_pem_private_key_block_is_a_credential(scanner):
+    assert "credential" in categories(
+        scanner, "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n")
+    assert "credential" in categories(scanner, "-----BEGIN PRIVATE KEY-----")
+
+
+def test_a_long_file_path_assigned_to_a_key_is_not_a_credential(scanner):
+    """`private_key: /etc/ssl/private/service-account-signing.pem` is a
+    CONFIGURATION line naming where the key lives. Reporting it as the key
+    itself is the false positive that makes an operator stop reading check 11.
+    """
+    assert "credential" not in categories(
+        scanner, "private_key: /etc/ssl/private/service-account-signing.pem")
+    assert "credential" not in categories(
+        scanner, "api_key_file = ./config/secrets/api-key-production.txt")
+    # …and a base64-shaped value with slashes in it is still a credential.
+    assert "credential" in categories(
+        scanner, "access_token=aB3/dE6+gH9jK2mN5pQ8rS1tU4vW7xY0zA3b=")
+
+
+# --- laziness ---------------------------------------------------------------
+
+def test_line_starts_are_not_computed_for_clean_text(scanner, monkeypatch):
+    """`_line_starts` walks the string character by character in Python. It runs
+    on every string of every document; on a clean collection every one of those
+    walks is wasted."""
+    from main.privacy.sensitivity_scanner import SensitivityScanner as S
+    calls = []
+    monkeypatch.setattr(S, "_line_starts", staticmethod(
+        lambda text: calls.append(text) or [0]))
+    assert scanner.detect("en helt vanlig setning uten noe som helst") == []
+    assert calls == []
+    scanner.detect(f"orgnr {VALID_ORGNR}")
+    assert len(calls) == 1

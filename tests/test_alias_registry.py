@@ -567,7 +567,7 @@ def test_two_discovered_maps_are_ambiguous_rather_than_first_wins(tmp_path, monk
         privacy = tmp_path / name / "privacy"
         privacy.mkdir(parents=True)
         (privacy / "aliases.json").write_text(json.dumps(MAP), encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
+    _point_discovery_at(monkeypatch, tmp_path)
     with pytest.raises(PrivacyMapMissing, match="ambiguous"):
         resolve_registry("jira-issues", None)
 
@@ -600,6 +600,19 @@ def test_public_scope_lists_the_three_campaign_collections():
 
 # --- path_in_scope ----------------------------------------------------------
 
+def _point_discovery_at(monkeypatch, root):
+    """Point the private-file globs and the relative scope paths at a tmp root.
+
+    They resolve against `alias_registry.REPO_ROOT`, not the process CWD — a
+    guard that only arms when the caller happens to be standing in the repo is
+    not a guard. `chdir` stays so a genuinely CWD-relative read would still be
+    caught by the tests that assert a refusal.
+    """
+    from main.privacy import alias_registry
+    monkeypatch.setattr(alias_registry, "REPO_ROOT", str(root))
+    monkeypatch.chdir(root)
+
+
 @pytest.fixture
 def scoped_tree(tmp_path, monkeypatch):
     """A private scope file naming one tree, discovered the usual way."""
@@ -610,7 +623,7 @@ def scoped_tree(tmp_path, monkeypatch):
     privacy.mkdir(parents=True)
     (privacy / "scope.json").write_text(
         json.dumps({"collections": [], "basePaths": ["./sources/in-scope"]}), encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
+    _point_discovery_at(monkeypatch, tmp_path)
     return tmp_path, tree
 
 

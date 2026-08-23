@@ -142,10 +142,17 @@ def test_alias_changed_marker_tracks_whether_the_document_actually_moved():
 
 # --- 2. fail-closed on both construction sites ------------------------------
 
+def _point_discovery_at(monkeypatch, root):
+    """Private-file globs resolve against alias_registry.REPO_ROOT, not the CWD."""
+    from main.privacy import alias_registry
+    monkeypatch.setattr(alias_registry, "REPO_ROOT", str(root))
+    monkeypatch.chdir(root)
+
+
 @pytest.fixture
 def mapless_cwd(tmp_path, monkeypatch):
-    """A working directory where the huginn-*/privacy/aliases.json glob finds nothing."""
-    monkeypatch.chdir(tmp_path)
+    """A repo root where the huginn-*/privacy/aliases.json glob finds nothing."""
+    _point_discovery_at(monkeypatch, tmp_path)
     return tmp_path
 
 
@@ -154,7 +161,7 @@ def mapped_cwd(tmp_path, monkeypatch):
     privacy_dir = tmp_path / "huginn-fixture" / "privacy"
     privacy_dir.mkdir(parents=True)
     (privacy_dir / "aliases.json").write_text(json.dumps(FIXTURE_MAP), encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
+    _point_discovery_at(monkeypatch, tmp_path)
     return tmp_path
 
 
@@ -214,7 +221,11 @@ def test_update_factory_leaves_an_out_of_scope_collection_alone(mapped_cwd):
 
 def test_cli_adapter_refuses_to_build_an_in_scope_collection_without_a_map(tmp_path):
     """The create path removes the collection folder first, so it must fail EARLIER."""
-    env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
+    # HUGINN_PRIVACY_ROOT: the private-file globs resolve against the repo root,
+    # not the CWD, so a subprocess started in a tmp dir would otherwise discover
+    # the operator's real map and build successfully.
+    env = {**os.environ, "PYTHONPATH": str(REPO_ROOT),
+           "HUGINN_PRIVACY_ROOT": str(tmp_path)}
     docs = tmp_path / "src"
     shutil.copytree(SOURCE_DOCS, docs)
     result = subprocess.run(
@@ -248,7 +259,8 @@ def test_update_adapter_records_a_failed_run_when_the_map_is_missing(tmp_path):
         [sys.executable, str(REPO_ROOT / "collection_update_cmd_adapter.py"),
          "-collection", IN_SCOPE_COLLECTION],
         cwd=tmp_path, capture_output=True, text=True, timeout=600,
-        env={**os.environ, "PYTHONPATH": str(REPO_ROOT), "HUGINN_RUNS_DIR": str(runs)},
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT), "HUGINN_RUNS_DIR": str(runs),
+             "HUGINN_PRIVACY_ROOT": str(tmp_path)},
     )
     assert result.returncode != 0
     assert "PrivacyMapMissing" in result.stderr

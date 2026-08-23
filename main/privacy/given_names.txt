@@ -11,9 +11,15 @@
 # WHERE THE NAMES COME FROM. Common given names in public use: the names
 # Norwegian name statistics publish year after year, plus common given names
 # from the other locales this corpus's authors write in. Nothing here is
-# derived from any indexed corpus, and no surname appears. That is deliberate:
-# a list built from the corpus would itself be a fingerprint of who works
-# there, which is the thing this whole campaign removes.
+# derived from any indexed corpus. That is deliberate: a list built from the
+# corpus would itself be a fingerprint of who works there, which is the thing
+# this whole campaign removes.
+#
+# NO LINE IS HERE *AS* A SURNAME. Some are surnames as well — patronymics and
+# given-name-derived family names are the same words in most European locales,
+# and a handful coincide with a surname in the private map. That overlap is
+# reviewed rather than assumed: tests/test_public_hygiene.py derives the
+# overlapping set from the map at runtime and fails if it grows.
 #
 # THE CORPUS-SPECIFIC HALF IS NOT HERE. Rare given names that occur in the
 # private map (its entries' first tokens and its `bare_given_name_residual`)
@@ -21,12 +27,23 @@
 # clone with no private sub-repo therefore gets a weaker detector, which is
 # correct: without the map there is nothing to certify anyway.
 #
+# NO TWO LINES CONCATENATE INTO A MAPPED FULL NAME. The one-token-per-line rule
+# keeps a full name out of any single line; it does not keep the two halves of
+# one out of two lines, and `First` here plus `Last` 600 lines down is the same
+# disclosure one grep away. `test_no_two_gazetteer_lines_concatenate_into_a_
+# mapped_full_name` fails on any such pair, which is why nine otherwise ordinary
+# given names are absent. That is a real cost — this file's whole argument is
+# that a common-names list with holes in it is a *reverse* fingerprint — and it
+# is paid because the disclosure is direct and the fingerprint is inferential.
+# The detector loses nothing on this machine: every removed name is in the
+# private map's own given-name set and is unioned back in at runtime.
+#
 # ADDING A NAME. Only add names that are common in public use somewhere. If a
 # name is only interesting because it appears in this machine's corpus, it
-# belongs in the private map, not in this file.
+# belongs in the private map, not in this file. Keep the file sorted by the key
+# in `test_given_names_file_is_sorted_and_duplicate_free` (casefold, with
+# aa/ae/oe for the Norwegian letters) and free of duplicates.
 Ådne
-Åge
-Aage
 Åsa
 Åse
 Åsmund
@@ -93,9 +110,7 @@ Anthony
 Antoine
 Anton
 Antonio
-Arild
 Arjun
-Arne
 Arnfinn
 Arnt
 Aron
@@ -109,6 +124,7 @@ Ashok
 Asle
 Astrid
 Atle
+Attila
 Audun
 August
 Aurora
@@ -128,6 +144,7 @@ Beatrice
 Behrooz
 Bella
 Ben
+Bence
 Bendik
 Benedicte
 Bengt
@@ -185,6 +202,7 @@ Connor
 Conrad
 Cornelia
 Cristian
+Csaba
 Dag
 Dagfinn
 Dagny
@@ -221,7 +239,6 @@ Edvard
 Edvin
 Egil
 Eilif
-Einar
 Eirik
 Eivind
 Elena
@@ -276,9 +293,9 @@ Finn
 Fiona
 Florian
 Francois
+François
 Frank
 Franz
-François
 Fred
 Freddy
 Frederik
@@ -287,10 +304,10 @@ Fredrikke
 Frida
 Frode
 Frøydis
+Gabor
 Gabriel
 Gabriela
 Gaute
-Geir
 Genevieve
 Georg
 George
@@ -474,7 +491,6 @@ Konrad
 Konstantin
 Kornelia
 Krister
-Kristian
 Kristiane
 Kristin
 Kristina
@@ -485,6 +501,7 @@ Kurt
 Kyrre
 Lars
 Lasse
+Laszlo
 Laura
 Laurent
 Lea
@@ -530,7 +547,6 @@ Lykke
 Mads
 Magdalena
 Magnar
-Magne
 Magnus
 Mahmoud
 Mai
@@ -620,7 +636,6 @@ Natalie
 Nathalie
 Neha
 Nelly
-Nguyen
 Niclas
 Nicolai
 Nicolas
@@ -675,7 +690,6 @@ Per
 Pernille
 Peter
 Petra
-Petter
 Philip
 Philippe
 Pia
@@ -844,6 +858,7 @@ Tuan
 Tuva
 Tyler
 Ugur
+Uğur
 Ulf
 Ulla
 Ulrik
@@ -852,7 +867,6 @@ Una
 Unni
 Urban
 Uwe
-Uğur
 Valentin
 Valentina
 Vanessa
@@ -899,3 +913,4 @@ Zainab
 Zara
 Zeynep
 Zoe
+Zoltan

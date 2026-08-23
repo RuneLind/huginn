@@ -154,6 +154,14 @@ def external_backend_refusal(source: str, backend: str) -> str | None:
     Checked in ``main()``, before a single file is opened, because a refusal
     after the first excerpt has already left the machine is not a refusal.
 
+    ``path_in_scope`` resolves the scope files and their relative basePaths
+    against the REPO ROOT, not the process CWD, and also reads the reader
+    basePath of every in-scope collection's built manifest. Both matter here and
+    for the same reason: a guard that only arms when the operator happens to be
+    standing in the repo, or only for a tree someone remembered to list twice, is
+    not a guard. This one silently permitted the hosted backend from any other
+    working directory until it was caught.
+
     Deliberately only this script. The two knowledge-graph extractors read the
     same trees, but they are deterministic and local; adding the guard there
     would be ceremony that stops nothing.
