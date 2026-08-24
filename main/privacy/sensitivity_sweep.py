@@ -205,6 +205,12 @@ MAPPED_RESIDUAL = "mapped_residual"
 ROLE = "role"
 UNKNOWN_PERSON = "unknown_person"
 
+# Internal-only verdicts for one part of a compound. They never reach a report:
+# EXEMPT means "an adjudicated non-person", DROP means "this whole candidate is
+# adjudicated non-person and is not counted at all".
+EXEMPT = "__exempt__"
+DROP = "__drop__"
+
 BUCKETS = (ALIAS, MAPPED_RESIDUAL, ROLE, UNKNOWN_PERSON)
 
 # Every literal the substituter can leave behind. `EMAIL_LOCAL_TOKEN`
@@ -219,6 +225,22 @@ _REDACTION_TOKENS = (IDENT_TOKEN, HANDLE_TOKEN, USER_PATH_TOKEN, "<user>")
 MIN_FINDING_CHARS = 3
 
 _SINGLE_TOKEN_RE = re.compile(r"^[^\W\d_]+(?:['’\-][^\W\d_]+)*$")
+
+# Separators a corpus uses to name several people at once. `og` (Norwegian "and")
+# is word-bounded so it cannot eat the `og` inside a name; `&` and `+` appear in
+# the same attribution columns. The strip set is the punctuation that clings to a
+# part once the run is split — including the `?` of an uncertain attribution,
+# which is exactly the shape a Confluence table produces.
+#
+# NOT whitespace: splitting on a space would make any two-token name whose parts
+# are both known given names decompose into two accounted parts and vanish — the
+# same failure the gazetteer's concatenation test exists to prevent. A run is
+# only a run when something explicitly joins it.
+_COMPOUND_SPLIT_RE = re.compile(r"\s*(?:[,/&+;|]|\bog\b)\s*", re.IGNORECASE)
+_COMPOUND_STRIP = " \t?.,:;()[]{}<>\"'’"
+# The separators actually PRESENT in a candidate, used to refuse the ambiguous
+# two-part comma form. Kept in step with _COMPOUND_SPLIT_RE.
+_COMPOUND_SEPARATORS_RE = re.compile(r"[,/&+;|]|\bog\b", re.IGNORECASE)
 
 
 def _boundaried(token: str) -> str:
@@ -279,8 +301,18 @@ class ReferenceClassifier:
        it is counted, not alarmed on.
     6. **a role phrase** — ``role``. Reported, never blocking: "the case worker
        who signed" identifies someone to a reader who already knows the case,
-       and it is a judgement call no gate should make unattended.
-    7. everything else — ``unknown_person``, which fails the sweep.
+       and it is a judgement call no gate should make unattended. It stays ahead
+       of 7 and 8 so that a run or a genitive cannot silently delete the
+       ``sweep_gate`` warning a role phrase raises.
+    7. **a genitive of a residual name** — ``mapped_residual``. The stem must
+       itself be accounted for, so this can only re-label something already
+       destined for that bucket.
+    8. **a RUN of already-accounted references** — ``mapped_residual``, or
+       dropped when every part is an exempt label. One reference naming several
+       people (`A/B`, `A, B og C`) matches nothing as a whole candidate. EVERY
+       part must be accounted for, and a part is never accepted on the strength
+       of being some entry's given name — see ``_part_bucket``.
+    9. everything else — ``unknown_person``, which fails the sweep.
     """
 
     def __init__(self, registry: AliasRegistry, alias_map: dict, allowed_bigrams=frozenset()):
@@ -320,6 +352,96 @@ class ReferenceClassifier:
     def _is_token_fragment(self, lowered: str) -> bool:
         return any(lowered != token and lowered in token for token in self._token_text)
 
+    def _part_bucket(self, part: str):
+        """What one part of a compound is, or None when nothing accounts for it.
+
+        Returns ``EXEMPT`` (an adjudicated non-person), ``MAPPED_RESIDUAL`` (a
+        known person reference), or None.
+
+        `self._given_names` is deliberately NOT consulted. A comma is both a list
+        separator and a NAME-INVERSION separator: `Surname, Given` is one person,
+        and in the live map 105 of 291 surname tokens are also somebody's given
+        name, so accepting a given-name-only match would let an unknown person
+        written in inverted form decompose into two "known" halves and stop
+        blocking. The residual register is the safe channel — it is the corpus-
+        attested bare given names of people the campaign already adjudicated.
+
+        The alias test runs on the RAW piece, before stripping: the redaction
+        tokens are bracketed (`[~ukjent-person]`) and the strip set eats brackets,
+        so stripping first destroyed exactly the token this needs to recognise.
+        """
+        if self._is_alias(part):
+            return ALIAS
+        lowered = part.strip(_COMPOUND_STRIP).lower()
+        if not lowered:
+            return None
+        if lowered in self._exempt or lowered in self._allowed:
+            return EXEMPT
+        if lowered in self._residual or self._is_genitive(lowered):
+            return MAPPED_RESIDUAL
+        return None
+
+    def _is_genitive(self, lowered: str) -> bool:
+        """`Adas` for a residual `Ada`. Norwegian genitive, no apostrophe.
+
+        Bounded deliberately: the stem must itself be a name the map already
+        accounts for, so this can only ever re-label something that was going to
+        be `mapped_residual` under its own name. It cannot absorb a new person.
+        """
+        if len(lowered) < MIN_FINDING_CHARS + 1 or not lowered.endswith("s"):
+            return False
+        stem = lowered[:-1]
+        # RESIDUAL ONLY, never `given_names`. Norwegian surnames ending in -s are
+        # common, so accepting `<any entry's given name> + s` would re-open the
+        # inverted-name hole one character at a time: `Berg, Ada` blocks while
+        # `Bergs, Ada` would not. The residual register is corpus-attested bare
+        # given names of people already adjudicated; a given name alone is not.
+        return stem in self._residual
+
+    def _compound_verdict(self, candidate: str):
+        """`Ada/Bea`, `Ada, Bea og Cec` — a RUN of already-known names.
+
+        Returns ``MAPPED_RESIDUAL``, ``DROP`` (every part is an exempt label), or
+        None when any part is unaccounted for.
+
+        Confluence attribution columns and Jira comments name several people at
+        once, joined by a slash, a comma or `og`. The model quotes the whole run
+        as one reference, and every other test here is a whole-candidate lookup,
+        so a run matches nothing and lands in `unknown_person` — 12 of the 44
+        strings in the 2026-08-23 triage, none of them a person the map had not
+        already adjudicated.
+
+        EVERY part must be accounted for. A run containing one unmapped name
+        still fails, which is the property that makes this safe: it narrows what
+        counts as news, it does not stop the sweep noticing news.
+        """
+        parts = [piece.strip() for piece in _COMPOUND_SPLIT_RE.split(candidate)]
+        parts = [p for p in parts if p.strip(_COMPOUND_STRIP)]
+        if len(parts) < 2:
+            return None
+        # `Surname, Given` is ONE person written inverted, and a bare comma is the
+        # only separator a corpus uses for BOTH that and a list. Two parts joined
+        # by nothing but a comma are therefore refused outright — no real
+        # attribution run in the 2026-08-23 triage had that shape (they used a
+        # slash, `og`, or three or more parts), so this costs nothing and closes
+        # the inversion case instead of merely narrowing it.
+        if len(parts) == 2 and set(_COMPOUND_SEPARATORS_RE.findall(candidate)) <= {","}:
+            return None
+        buckets = [self._part_bucket(part) for part in parts]
+        if any(bucket is None for bucket in buckets):
+            return None
+        # A run of nothing but adjudicated non-persons is DROPPED, not counted:
+        # the whole-candidate path drops a lone exempt label, and counting the
+        # pair as a residual would inflate the very number triage reads.
+        if all(bucket == EXEMPT for bucket in buckets):
+            return DROP
+        # A run of nothing but aliases and redaction tokens IS the substituter
+        # working, and belongs in the bucket that says so rather than inflating
+        # the residual count triage reads.
+        if all(bucket == ALIAS for bucket in buckets):
+            return ALIAS
+        return MAPPED_RESIDUAL
+
     def classify(self, text: str, document_text: str, kind=None) -> str | None:
         """The bucket for one reference, or None when it is dropped."""
         candidate = normalise_whitespace(text)
@@ -332,16 +454,35 @@ class ReferenceClassifier:
         lowered = candidate.lower()
         if self._is_token_fragment(lowered):
             return None
+        # Edge punctuation is never part of a name, and a corpus attaches plenty
+        # of it — `Frid?` is a Confluence cell marking an uncertain attribution.
+        # Testing the stripped form as well keeps those out of `unknown_person`
+        # without loosening any of the lookups themselves.
+        bare = lowered.strip(_COMPOUND_STRIP)
         if lowered in self._exempt or lowered in self._allowed:
             return None
-        if lowered in self._residual:
+        if bare in self._exempt or bare in self._allowed:
+            return None
+        if lowered in self._residual or bare in self._residual:
             return MAPPED_RESIDUAL
-        if _SINGLE_TOKEN_RE.match(candidate) and lowered in self._given_names:
+        if _SINGLE_TOKEN_RE.match(candidate.strip(_COMPOUND_STRIP)) and bare in self._given_names:
             return MAPPED_RESIDUAL
         # `other` — the coercion for a kind the model invented — is treated as a
         # missing kind, i.e. as a person. Only an explicit `role` downgrades.
+        #
+        # This stays AHEAD of the compound and genitive rules on purpose: a role
+        # phrase the model explicitly flagged drives a `sweep_gate` warning, and
+        # letting a compound re-bucket it as `mapped_residual` would delete that
+        # warning silently.
         if kind == "role":
             return ROLE
+        if self._is_genitive(bare):
+            return MAPPED_RESIDUAL
+        compound = self._compound_verdict(candidate)
+        if compound == DROP:
+            return None
+        if compound is not None:
+            return compound
         return UNKNOWN_PERSON
 
 
