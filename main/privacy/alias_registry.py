@@ -47,6 +47,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -55,7 +56,13 @@ logger = logging.getLogger(__name__)
 # built artifacts or cached derivations (contextual prefixes, LLM graph
 # extractions) stale. Stamped into the manifest and mixed into the graph
 # extractor's cache key.
-POLICY_VERSION = 1
+# v2: a dotted at-handle a name substitution would strand is now collapsed
+# whole, before the name pass, instead of being substituted into. Measured over
+# the 9532 scoped source files: TWO change output, and only ONE of those is
+# indexed (the other is under `.excluded/`). A pre-v2 build is one where the
+# tail of that handle — the rest of a person's name — is still in the index,
+# which is precisely what the stamp must be able to tell apart.
+POLICY_VERSION = 2
 
 # Marker the converter puts on a document whose text the registry actually
 # changed. The pipeline pops it (so it is never persisted) and uses it to
@@ -142,6 +149,37 @@ IDENT_RE = re.compile(r"(?i)(?<!\w)[a-z]\d{6}(?!\w)")
 # substituter would have redacted.
 HANDLE_RE = re.compile(r"(?<![\w.])@[a-zæøå0-9]+(?:\.[a-zæøå0-9]+)+", re.IGNORECASE)
 _HANDLE_RE = HANDLE_RE
+
+# Characters that continue a token where `_HANDLE_RE`'s `[a-zæøå0-9]` segment
+# class stops. A hyphen and an apostrophe are inside a surname far more often
+# than they end one (`Nord-Hansen`, `O'Brien`), so a handle whose match stops at
+# one was truncated mid-token: collapsing it welds `@person` onto the rest
+# (`@person-hansen`) and leaves half the surname in the clear, which is a
+# corruption no gate check recognises as anything.
+_TOKEN_CONTINUES = "_-'’´"
+# ...and the same idea for characters a literal set cannot enumerate. `Mn/Mc/Me`
+# are combining marks: macOS hands back NFD, where `müller` is `mu` + U+0308, and
+# welding there produced `@person̈ller`. `Pd` is every dash (a word processor
+# autocorrects a hyphen to U+2013; U+2011 is a non-breaking hyphen), `Pi/Pf` the
+# typographic quotes, `Lm`/`Sk` the modifier letters and spacing diacritics used
+# as apostrophes — the split between those two is arbitrary enough (U+02C6 is
+# `Lm`, U+02DA is `Sk`) that reasoning per character is the wrong tool. `Cf` is
+# the invisibles: SOFT HYPHEN is `&shy;` in HTML and lands INSIDE words, which
+# matters because Confluence is one of the in-scope sources, and ZWJ/ZWNJ are
+# the same story for any non-Latin script that arrives.
+#
+# This is not a proof of closure — no list of categories is — but every entry
+# fails toward REFUSING to collapse, which is the substitution behaviour that
+# already exists, so a category listed in error costs nothing and one missing
+# costs a weld. Measured over the in-scope corpus: 0 handles are refused by this
+# rule that the literal set above did not already refuse.
+_TOKEN_CONTINUING_CATEGORIES = frozenset({"Mn", "Mc", "Me", "Pd", "Pi", "Pf",
+                                          "Lm", "Sk", "Cf"})
+
+
+def _continues_token(ch: str) -> bool:
+    return (ch.isalnum() or ch in _TOKEN_CONTINUES
+            or unicodedata.category(ch) in _TOKEN_CONTINUING_CATEGORIES)
 
 # A dotted local part only counts as an email local part when what follows the
 # `@` is a real domain: at least one dot and an alphabetic last label. Without
@@ -479,6 +517,20 @@ class AliasRegistry:
         alternatives.append(_IDENT_ALTERNATIVE)
         self._pattern = re.compile("|".join(alternatives), re.IGNORECASE)
 
+        # Checks 5 and 3b assert that aliasing moves no exempt label and no ident
+        # exception. `_handle_would_strand` has to answer the same question, and
+        # the way to be sure it gets the same answer is to ask it with the same
+        # needle rather than to reconstruct it: a segment-by-segment lookup
+        # missed a label spelled across a dot (`srv.testbruker`) and every ident
+        # exception that is not `[A-Za-z]\d{6}`-shaped — and the exceptions file
+        # is documented to hold git SHAs and test users, which are neither.
+        # Same construction as index_scan._check_exemption_invariant.
+        protected = sorted({*map_data.get("non_person_labels", []),
+                            *self._ident_exceptions}, key=len, reverse=True)
+        self._protected_pattern = re.compile(
+            "|".join(r"(?<!\w)" + re.escape(t) + r"(?!\w)" for t in protected),
+            re.IGNORECASE) if protected else None
+
     # --- loading -----------------------------------------------------------
 
     @classmethod
@@ -488,6 +540,133 @@ class AliasRegistry:
         return cls(map_data, ident_exceptions=_load_ident_exceptions(ident_exceptions_path))
 
     # --- substitution ------------------------------------------------------
+
+    def _handle_would_strand(self, handle: re.Match) -> bool:
+        r"""True when substituting inside this at-handle would leave part of a
+        person's name in the clear, so the handle should be collapsed WHOLE.
+
+        The class: a **single-token** variant leading a dotted handle.
+        `@zylphia.mellomnavn.til` is one handle to a reader and three segments
+        to a regex. The name pass rewrites the first, and what is left —
+        `@[~ukjent-person].mellomnavn.til` — no longer matches `_HANDLE_RE`,
+        whose first segment must be alphanumeric. So the pass that exists to
+        collapse handles never sees it and the rest of that person's name ships.
+        A *dotted* variant cannot do this: `boundaried()`'s slug branch already
+        refuses to match inside a longer dotted path. Found by the local
+        sensitivity sweep, invisible to every map-driven check, because the
+        stranded tail is not a map literal.
+
+        This runs BEFORE the name pass, on the original text, and that placement
+        is the correction to the first version of this fix. That one asked the
+        same question from inside `_substitute` and declined to substitute,
+        leaving the collapse to the later handle pass — but it read `_HANDLE_RE`'s
+        `(?<![\w.])` against the text as it was, while the handle pass would read
+        it against the text as it became. A variant ending in a non-word
+        character sitting immediately before the `@` flips that boundary:
+        `Ada Example [X]@Zylphia.…` becomes `dev-01@Zylphia.…`, the `1` blocks the
+        lookbehind, the collapse never fires and the name ships in full. 203 of
+        the live map's 1203 variants end in a non-word character, so it was
+        reachable. Deciding here, where the text still is what the boundary was
+        read against, removes the gap rather than narrowing it. Recorded on PR
+        #121 together with the two designs that preceded it.
+
+        Refuses in five cases, each of which costs nothing — the substitution
+        then happens exactly as it does today:
+
+        * the regex stopped mid-token. `_HANDLE_RE`'s segment class is
+          `[a-zæøå0-9]`, so `@Zylphia.müller` matches only `@Zylphia.m`, and
+          collapsing that welds the token together as `@personüller` — a
+          corruption no gate check would recognise as anything. `_TOKEN_CONTINUES`
+          carries the rest of that class: a hyphen and an apostrophe stop the
+          segment too, and `@Zylphia.nord-hansen` -> `@person-hansen` is the same
+          weld with half a surname still in the clear;
+        * `is_person_handle` says version, package, annotation or host;
+        * an **exempt label or ident exception** lies inside, asked with gate
+          checks 5 and 3b's OWN needle (`self._protected_pattern`) rather than
+          reconstructed. `boundaried()`'s bare branch blocks a preceding `.` and
+          so cannot match a tail segment at all, while the gate's needle can —
+          collapsing `@Zylphia.saksbehandler` would have flipped check 5 to FAIL
+          while looking clean from in here. A segment-by-segment lookup was the
+          first repair and was still not the same question: it missed a label
+          spelled across a dot and every ident exception that is not
+          `[A-Za-z]\d{6}`-shaped, which is most of what that file holds;
+        * a variant **crosses the handle's right edge** (`@Zylphia.Ada Example`):
+          collapsing would cut it in half and leave the far end in the clear;
+        * one variant covers the whole handle body (`@ada.example`), so nothing
+          is stranded and the alias is kept — `@dev-01` says *which* person where
+          `@person` does not.
+
+        Two shapes this deliberately does NOT close, both unchanged from before
+        and both leaving the tail in the clear exactly as they already did: a
+        handle `is_person_handle` refuses (`@zylphia.Mellomnavn` reads as an
+        annotation, `@Zylphia.mellomnavn.no` as a host), and a handle whose `@`
+        is preceded by a word character or a percent-escape, which `_HANDLE_RE`
+        never sees. The class is narrowed, not eliminated. And because
+        `_HANDLE_RE`'s token boundary is not a word boundary,
+        `@Zylphia.mellomnavnAda Example` collapses the welded `Ada` away with the
+        handle and leaves `Example` — less leak than substituting in place, but
+        not none.
+        """
+        text, at, end = handle.string, handle.start(), handle.end()
+        if end < len(text) and _continues_token(text[end]):
+            return False                      # truncated mid-token
+        if not is_person_handle(handle.group(0)):
+            return False
+        if self._protected_pattern is not None:
+            # Anchored, for the same reason the name scan below is: `search`
+            # with `endpos=end` cannot see a protected term that STARTS inside
+            # the handle and ends past its right edge. A `non_person_label` is
+            # also in `_pattern`, so the crossing branch below catches it — an
+            # ident exception is not in `_pattern` at all, so nothing did, and a
+            # multi-token test user (which that file is documented to hold)
+            # would have silently broken check 3b.
+            if any(self._protected_pattern.match(text, pos) is not None
+                   for pos in range(at, end)):
+                return False                  # an exempt label or ident exception
+        # ANCHORED at each position of the handle instead of searched forward
+        # from it. `finditer(text, at)` with a `break` still has to scan to the
+        # next match ANYWHERE, so one mention-dense document turned the name pass
+        # into O(handles x rest of document) — 97x on a 100 KB page, unbounded
+        # above that, no timeout and no error. Bounding it by *length* instead
+        # was wrong for a subtler reason and leaked: VARIANT_SEPARATOR is
+        # `[^\S\n]+` and the ident wrapper carries `\s*`, both unbounded, so no
+        # constant reach covers a variant that crosses the edge — with a 200-space
+        # run `@Zylphia.Ada  …  Example` collapsed to `@person` and left the
+        # surname in the clear. Anchoring costs one attempt per character of the
+        # HANDLE, which is bounded by the thing itself, and asks the question
+        # exactly rather than approximately.
+        substitutes = False
+        pos = at
+        while pos < end:
+            m = self._pattern.match(text, pos)
+            if m is None:
+                pos += 1
+                continue
+            if pos == at or m.end() > end:
+                return False                  # owns the `@`, or crosses the edge
+            if pos == at + 1 and m.end() == end:
+                return False                  # covers the body: nothing is stranded
+            if self._would_substitute(m.group(0)):
+                substitutes = True
+            pos = m.end() if m.end() > pos else pos + 1
+        return substitutes
+
+    def _would_substitute(self, matched: str) -> bool:
+        """`_substitute` without its side effects — it flips the warn-once flag,
+        and this asks a hypothetical question, so it must not consume the one
+        warning a genuine later match needs."""
+        replacement = self._replacements.get(_lookup_key(matched), _UNRESOLVED)
+        if replacement is not _UNRESOLVED:
+            return replacement is not None and replacement != matched
+        inner = _IDENT_INNER.search(matched)
+        return inner is not None and inner.group(0).lower() not in self._ident_exceptions
+
+    def _collapse_strand_prone_handles(self, text: str) -> str:
+        """The pre-pass. One extra linear scan; `@` is the fast path out."""
+        if "@" not in text:
+            return text
+        return _HANDLE_RE.sub(
+            lambda m: HANDLE_TOKEN if self._handle_would_strand(m) else m.group(0), text)
 
     def _substitute(self, match: re.Match) -> str:
         matched = match.group(0)
@@ -512,7 +691,11 @@ class AliasRegistry:
     def apply(self, text: str) -> str:
         if not text:
             return text
-        substituted = self._pattern.sub(self._substitute, text)
+        # First, so the question "will the handle pass still see a handle?" is
+        # asked of the same text the handle pass would have read. See
+        # `_handle_would_strand`.
+        substituted = self._collapse_strand_prone_handles(text)
+        substituted = self._pattern.sub(self._substitute, substituted)
         substituted = _EMAIL_LOCAL_RE.sub(_substitute_email_local, substituted)
         substituted = _HANDLE_RE.sub(_substitute_handle, substituted)
         # Last, so a mapped person's own home directory has already become

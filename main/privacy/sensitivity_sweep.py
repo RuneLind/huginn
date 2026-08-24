@@ -238,6 +238,11 @@ _SINGLE_TOKEN_RE = re.compile(r"^[^\W\d_]+(?:['’\-][^\W\d_]+)*$")
 # only a run when something explicitly joins it.
 _COMPOUND_SPLIT_RE = re.compile(r"\s*(?:[,/&+;|]|\bog\b)\s*", re.IGNORECASE)
 _COMPOUND_STRIP = " \t?.,:;()[]{}<>\"'’"
+# A mention sigil, stripped ONLY in `classify` (see there) and deliberately not
+# added to _COMPOUND_STRIP: the compound machinery two review rounds hardened
+# splits and buckets parts, and a lone `@` part becoming empty there would make
+# a run count as fully accounted on nothing.
+_MENTION_SIGIL_STRIP = _COMPOUND_STRIP + "@"
 # The separators actually PRESENT in a candidate, used to refuse the ambiguous
 # two-part comma form. Kept in step with _COMPOUND_SPLIT_RE.
 _COMPOUND_SEPARATORS_RE = re.compile(r"[,/&+;|]|\bog\b", re.IGNORECASE)
@@ -458,14 +463,23 @@ class ReferenceClassifier:
         # of it — `Frid?` is a Confluence cell marking an uncertain attribution.
         # Testing the stripped form as well keeps those out of `unknown_person`
         # without loosening any of the lookups themselves.
-        bare = lowered.strip(_COMPOUND_STRIP)
+        # `@` is edge punctuation on a mention exactly as `?` is on an uncertain
+        # Confluence attribution: `@Ada` and `Ada` are the same reference, and
+        # only the second one reached the `given_names` rule below. Measured on
+        # the live map: `Ada` bucketed `mapped_residual`, `@Ada` bucketed
+        # `unknown_person` — one sigil was the whole difference, and it refused
+        # a hand-off over a given name the map already declares it knows. It
+        # cannot excuse a name the map does NOT know: `@Nyansatt` strips to
+        # `nyansatt`, which is in none of these sets, and still falls through.
+        bare = lowered.strip(_MENTION_SIGIL_STRIP)
         if lowered in self._exempt or lowered in self._allowed:
             return None
         if bare in self._exempt or bare in self._allowed:
             return None
         if lowered in self._residual or bare in self._residual:
             return MAPPED_RESIDUAL
-        if _SINGLE_TOKEN_RE.match(candidate.strip(_COMPOUND_STRIP)) and bare in self._given_names:
+        if (_SINGLE_TOKEN_RE.match(candidate.strip(_MENTION_SIGIL_STRIP))
+                and bare in self._given_names):
             return MAPPED_RESIDUAL
         # `other` — the coercion for a kind the model invented — is treated as a
         # missing kind, i.e. as a person. Only an explicit `role` downgrades.

@@ -9,6 +9,7 @@ import json
 
 import pytest
 
+from main.privacy import alias_registry
 from main.privacy.alias_registry import (
     AliasRegistry, PrivacyMapInvalid, PrivacyMapMissing, resolve_registry,
 )
@@ -337,6 +338,329 @@ def test_dotted_email_locals_are_redacted(registry, text, expected):
     assert registry.apply(text) == expected
 
 
+# --- stranded handle tails --------------------------------------------------
+#
+# A SINGLE-token variant leading a dotted handle used to be substituted in
+# place, and the remainder — `@[~ukjent-person].mellomnavn.til` — no longer
+# matched _HANDLE_RE, whose first segment must be alphanumeric. So the pass that
+# exists to collapse handles never saw it and the rest of that person's name
+# shipped. The registry now declines to substitute there, but ONLY when it has
+# just confirmed that the handle pass collapses the whole handle instead.
+#
+# The probe list below is written from FAILURE CLASSES, not from remembered
+# shapes: the five defects `/code-review` found in the first design (exempt
+# labels, ident exceptions, prose with a missing space, email domains, greedy
+# tails eating extensions/dates/another person's alias), plus the ordering hole
+# that a substitution inside the tail opens. Twenty tests written from shapes
+# missed all five.
+
+
+@pytest.mark.parametrize("text,expected", [
+    # THE shape, both channels. Nothing of the name survives: the head is not
+    # substituted, and the handle pass then eats head and tail together.
+    ("ping @Zylphia.mellomnavn.til", "ping @person"),
+    ("ping @Zylphia.mellomnavn", "ping @person"),
+    ("eg trur @Zylphia.mellomnavn.til har ein prosess", "eg trur @person har ein prosess"),
+])
+def test_a_bare_token_leading_a_handle_collapses_whole(registry, text, expected):
+    assert registry.apply(text) == expected
+    assert "Zylphia" not in registry.apply(text)
+    assert "mellomnavn" not in registry.apply(text)
+
+
+def test_only_the_redaction_channels_can_reach_the_guard(registry):
+    """A mapped ENTRY cannot have a bare single-token variant — `_validate`
+    refuses one outright — so the head of a dotted handle is only ever an
+    unmapped-person variant or an ident. A hyphenated compound, the one bare
+    entry-variant shape the map does allow, is unreachable from the other side:
+    `_HANDLE_RE` has no `-` in its segment class, so no handle is found and the
+    substitution happens exactly as before.
+    """
+    with pytest.raises(PrivacyMapInvalid):
+        AliasRegistry({**MAP, "entries": [_entry("dev-09", "Zed Quorndalsen",
+                                                 ["Zed Quorndalsen", "Quorndalsen"])]})
+    data = json.loads(json.dumps(MAP))
+    data["unmapped_people_variants"]["Nord-Hansen"] = ["Nord-Hansen"]
+    reg = AliasRegistry(data, ident_exceptions=["Q000456", "f000111"])
+    assert reg.apply("@Nord-Hansen.mellomnavn") == "@[~ukjent-person].mellomnavn"
+
+
+def test_a_literal_in_the_TAIL_defeats_the_collapse_so_both_are_substituted(registry):
+    # The ordering hole: the decline is decided on the text as it is, but this
+    # same pass is still scanning and will rewrite `Ada Example` in the tail.
+    # `@Zylphia.dev-01` ends in the label `dev`, which _HANDLE_TLDS calls a
+    # host, so the handle pass would NOT collapse it and `Zylphia` would ship.
+    out = registry.apply("@Zylphia.Ada Example")
+    assert out == "@[~ukjent-person].dev-01"
+    assert "Zylphia" not in out
+
+
+def test_a_redacted_ident_in_the_tail_collapses_with_the_handle(registry):
+    # Both outcomes are redactions, so the whole handle is simply the stronger
+    # one. An ident EXCEPTION is the opposite case and must survive — below.
+    assert registry.apply("@Zylphia.Q000124") == "@person"
+
+
+def test_an_ident_exception_in_the_tail_refuses_the_collapse(registry):
+    # Gate check 3b. `Q000456` is an ident exception in the fixture, and
+    # collapsing the handle would delete it.
+    assert registry.apply("@Zylphia.Q000456") == "@[~ukjent-person].Q000456"
+
+
+def test_an_exempt_label_in_the_tail_refuses_the_collapse(registry):
+    """Gate check 5, and the defect that killed the first version of this fix.
+
+    `boundaried()`'s bare branch blocks a preceding `.`, so a tail segment can
+    never be matched by the pattern — the label is invisible from inside the
+    substituter while check 5's own needle sees it perfectly. Looked up segment
+    by segment for exactly that reason.
+    """
+    for label in ("saksbehandler", "srvtestbruker", "Sikkerhet"):
+        assert registry.apply(f"@Zylphia.{label}") == f"@[~ukjent-person].{label}"
+
+
+def test_a_variant_ending_in_punctuation_before_the_at_does_not_leak(registry):
+    r"""The boundary flip. `_HANDLE_RE`'s `(?<![\w.])` was read against the text
+    as it was and would have been enforced against the text as it became:
+    `Ada Example [X]` becomes `dev-01`, whose `1` blocks the lookbehind, so the
+    collapse never fired and the name shipped in full. 203 of the live map's
+    1203 variants end in a non-word character.
+    """
+    for lead, alias in (("Ada Example [X]", "dev-01"), ("Bo Tester [X]", "fag-01"),
+                        ("Åse Øygard [X]", "dev-02")):
+        out = registry.apply(f"{lead}@Zylphia.mellomnavn")
+        assert out == f"{alias}@person"
+        assert "Zylphia" not in out
+    # ...and the result is stable, which it was not: applying twice used to
+    # redact what the first pass left behind.
+    text = "Ada Example [X]@Zylphia.mellomnavn"
+    assert registry.apply(registry.apply(text)) == registry.apply(text)
+
+
+@pytest.mark.parametrize("text", [
+    # `_HANDLE_RE`'s segment class is `[a-zæøå0-9]`, so the match stops inside
+    # the token and collapsing it would weld `@person` onto the rest.
+    "@Zylphia.müller",
+    "@Zylphia.mellomnavn.MÜLLER",
+])
+def test_a_handle_the_regex_truncated_is_never_collapsed(registry, text):
+    out = registry.apply(text)
+    assert out.startswith("@[~ukjent-person].")
+    assert "@person" not in out
+
+
+def _registry_with(labels=(), exceptions=("Q000456", "f000111")):
+    data = json.loads(json.dumps(MAP))
+    data["non_person_labels"] = sorted({*data["non_person_labels"], *labels})
+    return AliasRegistry(data, ident_exceptions=list(exceptions))
+
+
+@pytest.mark.parametrize("tail", ["nord-hansen", "Nord-Hansen", "o'brien",
+                                  "mellomnavn-til", "müller"])
+def test_a_segment_the_handle_regex_cannot_finish_is_never_collapsed(registry, tail):
+    """`_HANDLE_RE`'s `[a-zæøå0-9]` stops at a hyphen and an apostrophe as surely
+    as at `ü`, and a Norwegian surname contains both. Collapsing there welds
+    `@person` onto the rest and leaves half the surname in the clear — the exact
+    corruption the truncation guard exists to refuse, in the shapes its first
+    version did not cover."""
+    out = registry.apply(f"@Zylphia.{tail}")
+    assert out == f"@[~ukjent-person].{tail}"
+    assert "@person" not in out
+
+
+@pytest.mark.parametrize("tail,why", [
+    ("nord\u2011hansen", "non-breaking hyphen"),
+    ("nord\u2013hansen", "en dash, what a word processor autocorrects a hyphen to"),
+    ("mu\u0308ller", "NFD, which is what macOS hands back"),
+    ("o\u2018brien", "typographic quote"),
+    ("nord\u00adhansen", "SOFT HYPHEN, i.e. &shy; from any HTML source"),
+    ("nord\u200chansen", "zero-width non-joiner"),
+    ("nord\u02dahansen", "RING ABOVE, a spacing diacritic"),
+])
+def test_a_token_continuing_in_a_character_class_no_literal_set_covers(registry, tail, why):
+    r"""`_TOKEN_CONTINUES` as a hand-typed string covered `-` and `'` and missed
+    every combining mark, every non-ASCII dash, every other quote form and every
+    invisible — each of which continues a name token where `[a-zæøå0-9]` stops,
+    and none of which `\w` recognises. Deciding by Unicode category does not
+    prove the set closed; it moves the default to refusing, which is the
+    behaviour that already exists, so a missing entry costs a weld and a
+    surplus one costs nothing.
+    """
+    out = registry.apply(f"@zylphia.{tail} er her.")
+    assert out.startswith("@[~ukjent-person].")
+    assert "@person" not in out
+
+
+def test_a_multi_token_ident_exception_crossing_the_edge_refuses_the_collapse():
+    """An exempt label crossing the handle's right edge is caught by the name
+    loop, because labels are in `_pattern`. Ident exceptions are not in
+    `_pattern` at all, so a `search` bounded at `end` saw nothing and check 3b
+    broke silently. The exceptions file is documented to hold test users."""
+    reg = AliasRegistry(MAP, ident_exceptions=["Q000456", "srv testbruker"])
+    assert (reg.apply("@zylphia.srv testbruker kjorte.")
+            == "@[~ukjent-person].srv testbruker kjorte.")
+
+
+def test_an_ident_exception_that_is_not_ident_shaped_still_refuses_the_collapse():
+    r"""Gate check 3b needles every exception literally. `_load_ident_exceptions`
+    accepts any string and its docstring says the file holds git SHAs and test
+    users, so keying the guard on `[A-Za-z]\d{6}` asked a narrower question than
+    the check does and deleted the rest."""
+    reg = _registry_with(exceptions=("Q000456", "srvtestuser", "deadbeef"))
+    for token in ("srvtestuser", "deadbeef", "Q000456"):
+        assert reg.apply(f"@Zylphia.{token}") == f"@[~ukjent-person].{token}"
+
+
+def test_an_exempt_label_spelled_across_a_dot_still_refuses_the_collapse():
+    r"""Check 5's needle is `(?<!\w)label(?!\w)`, which spans dot boundaries; a
+    segment-by-segment lookup cannot see such a label at all."""
+    reg = _registry_with(labels=("srv.testbruker",))
+    assert (reg.apply("meld til @Zylphia.srv.testbruker i dag")
+            == "meld til @[~ukjent-person].srv.testbruker i dag")
+
+
+@pytest.mark.parametrize("gap", [1, 5, 40, 200, 5000])
+def test_a_variant_crossing_the_edge_is_seen_at_any_separator_length(registry, gap):
+    r"""Why the scan is anchored to the handle rather than bounded by a constant
+    reach past it. `VARIANT_SEPARATOR` is `[^\S\n]+` and the ident wrapper
+    carries `\s*` — both unbounded — so no constant covers a variant that
+    crosses the handle's right edge. A 200-space run defeated a
+    `longest * 3 + 32` window: the crossing match went unseen, the handle
+    collapsed, and the surname shipped in the clear.
+    """
+    out = registry.apply("@Zylphia.Ada" + " " * gap + "Example")
+    assert out.startswith("@[~ukjent-person].dev-01")
+    assert "Example" not in out
+
+
+def test_the_guard_is_bounded_by_the_handle_not_by_the_document(registry):
+    r"""`finditer(text, at)` with a `break` still scans forward to the next match
+    anywhere, so one mention-dense document made the name pass quadratic —
+    measured at 97x on a 100 KB page, unbounded above it, with no timeout and no
+    error. The window is now a constant past the handle.
+    """
+    import time
+    filler = "lorem ipsum dolor sit amet " * 400
+    short = "@olav.hansen " * 40 + filler
+    long_ = "@olav.hansen " * 40 + filler * 40
+    def elapsed(text):
+        start = time.perf_counter()
+        registry.apply(text)
+        return time.perf_counter() - start
+    elapsed(short)                                    # warm
+    ratio = elapsed(long_) / max(elapsed(short), 1e-6)
+    # Linear in document length would be ~40x; quadratic in handles x length was
+    # far worse. Generous ceiling so this measures the class, not the machine.
+    assert ratio < 120, f"apply() grew {ratio:.0f}x for 40x the text"
+
+
+def test_the_probe_does_not_consume_the_warn_once_slot(registry):
+    """`_handle_would_strand` asks a hypothetical question; running `_substitute`
+    to answer it flipped the once-per-registry unresolved-match warning."""
+    registry.apply("@Zylphia.mellomnavn.til")
+    assert registry._warned_unresolved is False
+
+
+def test_scandinavian_segments_are_not_treated_as_truncation(registry):
+    assert registry.apply("@Zylphia.øygard.til") == "@person"
+
+
+# --- the five defects the deleting design shipped ---------------------------
+
+def test_exempt_labels_are_never_deleted(registry):
+    # Defect 1: gate check 5 asserts exempt labels survive. Nothing is deleted
+    # here at all, and the exempt path returned `matched` before this change too.
+    assert registry.apply("feltet Saksbehandler er tomt") == "feltet Saksbehandler er tomt"
+    assert registry.apply("se Zylphia.Saksbehandler") == "se [~ukjent-person].Saksbehandler"
+
+
+def test_ident_exceptions_are_never_deleted(registry):
+    # Defect 2: gate check 3b. `Q000456` is an ident exception in the fixture.
+    assert registry.apply("bruker Q000456 kjørte jobben") == "bruker Q000456 kjørte jobben"
+    assert registry.apply("se Zylphia.Q000456") == "se [~ukjent-person].Q000456"
+
+
+@pytest.mark.parametrize("text,expected", [
+    # Defect 3: a full stop with no space after it must not eat the next word.
+    ("Se Zylphia. Deretter gjør vi X.", "Se [~ukjent-person]. Deretter gjør vi X."),
+    ("Se Zylphia.Deretter gjør vi X.", "Se [~ukjent-person].Deretter gjør vi X."),
+    ("Kontakt dev-01. Han svarer.", "Kontakt dev-01. Han svarer."),
+])
+def test_prose_after_a_substituted_name_is_untouched(registry, text, expected):
+    assert registry.apply(text) == expected
+
+
+def test_an_email_domain_is_never_at_risk(registry):
+    # Defect 4: the lookbehind that kept a domain out. _HANDLE_RE's own
+    # `(?<![\w.])` does it here — the `@` is preceded by a word character, so no
+    # handle is found and the head is substituted exactly as before.
+    assert (registry.apply("noreply@Zylphia.example.com")
+            == "noreply@[~ukjent-person].example.com")
+    assert (registry.apply("skriv til Zylphia.mellomnavn@nav.no")
+            == "skriv til [~ukjent-person].mellomnavn@nav.no")
+
+
+@pytest.mark.parametrize("text,expected", [
+    # Defect 5: extensions, dates and other people's aliases were swallowed.
+    ("vedlegg Zylphia.pdf", "vedlegg [~ukjent-person].pdf"),
+    ("Zylphia.2024.01.15 kl 12", "[~ukjent-person].2024.01.15 kl 12"),
+    ("Zylphia.Ada Example", "[~ukjent-person].dev-01"),
+])
+def test_tails_that_are_not_names_survive_intact(registry, text, expected):
+    assert registry.apply(text) == expected
+
+
+# --- shapes the handle pass refuses: substitute, exactly as before ----------
+
+@pytest.mark.parametrize("text,expected", [
+    # An annotation shape (lowercase head, CamelCase tail), a version and a
+    # host. `is_person_handle` refuses all three, so declining would leave the
+    # NAME in the clear to protect a tail that is not a person. Substitute.
+    # The annotation rule needs a LOWERCASE head, so this is the shape that
+    # reaches it — `@Zylphia.Setter` reads as a person and collapses.
+    ("@zylphia.Setter", "@[~ukjent-person].Setter"),
+    ("@Zylphia.2", "@[~ukjent-person].2"),
+    ("@Zylphia.no", "@[~ukjent-person].no"),
+    ("@Zylphia.internal", "@[~ukjent-person].internal"),
+])
+def test_non_person_handle_shapes_are_still_substituted(registry, text, expected):
+    assert registry.apply(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "@org.junit.Test",
+    "bruk @v1.2.3 taggen",
+    "@lombok.Setter over feltet",
+    "np.eye@vec og A.T@B",
+    "feltet person.noe er tomt",
+    "no.nav.ada.example.Klasse",
+])
+def test_unrelated_shapes_are_byte_identical(registry, text):
+    assert registry.apply(text) == text
+
+
+# --- behaviour that must NOT move -------------------------------------------
+
+def test_a_handle_wholly_covered_by_a_slug_variant_keeps_its_alias(registry):
+    # Nothing is stranded, so the which-person signal is kept rather than
+    # traded for @person. This is why the guard needs `handle.end() > end`.
+    assert registry.apply("kontakt @ada.example") == "kontakt @dev-01"
+    assert registry.apply("kontakt @bo.tester.") == "kontakt @fag-01."
+
+
+def test_a_slug_inside_a_longer_dotted_handle_still_goes_through_the_handle_pass(registry):
+    assert registry.apply("ping @ada.example.mellomnavn") == "ping @person"
+
+
+def test_percent_encoded_name_in_a_url_is_unaffected(registry):
+    assert "dev-01" in registry.apply("ovuser=abc%2CAda.Example%40nav.no&OR=Teams")
+
+
+def test_a_multi_token_variant_cannot_reach_the_guard(registry):
+    # A space breaks _HANDLE_RE, so no handle is ever found spanning one.
+    assert registry.apply("@Ada Example svarte") == "@dev-01 svarte"
+
+
 # --- apply_document ---------------------------------------------------------
 
 def _document():
@@ -447,7 +771,7 @@ def test_apply_is_idempotent(registry, text):
 
 def test_manifest_stamp(registry):
     stamp = registry.manifest_stamp()
-    assert stamp["policy_version"] == 1
+    assert stamp["policy_version"] == alias_registry.POLICY_VERSION
     assert stamp["map_version"] == 7
     assert stamp["aliasedAt"]
 

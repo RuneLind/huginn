@@ -143,7 +143,8 @@ def test_a_clean_collection_is_packaged(workspace, monkeypatch, capsys):
                for n in names), names
     assert not any("prealias" in n or n.endswith("aliases.json") for n in names)
     assert stamp["collection"] == "demo-aliased"
-    assert stamp["map_version"] == 7 and stamp["policy_version"] == 1
+    assert stamp["map_version"] == 7 \
+        and stamp["policy_version"] == index_scan.POLICY_VERSION
     assert stamp["numberOfDocuments"] == 1
     assert stamp["scanChecks"]["bigram_candidates"] == {"passed": True, "count": 0,
                                                         "ran": True}
@@ -460,7 +461,8 @@ def test_the_filename_carries_the_map_and_policy_version(workspace, monkeypatch)
                       documents=[_clean_document(0)])
     _package(workspace, monkeypatch)
     today = date.today().isoformat()
-    assert _tarballs(workspace) == [f"demo-aliased-{today}-map7-policy1.tar.gz"]
+    assert _tarballs(workspace) == [
+        f"demo-aliased-{today}-map7-policy{index_scan.POLICY_VERSION}.tar.gz"]
 
 
 def test_a_second_package_the_same_day_refuses_without_force(workspace, monkeypatch, capsys):

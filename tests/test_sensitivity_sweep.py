@@ -163,6 +163,39 @@ class TestClassification:
         assert classifier.classify("Zylphia Quorndal", "Zylphia Quorndal kommer.") == \
             sweep.MAPPED_RESIDUAL
 
+    # --- mention sigils ------------------------------------------------------
+    #
+    # `@Ada` and `Ada` are the same reference, but only the second reached the
+    # `given_names` rule, so a corpus that at-mentions a mapped colleague by
+    # first name refused the hand-off over a name the map already declares it
+    # knows. These are written from the failure classes of the fix, not its
+    # shape: the gate must not loosen for a name the map does NOT know.
+
+    def test_an_at_mentioned_mapped_given_name_is_a_residual(self, classifier):
+        assert classifier.classify("@Ada", "Se @Ada for detaljer.") == sweep.MAPPED_RESIDUAL
+        assert classifier.classify("@Zylphia", "Se @Zylphia for detaljer.") == \
+            sweep.MAPPED_RESIDUAL
+
+    def test_an_at_mention_cannot_excuse_a_name_the_map_does_not_know(self, classifier):
+        """The whole point of the gate. Stripping the sigil only lets the
+        candidate reach the lookups; it does not add anything to them."""
+        assert classifier.classify("@Nyansattperson", "Se @Nyansattperson om det.") == \
+            sweep.UNKNOWN_PERSON
+
+    def test_an_at_mentioned_full_name_is_still_unknown(self, classifier):
+        # `_SINGLE_TOKEN_RE` rejects the space, so the carve-out is unreachable.
+        assert classifier.classify("@Ada Nyansatt", "Se @Ada Nyansatt om det.") == \
+            sweep.UNKNOWN_PERSON
+
+    def test_an_at_mentioned_exempt_label_is_dropped(self, classifier):
+        assert classifier.classify("@Saksbehandler", "Se @Saksbehandler om det.") is None
+
+    def test_the_compound_machinery_does_not_strip_the_sigil(self):
+        """Deliberately NOT added to `_COMPOUND_STRIP`: a part that is nothing
+        but `@` would strip to empty and be filtered out, letting a run count as
+        fully accounted with a part unaccounted for."""
+        assert "@" not in sweep._COMPOUND_STRIP
+
     def test_a_full_name_starting_with_a_mapped_given_name_is_still_unknown(self, classifier):
         """The `given_names` carve-out is for a name standing ALONE. `Ada
         Nyansatt` is a full name nobody aliased, which is what the sweep is

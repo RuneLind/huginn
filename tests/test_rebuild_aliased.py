@@ -15,8 +15,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "audit"))
 
 import rebuild_aliased  # noqa: E402
+from main.privacy import alias_registry  # noqa: E402
 
-STAMP = {"policy_version": 1, "map_version": 7, "aliasedAt": "2026-01-02T00:00:00+00:00"}
+STAMP = {"policy_version": alias_registry.POLICY_VERSION, "map_version": 7,
+         "aliasedAt": "2026-01-02T00:00:00+00:00"}
 
 
 def _mapping(prefix, ids=("a.md", "b.md")):
@@ -44,19 +46,19 @@ def _write_index_artifacts(collection_dir: Path, prefix: str):
 
 class TestStampCheck:
     def test_matching_stamp_passes(self):
-        assert rebuild_aliased.stamp_mismatch({"privacy": STAMP}, 1, 7) is None
+        assert rebuild_aliased.stamp_mismatch({"privacy": STAMP}, alias_registry.POLICY_VERSION, 7) is None
 
     def test_missing_stamp_is_a_mismatch(self):
         # The one failure that matters: a build that silently ran unaliased
         # (scope file edited, map moved) looks exactly like a good one on disk.
-        assert rebuild_aliased.stamp_mismatch({}, 1, 7)
+        assert rebuild_aliased.stamp_mismatch({}, alias_registry.POLICY_VERSION, 7)
 
     @pytest.mark.parametrize("stamp", [
         {**STAMP, "map_version": 6},
         {**STAMP, "policy_version": 0},
     ])
     def test_stale_stamp_is_a_mismatch(self, stamp):
-        assert rebuild_aliased.stamp_mismatch({"privacy": stamp}, 1, 7)
+        assert rebuild_aliased.stamp_mismatch({"privacy": stamp}, alias_registry.POLICY_VERSION, 7)
 
 
 class TestReaderCheck:
