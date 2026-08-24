@@ -25,6 +25,7 @@ import pytest
 
 from main.core.contextual_prefix.cache import ContextualCache
 from main.core.documents_collection_creator import DocumentCollectionCreator, OPERATION_TYPE
+from main.privacy import alias_registry
 from main.privacy.alias_registry import AliasRegistry, PrivacyMapMissing
 from main.sources.files.files_document_converter import FilesDocumentConverter
 from main.sources.files.files_document_reader import FilesDocumentReader
@@ -202,7 +203,8 @@ def test_update_factory_re_arms_from_the_manifest_stamp_alone(mapped_cwd):
         "collectionName": "some-unrelated-collection",
         "lastModifiedDocumentTime": "2026-01-01T00:00:00",
         "reader": {"type": "localFiles", "basePath": str(SOURCE_DOCS)},
-        "privacy": {"policy_version": 1, "map_version": 7, "aliasedAt": "2026-01-01T00:00:00+00:00"},
+        "privacy": {"policy_version": alias_registry.POLICY_VERSION, "map_version": 7,
+                    "aliasedAt": "2026-01-01T00:00:00+00:00"},
     }
     _, converter = _build_local_files(manifest)
     assert converter.alias_registry is not None
@@ -310,7 +312,8 @@ def _manifest_content(converter, existing_manifest=None):
 def test_manifest_stamp_on_the_create_branch():
     converter = FilesDocumentConverter(alias_registry=AliasRegistry(FIXTURE_MAP))
     manifest = _manifest_content(converter)
-    assert manifest["privacy"] == {"policy_version": 1, "map_version": 7,
+    assert manifest["privacy"] == {"policy_version": alias_registry.POLICY_VERSION,
+                                   "map_version": 7,
                                    "aliasedAt": "2026-01-02T03:04:05+00:00"}
 
 

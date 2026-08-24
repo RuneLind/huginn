@@ -223,15 +223,6 @@ map stays local.
   reader block reproduces the source's. `--swap` re-checks the stamp, parks the
   live one under `data/prealias/<name>-<date>` (**outside** `data/collections/`, so
   no server glob serves it) and reloads the server — a failed reload exits non-zero.
-  - **The parking path is date-only, so the second swap of the same day refuses**
-    (`Refusing to overwrite an existing parked collection`) rather than
-    overwriting the earlier park. That is the intended outcome — a park is the
-    only undo the swap has, and `data/` is gitignored — but it means a same-day
-    re-swap halts *before* renaming anything. Rename the earlier park with a
-    suffix recording what it holds (read `privacy.map_version` out of its
-    `manifest.json`; `<name>-<date>-map7` beside `<name>-<date>-map8`) and re-run
-    the swap. Never resolve it by deleting a park, and never by rebuilding: after
-    a halt the `<name>-aliased` build is still valid and should be swapped as-is.
   - **The swap rewrites the mapping's `documentPath` prefixes**
     (`<name>-aliased/documents/…` → `<name>/documents/…`, temp file +
     `os.replace`) — *this* is the canonical write-up of the incident behind it.

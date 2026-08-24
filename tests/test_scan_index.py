@@ -30,7 +30,7 @@ from main.privacy import index_scan  # noqa: E402
 from main.privacy.alias_registry import PrivacyMapInvalid, boundaried  # noqa: E402
 
 MAP_VERSION = 7
-GOOD_STAMP = {"policy_version": 1, "map_version": MAP_VERSION,
+GOOD_STAMP = {"policy_version": index_scan.POLICY_VERSION, "map_version": MAP_VERSION,
               "aliasedAt": "2026-01-02T00:00:00+00:00"}
 
 
