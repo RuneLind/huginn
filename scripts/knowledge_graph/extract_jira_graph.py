@@ -260,8 +260,9 @@ def main():
 
     # Cross-references (only to issues that exist in the collection)
     # sorted(): cross_refs is a set, so its iteration order varies per process.
-    # Unsorted, two runs of the unchanged extractor differ by ~700 lines and the
-    # tracked graph file churns in git nightly for no reason.
+    # Unsorted, two runs of the unchanged extractor put ~170 of the 515
+    # cross-reference edges in different positions (~340 changed JSON lines,
+    # measured 2026-08-25), churning the tracked graph in git nightly.
     cross_ref_count = 0
     for issue_key, data in issues.items():
         for ref_key in sorted(data["cross_refs"]):

@@ -74,8 +74,11 @@ def _run(root: Path, source: Path, output: Path, extra_env=None):
     real map and real scope: every private glob and every relative scope path
     resolves against it.
     """
-    env = {**os.environ, "PYTHONPATH": str(REPO_ROOT), "HUGINN_PRIVACY_ROOT": str(root)}
-    env.update(extra_env or {})
+    # extra_env FIRST: HUGINN_PRIVACY_ROOT is what the docstring above calls
+    # load-bearing, so a caller must not be able to override it into the
+    # operator's real map.
+    env = {**os.environ, **(extra_env or {}),
+           "PYTHONPATH": str(REPO_ROOT), "HUGINN_PRIVACY_ROOT": str(root)}
     return subprocess.run(
         [sys.executable, str(EXTRACTOR), "--source", str(source), "--output", str(output)],
         cwd=root, env=env, capture_output=True, text=True, timeout=300,
@@ -339,20 +342,21 @@ def test_cross_reference_edges_are_emitted_in_a_stable_order(corpus):
     """The graph is a tracked file, so its byte order is part of its contract.
 
     ``cross_refs`` is a set, so unsorted its iteration order varies per process:
-    two runs of the extractor over the real corpus differed by ~700 lines and
-    churned the tracked graph in git nightly. PYTHONHASHSEED is pinned to two
+    two runs of the extractor over the real corpus put ~170 of the 515
+    cross-reference edges in different positions, churning the tracked graph in
+    git nightly. PYTHONHASHSEED is pinned to two
     DIFFERENT values here to force divergence deterministically — the opposite
     of pinning it to hide the problem, which is how the byte-identical claim in
     huginn #122 had to be stated.
     """
     root, source = corpus
-    refs = ["MELOSYS-%d" % n for n in (91, 17, 55, 3, 78, 26, 64, 40, 82, 9, 71, 33)]
+    refs = [f"MELOSYS-{n}" for n in (91, 17, 55, 3, 78, 26, 64, 40, 82, 9, 71, 33)]
     for key in refs:
         _issue(source, key, "Referenced issue")
     (source / "MELOSYS-1.md").write_text(
         "\n".join(["---", 'title: "Referring issue"', "issue_key: MELOSYS-1",
-                    "status: Ferdig", "issue_type: Historie", "---", "",
-                    "See " + ", ".join(refs) + ".", ""]),
+                   "status: Ferdig", "issue_type: Historie", "---", "",
+                   "See " + ", ".join(refs) + ".", ""]),
         encoding="utf-8")
 
     outputs = []
