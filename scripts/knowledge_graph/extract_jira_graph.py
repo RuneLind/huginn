@@ -30,13 +30,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from main.graph.graph_loader import resolve_graph_output_path
 from main.privacy.alias_registry import PrivacyMapMissing, discover_map_path, path_in_scope
-from main.privacy.index_scan import person_forms_in_payload
+from main.privacy.index_scan import blocking_forms_in_payload
 from main.utils.frontmatter import read_frontmatter_from_path, strip_frontmatter
 
 ISSUE_KEY_RE = re.compile(r'\b([A-Z][A-Z0-9]+-\d+)\b')
 
-# The write gate's exit code, distinct from an argparse/usage failure.
-REFUSED = 2
+# The write gate's exit code. NOT 2: argparse exits 2 on any usage error and so
+# can `uv`, so a mistyped flag would have been reported by the caller as a
+# privacy incident that never happened.
+REFUSED = 3
 
 
 def parse_body(filepath: str) -> str:
@@ -76,17 +78,26 @@ def gate_output(graph: dict, source_dir: Path) -> None:
     * in scope with no usable map it refuses, the same way the index build
       refuses rather than writing real names to disk.
 
+    Every category the distribution gate blocks on, not only listed people: a
+    graph committed to a repo is a distribution surface, and an ident or a bank
+    account in an issue title is as unshippable as a name. Measured 2026-08-25 on
+    the whole corpus: 0 hits in every one of those categories, so widening costs
+    nothing today.
+
     Raises ``PrivacyMapMissing`` or ``ValueError`` (the caller turns either into
-    an exit-2 refusal). The scan runs on the in-memory graph, so a
+    an exit-3 refusal). The scan runs on the in-memory graph, so a
     refusal leaves the previous graph file exactly where it was.
     """
     if not path_in_scope(str(source_dir)):
         return
-    surviving = person_forms_in_payload(graph, discover_map_path())
-    if surviving:
+    findings = blocking_forms_in_payload(graph, discover_map_path())
+    if findings:
+        summary = "; ".join(f"{category}: {shapes[:3]}"
+                            for category, shapes in sorted(findings.items()))
         raise ValueError(
-            f"{len(surviving)} mapped person form(s) survive in the graph built from "
-            f"{source_dir.name}; shapes (letters->x, digits->9): {surviving[:5]}")
+            f"the graph built from {source_dir.name} carries "
+            f"{sum(len(v) for v in findings.values())} blocking form(s) in "
+            f"{len(findings)} category/ies; shapes (letters->x, digits->9) {summary}")
 
 
 def main():
@@ -99,8 +110,10 @@ def main():
 
     source_dir = Path(args.source)
     if not source_dir.exists():
-        print(f"Error: Source directory not found: {source_dir}")
-        return
+        # Non-zero: exiting 0 having written nothing makes the caller's ledger
+        # phase say `succeeded` for a graph that was never rebuilt.
+        print(f"Error: Source directory not found: {source_dir}", file=sys.stderr)
+        sys.exit(1)
 
     # Route by the source directory name (matches the collection name in the
     # private routing configs) so no private path or collection allow-list is
@@ -110,9 +123,10 @@ def main():
             source_dir.name, args.output, filename="jira_graph.json"
         )
     except ValueError as e:
-        print(f"Error: {e}")
-        print("Do NOT write to ./scripts/knowledge_graph/ — that path leaks customer data into the public repo.")
-        return
+        print(f"Error: {e}", file=sys.stderr)
+        print("Do NOT write to ./scripts/knowledge_graph/ — that path leaks customer data "
+              "into the public repo.", file=sys.stderr)
+        sys.exit(1)
 
     print(f"Scanning {source_dir} for Jira markdown files...")
 
@@ -272,7 +286,10 @@ def main():
     # Gate BEFORE the write: a refusal must leave the previous graph in place.
     try:
         gate_output(graph, source_dir)
-    except (PrivacyMapMissing, ValueError) as e:
+    except (PrivacyMapMissing, ValueError, KeyError, OSError) as e:
+        # KeyError/OSError: a schema-drifted or unreadable map. Refusing on those
+        # keeps the gate's one exit path, instead of a traceback the daily logs
+        # as an ordinary extractor crash.
         print(f"REFUSED: {e}", file=sys.stderr)
         print(f"Nothing written — {output_path.name} is untouched.", file=sys.stderr)
         sys.exit(REFUSED)

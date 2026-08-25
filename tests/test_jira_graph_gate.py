@@ -31,6 +31,8 @@ from main.privacy import index_scan  # noqa: E402
 # <root>/data/sources/jira-issues is in scope on the public file alone.
 IN_SCOPE_SOURCE = Path("data") / "sources" / "jira-issues"
 
+REFUSED = 3          # the gate's exit code; deliberately not argparse's 2
+
 MAPPED_NAME = "Ada Example00"
 UNMAPPED_NAME = "Zylphia Quorndal"
 
@@ -105,10 +107,11 @@ def test_a_mapped_name_in_an_issue_title_refuses_the_write(corpus):
 
     result = _run(root, source, output)
 
-    assert result.returncode == 2
+    assert result.returncode == REFUSED
     assert "REFUSED" in result.stderr
     # A refusal names shapes, never the person it refused on.
     assert MAPPED_NAME not in result.stderr and "Ada" not in result.stderr
+    assert MAPPED_NAME not in result.stdout and "Ada" not in result.stdout
     assert "xxx" in result.stderr
     # Scanned in memory, so the previous graph is still the previous graph.
     assert output.read_text(encoding="utf-8") == "PREVIOUS GRAPH"
@@ -122,7 +125,7 @@ def test_an_unmapped_person_refuses_too(corpus):
 
     result = _run(root, source, output)
 
-    assert result.returncode == 2
+    assert result.returncode == REFUSED
     assert not output.exists()
 
 
@@ -135,7 +138,7 @@ def test_an_epic_summary_is_scanned_as_well_as_a_title(corpus):
 
     result = _run(root, source, output)
 
-    assert result.returncode == 2
+    assert result.returncode == REFUSED
     assert not output.exists()
 
 
@@ -192,7 +195,7 @@ def test_an_in_scope_source_with_no_map_refuses(tmp_path):
 
     result = _run(tmp_path, source, output)
 
-    assert result.returncode == 2
+    assert result.returncode == REFUSED
     assert "REFUSED" in result.stderr
     assert not output.exists()
 
@@ -207,7 +210,7 @@ def test_a_truncated_map_refuses_instead_of_certifying(corpus):
 
     result = _run(root, source, output)
 
-    assert result.returncode == 2
+    assert result.returncode == REFUSED
     assert "floor" in result.stderr
     assert not output.exists()
 
@@ -221,5 +224,109 @@ def test_two_maps_are_ambiguous_rather_than_first_wins(corpus):
 
     result = _run(root, source, output)
 
-    assert result.returncode == 2
+    assert result.returncode == REFUSED
     assert not output.exists()
+
+
+# --- the widened category set -----------------------------------------------
+
+@pytest.mark.parametrize("title, category", [
+    ("Feilsøk saken for A123456 i morgen", "nav_ident"),
+    ("Avklart i tråden med @kari.moe om regelverket", "dotted_handle"),
+    ("Overfør til konto 1234.56.78903 før fristen", "bankkonto"),
+])
+def test_the_other_blocking_categories_refuse_too(corpus, title, category):
+    """A graph committed to a repo is a distribution surface.
+
+    Check 1 alone answers only "did a LISTED person survive". An ident, a dotted
+    handle or a bank account in an issue title is as unshippable as a name, and
+    the title is the one free-text field this gate protects.
+    """
+    root, source = corpus
+    _issue(source, "MELOSYS-2", title)
+    output = root / "graph.json"
+
+    result = _run(root, source, output)
+
+    assert result.returncode == REFUSED, result.stdout + result.stderr
+    assert category in result.stderr
+    assert not output.exists()
+
+
+def test_an_advisory_category_does_not_refuse(corpus):
+    """An organisasjonsnummer identifies a company in a public register.
+
+    It is legitimate content in an issue about an employer, it is the category
+    that fires most, and the collection gate reports rather than blocks on it.
+    """
+    root, source = corpus
+    _issue(source, "MELOSYS-2", "Arbeidsgiver med organisasjonsnummer 889640782")
+    output = root / "graph.json"
+
+    result = _run(root, source, output)
+
+    assert result.returncode == 0, result.stderr
+    assert output.exists()
+
+
+# --- the boundaries, which are the whole reason not to re-derive -------------
+
+@pytest.mark.parametrize("text", [
+    # A dotted slug followed by another dotted label. The SUBSTITUTER leaves this
+    # alone (it must not rewrite `no.nav.ada.example.impl`), so a gate sharing its
+    # boundary verbatim would be blind to the person in `ada.example00.md`.
+    "se ada.example00.md for detaljer",
+    # A mononym after a percent escape: `%20Ada Example00` in a query string is
+    # the name in the clear, and the substituter's narrowing hides it.
+    "https://example.test/s?q=%20Ada%20Example00",
+])
+def test_the_scan_boundary_widenings_are_inherited_not_re_derived(corpus, text):
+    root, _ = corpus
+    map_path = root / "huginn-fixture" / "privacy" / "aliases.json"
+
+    assert index_scan.person_forms_in_payload({"nodes": [{"label": text}]}, map_path)
+
+
+# --- a map the build would refuse ------------------------------------------
+
+@pytest.mark.parametrize("mutate", [
+    lambda m: m.pop("entries"),
+    lambda m: m.pop("unmapped_people_variants"),
+    lambda m: m.pop("non_person_labels"),
+])
+def test_a_schema_drifted_map_refuses_rather_than_crashing(corpus, mutate):
+    """One exit path, not a traceback the daily logs as an ordinary crash."""
+    root, source = corpus
+    map_path = root / "huginn-fixture" / "privacy" / "aliases.json"
+    payload = _map()
+    mutate(payload)
+    map_path.write_text(json.dumps(payload), encoding="utf-8")
+    output = root / "graph.json"
+
+    result = _run(root, source, output)
+
+    assert result.returncode == REFUSED, result.stdout + result.stderr
+    assert "REFUSED" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert not output.exists()
+
+
+def test_an_unreadable_map_refuses_rather_than_crashing(corpus):
+    root, source = corpus
+    map_path = root / "huginn-fixture" / "privacy" / "aliases.json"
+    map_path.chmod(0o000)
+    try:
+        result = _run(root, source, root / "graph.json")
+    finally:
+        map_path.chmod(0o644)
+
+    assert result.returncode == REFUSED
+    assert "Traceback" not in result.stderr
+
+
+# --- the silent exit-0 paths the ledger phase would call `succeeded` ---------
+
+def test_a_missing_source_directory_exits_non_zero(tmp_path):
+    result = _run(tmp_path, tmp_path / "nope", tmp_path / "graph.json")
+    assert result.returncode != 0
+    assert not (tmp_path / "graph.json").exists()

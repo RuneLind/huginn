@@ -394,18 +394,31 @@ map stays local.
   `--source` at `documents/` was measured and rejected: `parent` does not survive
   the build, so 718 of 2373 issues (30 %) lose their subtask edge, and the
   `.excluded/` stub enrichment goes with it. So `gate_output` runs the produced
-  graph through `index_scan.person_forms_in_payload` — the same needles, the same
-  per-shape boundaries, the same NUL join as check 1, never a re-derived boundary
-  — and exits **2** without writing when a mapped literal survives; the previous
-  graph file is untouched, and the message carries shapes, never a name. Armed by
-  `path_in_scope(--source)`, so a clone with no NAV source tree is byte-identical
-  to before it existed; in scope with a missing, ambiguous or sub-floor map it
-  refuses, the same way an in-scope index build refuses. Latent, not a repair:
-  the extractor copies only structural frontmatter, and on 2026-08-25 the whole
-  corpus measured **0** mapped names — a guard on a path that is clean today is
-  cheap, the same guard after a leak is a rebuild. The jira daily runs it in a
-  **non-fatal** `graph` phase, so a refusal degrades the run on the dashboard
-  instead of scrolling past in a log.
+  graph through `index_scan.blocking_forms_in_payload` — the same needles, the
+  same per-shape boundaries, the same NUL join as check 1, never a re-derived
+  boundary — and exits **3** without writing when a blocking form survives; the
+  previous graph file is untouched, and the message carries shapes, never a name.
+  - **Every blocking category, not only check 1.** A graph committed to a repo
+    is a distribution surface, so checks 3, 4, 10 and 11's blocking set (NAV
+    idents, dotted handles, distributor fingerprints, fødselsnummer, bankkonto,
+    credential) ride along with the mapped-person needles; check 1 alone let an
+    ident or a bank account in an issue title straight through the one free-text
+    field this gate protects. Advisory categories stay advisory — an
+    organisasjonsnummer identifies a company in a public register.
+  - **Exit 3, not 2.** `argparse` exits 2 on any usage error and so can `uv`, so
+    a mistyped flag would otherwise be reported by the caller as a privacy
+    incident that never happened.
+  - Armed by `path_in_scope(--source)`, so a clone with no NAV source tree is
+    byte-identical to before it existed; in scope with a missing, ambiguous,
+    sub-floor, schema-drifted or unreadable map it refuses. Latent, not a
+    repair: the extractor copies only structural frontmatter, and on 2026-08-25
+    the whole corpus measured **0** hits in every one of those categories — a
+    guard on a path that is clean today is cheap, the same guard after a leak is
+    a rebuild. The jira daily runs it in a **non-fatal** `graph` phase, so a
+    refusal degrades the run on the dashboard instead of scrolling past in a
+    log. The two paths that used to print an error and exit 0 (missing source
+    dir, unresolvable output route) now exit 1, because a phase cannot report
+    `succeeded` for a graph that was never written.
 - **Derived caches carry pre-alias text.**
   `.venv/bin/python scripts/audit/purge_prealias_caches.py` retires them (LLM graph
   caches deleted, dormant contextual caches renamed to `.pre-alias.bak`). The

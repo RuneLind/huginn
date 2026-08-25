@@ -40,7 +40,7 @@ from main.indexes.indexers.bm25_indexer import _tokenize
 from main.persisters.disk_persister import DiskPersister
 from main.privacy.alias_registry import (
     POLICY_VERSION, VARIANT_LEFT_BOUNDARY, VARIANT_RIGHT_BOUNDARY, VARIANT_SEPARATOR,
-    AliasRegistry, boundaried, shape as sanitize,
+    AliasRegistry, _load_ident_exceptions, boundaried, shape as sanitize,
 )
 from main.privacy.sensitivity_scanner import (
     ALL_CATEGORIES, BLOCKING_CATEGORIES, SensitivityScanner,
@@ -611,6 +611,38 @@ def person_forms_in_payload(payload, map_path) -> list:
     scanner = NeedleScanner(build_needles(alias_map))
     hits = scanner.findall(STRING_JOIN.join(walk_strings(payload)))
     return sorted({sanitize(hit) for hit in hits})
+
+
+def blocking_forms_in_payload(payload, map_path, *, ident_exceptions=None) -> dict:
+    """Every category this gate BLOCKS on, asked of a JSON payload.
+
+    Check 1 alone (:func:`person_forms_in_payload`) answers "did a LISTED person
+    survive". A payload written into a repo is a distribution surface, so it gets
+    the rest of the blocking set too: checks 3 and 4 (NAV idents, dotted
+    handles), check 10 (distributor fingerprints) and check 11's blocking
+    categories (fødselsnummer, bankkonto, credential). Without them an ident or a
+    bank account in an issue title walks straight through a gate that is, by its
+    own docstring, protecting the one free-text field.
+
+    Advisory categories are deliberately absent — email, phone and
+    organisasjonsnummer are reported by the collection gate and do not fail it,
+    and an organisation number is legitimate content in an issue about an
+    employer. Returns ``{category: [masked shapes]}``, empty when clean.
+    """
+    findings = {}
+    person = person_forms_in_payload(payload, map_path)
+    if person:
+        findings["person_form"] = person
+
+    exceptions = _load_ident_exceptions() if ident_exceptions is None else ident_exceptions
+    scanner = SensitivityScanner(categories=BLOCKING_CATEGORIES,
+                                 ident_exceptions={t.lower() for t in exceptions})
+    for text in walk_strings(payload):
+        for finding in scanner.detect(text):
+            findings.setdefault(finding.category, set()).add(finding.shape)
+        for match in FINGERPRINT_RE.finditer(text):
+            findings.setdefault("fingerprint", set()).add(sanitize(match.group(0)))
+    return {category: sorted(shapes) for category, shapes in findings.items()}
 
 
 def _scan_vectors(path: Path):
