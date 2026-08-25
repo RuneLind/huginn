@@ -259,9 +259,13 @@ def main():
             subtask_count += 1
 
     # Cross-references (only to issues that exist in the collection)
+    # sorted(): cross_refs is a set, so its iteration order varies per process.
+    # Unsorted, two runs of the unchanged extractor put ~170 of the 515
+    # cross-reference edges in different positions (~340 changed JSON lines,
+    # measured 2026-08-25), churning the tracked graph in git nightly.
     cross_ref_count = 0
     for issue_key, data in issues.items():
-        for ref_key in data["cross_refs"]:
+        for ref_key in sorted(data["cross_refs"]):
             if ref_key in issue_keys_set:
                 add_edge(f"issue:{issue_key}", f"issue:{ref_key}", "refererer_til")
                 cross_ref_count += 1
