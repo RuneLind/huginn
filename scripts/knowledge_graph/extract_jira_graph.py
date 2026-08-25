@@ -14,6 +14,8 @@ Output routing when no --output is given: a graph_routing.json in one of the
 private sub-repo knowledge_graph dirs decides which dir owns the source
 collection (matched by the --source directory name). Without any routing
 config the run fails and asks for --output.
+
+The source is RAW pre-alias markdown, so the write is gated — see gate_output.
 """
 
 import argparse
@@ -27,9 +29,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from main.graph.graph_loader import resolve_graph_output_path
+from main.privacy.alias_registry import PrivacyMapMissing, discover_map_path, path_in_scope
+from main.privacy.index_scan import blocking_forms_in_payload
 from main.utils.frontmatter import read_frontmatter_from_path, strip_frontmatter
 
 ISSUE_KEY_RE = re.compile(r'\b([A-Z][A-Z0-9]+-\d+)\b')
+
+# The write gate's exit code. NOT 2: argparse exits 2 on any usage error and so
+# can `uv`, so a mistyped flag would have been reported by the caller as a
+# privacy incident that never happened.
+REFUSED = 3
 
 
 def parse_body(filepath: str) -> str:
@@ -50,6 +59,47 @@ def extract_cross_references(body: str, self_key: str, epic_key: str) -> set[str
     return refs
 
 
+def gate_output(graph: dict, source_dir: Path) -> None:
+    """Refuse to write a graph that still spells someone the alias map knows.
+
+    This extractor is the one graph step that reads a source tree instead of a
+    built collection, so it is the one that can carry a pre-alias name into a
+    file that gets committed. It copies only structural frontmatter — issue key,
+    title, status, type, epic and parent — and measured across the whole corpus
+    on 2026-08-25 not one of those fields held a mapped name, so this is a guard
+    on a latent shape rather than a repair. It is worth having precisely while it
+    is a no-op: a person's name in an issue *title* would flow through
+    ungated, and the same guard added after that has happened is a rebuild.
+
+    Fail closed, in both directions:
+
+    * out of privacy scope (a clone with no NAV source tree) it does nothing at
+      all, and the run is byte-identical to one from before this existed;
+    * in scope with no usable map it refuses, the same way the index build
+      refuses rather than writing real names to disk.
+
+    Every category the distribution gate blocks on, not only listed people: a
+    graph committed to a repo is a distribution surface, and an ident or a bank
+    account in an issue title is as unshippable as a name. Measured 2026-08-25 on
+    the whole corpus: 0 hits in every one of those categories, so widening costs
+    nothing today.
+
+    Raises ``PrivacyMapMissing`` or ``ValueError`` (the caller turns either into
+    an exit-3 refusal). The scan runs on the in-memory graph, so a
+    refusal leaves the previous graph file exactly where it was.
+    """
+    if not path_in_scope(str(source_dir)):
+        return
+    findings = blocking_forms_in_payload(graph, discover_map_path())
+    if findings:
+        summary = "; ".join(f"{category}: {shapes[:3]}"
+                            for category, shapes in sorted(findings.items()))
+        raise ValueError(
+            f"the graph built from {source_dir.name} carries "
+            f"{sum(len(v) for v in findings.values())} blocking form(s) in "
+            f"{len(findings)} category/ies; shapes (letters->x, digits->9) {summary}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Extract Jira knowledge graph from markdown files")
     parser.add_argument("--source", default="./data/sources/jira-issues",
@@ -60,8 +110,10 @@ def main():
 
     source_dir = Path(args.source)
     if not source_dir.exists():
-        print(f"Error: Source directory not found: {source_dir}")
-        return
+        # Non-zero: exiting 0 having written nothing makes the caller's ledger
+        # phase say `succeeded` for a graph that was never rebuilt.
+        print(f"Error: Source directory not found: {source_dir}", file=sys.stderr)
+        sys.exit(1)
 
     # Route by the source directory name (matches the collection name in the
     # private routing configs) so no private path or collection allow-list is
@@ -71,9 +123,10 @@ def main():
             source_dir.name, args.output, filename="jira_graph.json"
         )
     except ValueError as e:
-        print(f"Error: {e}")
-        print("Do NOT write to ./scripts/knowledge_graph/ — that path leaks customer data into the public repo.")
-        return
+        print(f"Error: {e}", file=sys.stderr)
+        print("Do NOT write to ./scripts/knowledge_graph/ — that path leaks customer data "
+              "into the public repo.", file=sys.stderr)
+        sys.exit(1)
 
     print(f"Scanning {source_dir} for Jira markdown files...")
 
@@ -229,6 +282,17 @@ def main():
     }
 
     graph = {"nodes": nodes, "edges": edges, "stats": stats}
+
+    # Gate BEFORE the write: a refusal must leave the previous graph in place.
+    try:
+        gate_output(graph, source_dir)
+    except (PrivacyMapMissing, ValueError, KeyError, OSError) as e:
+        # KeyError/OSError: a schema-drifted or unreadable map. Refusing on those
+        # keeps the gate's one exit path, instead of a traceback the daily logs
+        # as an ordinary extractor crash.
+        print(f"REFUSED: {e}", file=sys.stderr)
+        print(f"Nothing written — {output_path.name} is untouched.", file=sys.stderr)
+        sys.exit(REFUSED)
 
     # Write output
     output_path.parent.mkdir(parents=True, exist_ok=True)

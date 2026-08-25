@@ -40,7 +40,7 @@ from main.indexes.indexers.bm25_indexer import _tokenize
 from main.persisters.disk_persister import DiskPersister
 from main.privacy.alias_registry import (
     POLICY_VERSION, VARIANT_LEFT_BOUNDARY, VARIANT_RIGHT_BOUNDARY, VARIANT_SEPARATOR,
-    AliasRegistry, boundaried, shape as sanitize,
+    AliasRegistry, _load_ident_exceptions, boundaried, shape as sanitize,
 )
 from main.privacy.sensitivity_scanner import (
     ALL_CATEGORIES, BLOCKING_CATEGORIES, SensitivityScanner,
@@ -582,6 +582,67 @@ def walk_strings(value):
     elif isinstance(value, list):
         for item in value:
             yield from walk_strings(item)
+
+
+def person_forms_in_payload(payload, map_path) -> list:
+    """Check 1's question, asked of a JSON payload that is not a collection.
+
+    ``scripts/knowledge_graph/extract_jira_graph.py`` reads the RAW pre-alias
+    source tree — the built ``documents/`` drop ``parent`` on 30 % of issues, so
+    repointing it would cost a third of the subtask edges — and writes the graph
+    it builds into a repo. Nothing between those two steps aliases anything, so
+    the WRITE is gated instead of the read. Gated with the same needles, the same
+    per-shape boundaries and the same NUL join check 1 uses: the one thing a
+    hand-rolled name check reliably gets wrong is the boundary, and re-deriving
+    one here would mean two answers to a question that has only one.
+
+    Returns the masked shapes of the forms that survived (empty when clean), so
+    the caller can refuse and say what shape it refused on without printing a
+    name. The map floor is enforced here as well as in check 0 — a truncated or
+    decoy map yields few needles, and a payload full of names then reads exactly
+    like a clean one.
+    """
+    alias_map = json.loads(Path(map_path).read_text(encoding="utf-8"))
+    entries = len(alias_map["entries"])
+    if entries < MIN_MAP_ENTRIES:
+        raise ValueError(
+            f"the alias map has {entries} entries, below the {MIN_MAP_ENTRIES} floor — "
+            f"a gate built on it would wave through almost anything")
+    scanner = NeedleScanner(build_needles(alias_map))
+    hits = scanner.findall(STRING_JOIN.join(walk_strings(payload)))
+    return sorted({sanitize(hit) for hit in hits})
+
+
+def blocking_forms_in_payload(payload, map_path, *, ident_exceptions=None) -> dict:
+    """Every category this gate BLOCKS on, asked of a JSON payload.
+
+    Check 1 alone (:func:`person_forms_in_payload`) answers "did a LISTED person
+    survive". A payload written into a repo is a distribution surface, so it gets
+    the rest of the blocking set too: checks 3 and 4 (NAV idents, dotted
+    handles), check 10 (distributor fingerprints) and check 11's blocking
+    categories (fødselsnummer, bankkonto, credential). Without them an ident or a
+    bank account in an issue title walks straight through a gate that is, by its
+    own docstring, protecting the one free-text field.
+
+    Advisory categories are deliberately absent — email, phone and
+    organisasjonsnummer are reported by the collection gate and do not fail it,
+    and an organisation number is legitimate content in an issue about an
+    employer. Returns ``{category: [masked shapes]}``, empty when clean.
+    """
+    findings = {}
+    person = person_forms_in_payload(payload, map_path)
+    if person:
+        findings["person_form"] = person
+
+    exceptions = _load_ident_exceptions() if ident_exceptions is None else ident_exceptions
+    scanner = SensitivityScanner(categories=BLOCKING_CATEGORIES,
+                                 ident_exceptions={t.lower() for t in exceptions})
+    for text in walk_strings(payload):
+        for finding in scanner.detect(text):
+            findings.setdefault(finding.category, set()).add(finding.shape)
+        for match in FINGERPRINT_RE.finditer(text):
+            findings.setdefault("fingerprint", set()).add(sanitize(match.group(0)))
+    return {category: sorted(shapes) for category, shapes in findings.items()}
 
 
 def _scan_vectors(path: Path):
