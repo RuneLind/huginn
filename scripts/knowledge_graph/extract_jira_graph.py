@@ -14,6 +14,8 @@ Output routing when no --output is given: a graph_routing.json in one of the
 private sub-repo knowledge_graph dirs decides which dir owns the source
 collection (matched by the --source directory name). Without any routing
 config the run fails and asks for --output.
+
+The source is RAW pre-alias markdown, so the write is gated — see gate_output.
 """
 
 import argparse
@@ -27,9 +29,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from main.graph.graph_loader import resolve_graph_output_path
+from main.privacy.alias_registry import PrivacyMapMissing, discover_map_path, path_in_scope
+from main.privacy.index_scan import person_forms_in_payload
 from main.utils.frontmatter import read_frontmatter_from_path, strip_frontmatter
 
 ISSUE_KEY_RE = re.compile(r'\b([A-Z][A-Z0-9]+-\d+)\b')
+
+# The write gate's exit code, distinct from an argparse/usage failure.
+REFUSED = 2
 
 
 def parse_body(filepath: str) -> str:
@@ -48,6 +55,38 @@ def extract_cross_references(body: str, self_key: str, epic_key: str) -> set[str
         if key != self_key and key != epic_key:
             refs.add(key)
     return refs
+
+
+def gate_output(graph: dict, source_dir: Path) -> None:
+    """Refuse to write a graph that still spells someone the alias map knows.
+
+    This extractor is the one graph step that reads a source tree instead of a
+    built collection, so it is the one that can carry a pre-alias name into a
+    file that gets committed. It copies only structural frontmatter — issue key,
+    title, status, type, epic and parent — and measured across the whole corpus
+    on 2026-08-25 not one of those fields held a mapped name, so this is a guard
+    on a latent shape rather than a repair. It is worth having precisely while it
+    is a no-op: a person's name in an issue *title* would flow through
+    ungated, and the same guard added after that has happened is a rebuild.
+
+    Fail closed, in both directions:
+
+    * out of privacy scope (a clone with no NAV source tree) it does nothing at
+      all, and the run is byte-identical to one from before this existed;
+    * in scope with no usable map it refuses, the same way the index build
+      refuses rather than writing real names to disk.
+
+    Raises ``PrivacyMapMissing`` or ``ValueError`` (the caller turns either into
+    an exit-2 refusal). The scan runs on the in-memory graph, so a
+    refusal leaves the previous graph file exactly where it was.
+    """
+    if not path_in_scope(str(source_dir)):
+        return
+    surviving = person_forms_in_payload(graph, discover_map_path())
+    if surviving:
+        raise ValueError(
+            f"{len(surviving)} mapped person form(s) survive in the graph built from "
+            f"{source_dir.name}; shapes (letters->x, digits->9): {surviving[:5]}")
 
 
 def main():
@@ -229,6 +268,14 @@ def main():
     }
 
     graph = {"nodes": nodes, "edges": edges, "stats": stats}
+
+    # Gate BEFORE the write: a refusal must leave the previous graph in place.
+    try:
+        gate_output(graph, source_dir)
+    except (PrivacyMapMissing, ValueError) as e:
+        print(f"REFUSED: {e}", file=sys.stderr)
+        print(f"Nothing written — {output_path.name} is untouched.", file=sys.stderr)
+        sys.exit(REFUSED)
 
     # Write output
     output_path.parent.mkdir(parents=True, exist_ok=True)

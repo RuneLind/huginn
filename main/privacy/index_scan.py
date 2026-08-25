@@ -584,6 +584,35 @@ def walk_strings(value):
             yield from walk_strings(item)
 
 
+def person_forms_in_payload(payload, map_path) -> list:
+    """Check 1's question, asked of a JSON payload that is not a collection.
+
+    ``scripts/knowledge_graph/extract_jira_graph.py`` reads the RAW pre-alias
+    source tree — the built ``documents/`` drop ``parent`` on 30 % of issues, so
+    repointing it would cost a third of the subtask edges — and writes the graph
+    it builds into a repo. Nothing between those two steps aliases anything, so
+    the WRITE is gated instead of the read. Gated with the same needles, the same
+    per-shape boundaries and the same NUL join check 1 uses: the one thing a
+    hand-rolled name check reliably gets wrong is the boundary, and re-deriving
+    one here would mean two answers to a question that has only one.
+
+    Returns the masked shapes of the forms that survived (empty when clean), so
+    the caller can refuse and say what shape it refused on without printing a
+    name. The map floor is enforced here as well as in check 0 — a truncated or
+    decoy map yields few needles, and a payload full of names then reads exactly
+    like a clean one.
+    """
+    alias_map = json.loads(Path(map_path).read_text(encoding="utf-8"))
+    entries = len(alias_map["entries"])
+    if entries < MIN_MAP_ENTRIES:
+        raise ValueError(
+            f"the alias map has {entries} entries, below the {MIN_MAP_ENTRIES} floor — "
+            f"a gate built on it would wave through almost anything")
+    scanner = NeedleScanner(build_needles(alias_map))
+    hits = scanner.findall(STRING_JOIN.join(walk_strings(payload)))
+    return sorted({sanitize(hit) for hit in hits})
+
+
 def _scan_vectors(path: Path):
     """A vector index is allowed to be a bare ndarray and nothing else."""
     try:

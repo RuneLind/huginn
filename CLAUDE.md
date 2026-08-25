@@ -388,6 +388,24 @@ map stays local.
   collections' manifests) and the backend is not `ollama`, it aborts before
   opening a single file. Only this script: the two graph extractors read the same
   trees but are deterministic and local.
+- **`scripts/knowledge_graph/extract_jira_graph.py` gates its own WRITE.** It is
+  the one graph step that reads a raw source tree rather than a built
+  collection's aliased `documents/`, and it writes into a repo. Repointing
+  `--source` at `documents/` was measured and rejected: `parent` does not survive
+  the build, so 718 of 2373 issues (30 %) lose their subtask edge, and the
+  `.excluded/` stub enrichment goes with it. So `gate_output` runs the produced
+  graph through `index_scan.person_forms_in_payload` — the same needles, the same
+  per-shape boundaries, the same NUL join as check 1, never a re-derived boundary
+  — and exits **2** without writing when a mapped literal survives; the previous
+  graph file is untouched, and the message carries shapes, never a name. Armed by
+  `path_in_scope(--source)`, so a clone with no NAV source tree is byte-identical
+  to before it existed; in scope with a missing, ambiguous or sub-floor map it
+  refuses, the same way an in-scope index build refuses. Latent, not a repair:
+  the extractor copies only structural frontmatter, and on 2026-08-25 the whole
+  corpus measured **0** mapped names — a guard on a path that is clean today is
+  cheap, the same guard after a leak is a rebuild. The jira daily runs it in a
+  **non-fatal** `graph` phase, so a refusal degrades the run on the dashboard
+  instead of scrolling past in a log.
 - **Derived caches carry pre-alias text.**
   `.venv/bin/python scripts/audit/purge_prealias_caches.py` retires them (LLM graph
   caches deleted, dormant contextual caches renamed to `.pre-alias.bak`). The
@@ -492,7 +510,16 @@ the changed ones, `--limit N` = a priced sample).
 - **Ledger** key `sensitivity-audit`, one fatal `sweep` phase, `variant`
   `rebuild` for `--baseline`, swept collection in `detail.collection`. Per the
   routing convention a helper-wired daily script may add a non-fatal
-  `sensitivity` phase after its reindex — one does today.
+  `sensitivity` phase after its reindex — every daily whose collection is in
+  privacy scope now does. **Non-fatal is the whole point**: exit 2 (an unknown
+  person) must degrade the run so the dashboard shows it, while what actually
+  blocks a hand-off is `package_collection.py` reading the same report; exit 1
+  (Ollama unreachable) must never stop indexing. The phase measures only how
+  long that job spent sweeping — the sweep writes its own run under its own key.
+  A daily that adds the phase must **await** its reindex (poll
+  `/update-status`) rather than fire-and-forget it, or the sweep reads the
+  documents the reindex has not written yet and reports a clean window it never
+  looked at.
 
 ## LLM entity extraction (knowledge graph)
 
@@ -516,7 +543,7 @@ Extract entities and relationships from a collection using a local Ollama model.
   2. Else a `graph_routing.json` in one of the private sub-repo dirs (`huginn-*/scripts/knowledge_graph/`) or `./scripts/knowledge_graph/`. Each routing file either lists owned collections (`{"collections": [...]}`) or is the catch-all (`{"default": true}`). A listed collection writes into that file's dir; unlisted collections go to the `default` dir.
   3. Else the run fails and asks for `--output`.
 - The output graph is stamped with a `source_stamp` (`collection`, `document_count` from the manifest's `numberOfDocuments`, `last_modified_document_time` from `lastModifiedDocumentTime` — chosen because `updatedTime` moves on every reindex run, even no-ops). A `--limit` run stamps the truncated count so partial graphs report stale. At load time the server compares the stamp against the collection's current `manifest.json` and logs a warning on divergence — a staleness signal, nothing rebuilds. Old unstamped graphs load unchanged.
-- `extract_jira_graph.py` routes its `jira_graph.json` output the same way, keyed by the `--source` directory name.
+- `extract_jira_graph.py` routes its `jira_graph.json` output the same way, keyed by the `--source` directory name — and **gates that write** when the source tree is in privacy scope (see "Build-time people aliasing").
 - The API server auto-loads all `*_llm_graph.json` files from those paths at startup
 - See `docs/graph-enhanced-rag.html` for full architecture documentation
 
@@ -566,7 +593,7 @@ job last ran, how long it took, and whether it failed. Backed by JSONL files at
   `collection_update_cmd_adapter.py` (the CLI fallback). Both emit a `reindex`
   phase. `try_begin_update` also appends an *opening* partial, so a server
   restarted mid-reindex leaves a trace instead of nothing.
-- **Script phases:** all seven shell jobs report their own phases via
+- **Script phases:** every shell job reports its own phases via
   `scripts/lib/indexing_run.sh` — `run_begin` / `run_variant` / `phase_begin` /
   `phase_end` / `run_end`. This is what makes the non-reindex work visible: the
   fetch-then-index jobs fold to a whole-job duration several times their
