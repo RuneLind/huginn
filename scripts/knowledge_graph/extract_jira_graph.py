@@ -135,7 +135,9 @@ def main():
     epic_issues = defaultdict(set)  # epic_key -> {issue_key, ...} (dedup duplicate source files)
     epic_summaries = {}  # epic_key -> summary text
 
-    md_files = list(source_dir.rglob("*.md"))
+    # sorted() is load-bearing: raw glob order is filesystem-dependent, so node
+    # order and every non-cross-ref edge would otherwise be enumeration order.
+    md_files = sorted(source_dir.rglob("*.md"))
     # Skip .excluded
     md_files = [f for f in md_files if ".excluded" not in f.parts]
 
@@ -176,7 +178,7 @@ def main():
     excluded_dir = source_dir / ".excluded"
     enrichment_count = 0
     if excluded_dir.exists():
-        for filepath in excluded_dir.rglob("*.md"):
+        for filepath in sorted(excluded_dir.rglob("*.md")):
             if ".opencode" in filepath.parts:
                 continue
             meta = read_frontmatter_from_path(str(filepath))
