@@ -135,7 +135,17 @@ def main():
     epic_issues = defaultdict(set)  # epic_key -> {issue_key, ...} (dedup duplicate source files)
     epic_summaries = {}  # epic_key -> summary text
 
-    md_files = list(source_dir.rglob("*.md"))
+    # sorted() is load-bearing: raw glob order is filesystem-dependent, so node
+    # order and EVERY edge would otherwise be enumeration order — including the
+    # block order of the cross-reference edges #123 only sorted internally (the
+    # outer walk over `issues` below is this scan's order). It also pins the two
+    # order-dependent VALUE picks: duplicate source files for one key are
+    # last-wins (below), and `epic_summaries` is first-wins. Today no duplicate
+    # pair disagrees, so this is a stability guarantee, not a content change.
+    # Deterministic per interpreter, not eternal: Path ordering compares
+    # components in 3.13 and the flattened string pre-3.12, which order
+    # `a/b.md` against `a-b/x.md` differently.
+    md_files = sorted(source_dir.rglob("*.md"))
     # Skip .excluded
     md_files = [f for f in md_files if ".excluded" not in f.parts]
 
@@ -176,7 +186,7 @@ def main():
     excluded_dir = source_dir / ".excluded"
     enrichment_count = 0
     if excluded_dir.exists():
-        for filepath in excluded_dir.rglob("*.md"):
+        for filepath in sorted(excluded_dir.rglob("*.md")):
             if ".opencode" in filepath.parts:
                 continue
             meta = read_frontmatter_from_path(str(filepath))
