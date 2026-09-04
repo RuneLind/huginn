@@ -26,6 +26,7 @@ from main.ingest.anthropic_summaries import (
 from main.ingest.articles import ArticleIngestRequest, ingest_article
 from main.ingest.jira import JiraIngestRequest, ingest_jira
 from main.ingest.tiktok import TikTokIngestRequest, ingest_tiktok
+from main.ingest.vimeo import VimeoIngestRequest, ingest_vimeo
 from main.ingest.x_articles import XArticleIngestRequest, ingest_x_article
 from main.ingest.youtube import YouTubeIngestRequest, ingest_youtube
 
@@ -181,6 +182,27 @@ INGEST_SOURCES: list[IngestSource] = [
         operation="Article ingest",
         not_configured_detail="Articles sources path not configured (--articles-sources-path)",
         response_fields=("file_path", "author", "category", "summary"),
+        similar_query=lambda req, result: req.summary[:2000],
+        exclude_match=lambda req, doc: doc.get("url", "") == req.url,
+    ),
+    IngestSource(
+        name="vimeo",
+        route_path="/api/vimeo/ingest",
+        request_model=VimeoIngestRequest,
+        ingest_fn=ingest_vimeo,
+        path_kwarg="sources_path",
+        path_arg="--vimeo-sources-path",
+        path_env="VIMEO_SOURCES_PATH",
+        path_help="Path to save Vimeo summary markdown files",
+        collection_arg="--vimeo-collection",
+        collection_env="VIMEO_COLLECTION",
+        collection_default="vimeo-summaries",
+        collection_help="Collection name for Vimeo summaries",
+        operation="Vimeo ingest",
+        not_configured_detail="Vimeo sources path not configured (--vimeo-sources-path)",
+        response_fields=("file_path", "category", "summary"),
+        # The transcript is deliberately out of the similarity query: a talk's
+        # captions are 60 kB of speech and would drown the summary's topic.
         similar_query=lambda req, result: req.summary[:2000],
         exclude_match=lambda req, doc: doc.get("url", "") == req.url,
     ),

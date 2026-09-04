@@ -1994,6 +1994,125 @@ class TestTikTokIngest:
         assert (tmp_path / second["file_path"]).read_text(encoding="utf-8").rstrip().endswith("v2 updated")
 
 
+class TestVimeoIngest:
+    """ingest_vimeo writes the summary plus an optional ## Transcript section."""
+
+    _TRANSCRIPT = "[00:00:00]\nHello and welcome.\n\n[00:02:00]\nOn to the demo."
+
+    def _req(self, **over):
+        from main.ingest.vimeo import VimeoIngestRequest
+        base = {
+            "title": "Trust but verify",
+            "url": "https://vimeo.com/1223358361",
+            "summary": "A conference talk about verifying model output.",
+            "category": "ai/claude-code",
+            "date": "2026-09-01",
+            "transcript_markdown": self._TRANSCRIPT,
+            "caption_lang": "en-x-autogen",
+            "caption_kind": "auto",
+            "duration_sec": 3180,
+        }
+        base.update(over)
+        return VimeoIngestRequest(**base)
+
+    def test_writes_frontmatter_and_transcript_section(self, tmp_path):
+        from main.ingest.vimeo import ingest_vimeo
+        result = ingest_vimeo(self._req(), sources_path=str(tmp_path))
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert 'url: "https://vimeo.com/1223358361"' in written
+        assert 'video_id: "1223358361"' in written
+        assert 'caption_lang: "en-x-autogen"' in written
+        assert 'caption_kind: "auto"' in written
+        assert 'duration_sec: "3180"' in written
+        # The summary comes first; the transcript is appended under its heading.
+        assert written.index("A conference talk") < written.index("## Transcript")
+        assert "[00:02:00]" in written
+        assert written.index("## Transcript") < written.index("Hello and welcome")
+
+    def test_transcript_is_not_in_the_response_summary(self, tmp_path):
+        # response_fields ships `summary` back over HTTP and the registry builds
+        # the similarity query from it — 50 minutes of captions belongs in
+        # neither.
+        from main.ingest.vimeo import ingest_vimeo
+        result = ingest_vimeo(self._req(), sources_path=str(tmp_path))
+        assert result["summary"] == "A conference talk about verifying model output."
+        assert "Hello and welcome" not in result["summary"]
+
+    def test_no_transcript_section_without_transcript(self, tmp_path):
+        from main.ingest.vimeo import ingest_vimeo
+        result = ingest_vimeo(
+            self._req(transcript_markdown=None), sources_path=str(tmp_path)
+        )
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert "## Transcript" not in written
+        assert written.rstrip().endswith("A conference talk about verifying model output.")
+
+    def test_blank_transcript_writes_no_heading(self, tmp_path):
+        from main.ingest.vimeo import ingest_vimeo
+        result = ingest_vimeo(
+            self._req(transcript_markdown="   \n\n  "), sources_path=str(tmp_path)
+        )
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert "## Transcript" not in written
+
+    def test_optional_provenance_fields_are_omitted_when_absent(self, tmp_path):
+        from main.ingest.vimeo import ingest_vimeo
+        result = ingest_vimeo(
+            self._req(caption_lang=None, caption_kind=None, duration_sec=None),
+            sources_path=str(tmp_path),
+        )
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert "caption_lang:" not in written
+        assert "caption_kind:" not in written
+        assert "duration_sec:" not in written
+        assert 'video_id: "1223358361"' in written
+
+    def test_zero_duration_still_written(self, tmp_path):
+        # 0 means "the player never said"; `is not None` keeps it, a falsy check
+        # would silently drop it.
+        from main.ingest.vimeo import ingest_vimeo
+        result = ingest_vimeo(self._req(duration_sec=0), sources_path=str(tmp_path))
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert 'duration_sec: "0"' in written
+
+    def test_same_url_reingest_overwrites(self, tmp_path):
+        from main.ingest.vimeo import ingest_vimeo
+        first = ingest_vimeo(self._req(summary="v1"), sources_path=str(tmp_path))
+        second = ingest_vimeo(self._req(summary="v2 updated"), sources_path=str(tmp_path))
+        assert first["file_path"] == second["file_path"]
+        assert len(list((tmp_path / "ai" / "claude-code").glob("*.md"))) == 1
+
+    def test_rejects_unknown_category(self, tmp_path):
+        from fastapi import HTTPException
+        from main.ingest.vimeo import ingest_vimeo
+        with pytest.raises(HTTPException) as exc:
+            ingest_vimeo(self._req(category="bogus/nope"), sources_path=str(tmp_path))
+        assert exc.value.status_code == 400
+
+
+class TestVimeoVideoIdFromUrl:
+    """The document's video_id is derived from the url, never sent alongside it."""
+
+    @pytest.mark.parametrize("url,expected", [
+        ("https://vimeo.com/1223358361", "1223358361"),
+        ("https://vimeo.com/1223358361/abc123", "1223358361"),
+        ("https://vimeo.com/1223358361?h=abc123", "1223358361"),
+        ("https://player.vimeo.com/video/1223358361", "1223358361"),
+        ("https://vimeo.com/notanid", None),
+        # A digit inside a word is not an id: the match is anchored on a path
+        # separator at the front and a segment boundary at the back, so a
+        # vanity/on-demand slug cannot donate its digits.
+        ("https://vimeo.com/ondemand/film2024", None),
+        ("https://vimeo.com/abc123", None),
+        ("https://vimeo.com/1223358361abc", None),
+        ("", None),
+        (None, None),
+    ])
+    def test_extracts_numeric_segment(self, url, expected):
+        from main.ingest.vimeo import vimeo_video_id_from_url
+        assert vimeo_video_id_from_url(url) == expected
+
+
 # --- Ingest registry: parametrized suite over the summary push sources ---------
 
 def _summary_sources():

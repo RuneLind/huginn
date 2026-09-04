@@ -18,6 +18,7 @@ uv run knowledge_api_server.py \
     my-wiki \
     my-confluence \
     my-jira-issues \
+    vimeo-summaries \
   `# Push-ingest sources: each POST /api/ingest/<source> endpoint needs a` \
   `# sources path (where markdown is written) and a target collection.` \
   --youtube-transcripts-path ./data/sources/youtube-articles \
@@ -31,4 +32,6 @@ uv run knowledge_api_server.py \
   --tiktok-collection tiktok-summaries \
   --articles-sources-path ./data/sources/article-summaries \
   --articles-collection article-summaries \
+  --vimeo-sources-path ./data/sources/vimeo-summaries \
+  --vimeo-collection vimeo-summaries \
   --port 8321
