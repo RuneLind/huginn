@@ -16,7 +16,10 @@ from main.utils.frontmatter import parse_tags, read_frontmatter, strip_frontmatt
 #
 # It is also why the vimeo id is `vimeo_video_id` and not `video_id`: `video_id`
 # is ALREADY WRITTEN, by main/fetchers/youtube/youtube_channel_fetcher.py, into
-# every file of the youtube-transcripts collection (75 on disk 2026-09-04), so
+# every file under data/sources/youtube-transcripts/markdown/EmmaHubbard (75 on
+# disk 2026-09-04) — the basePath of the on-disk `emma-hubbard-transcripts`
+# collection, which is not in start.sh's --collections today but would surface
+# them on any reload — so
 # allowlisting the bare key would serve a YouTube id under the name a Vimeo
 # consumer reads. The other three were greped the same day: no writer in `main/`
 # emits `caption_lang`, `caption_kind` or `duration_sec` as a frontmatter key

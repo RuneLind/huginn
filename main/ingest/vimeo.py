@@ -109,7 +109,12 @@ _WATCH_PATH_RES = tuple(re.compile(pattern) for pattern in (
 #: ``urlsplit`` only lstrips them, so the trailing half has to be done here or
 #: the two sides disagree. Deliberately NOT ``str.strip()``: that also strips
 #: U+00A0 and friends, which the WHATWG parser percent-encodes into the path
-#: (i.e. names no video) — stripping them would invent the opposite divergence.
+#: (i.e. names no video). KNOWN residual: muninn's user-facing door is
+#: ``resolveVimeoRef``, which runs JS ``trim()`` (ECMAScript WhiteSpace, NBSP
+#: included) BEFORE ``new URL`` — so a url with a trailing U+00A0/U+FEFF/U+2003
+#: names a video there and ``None`` here (measured 2026-09-04). It reaches this
+#: side only through ``is_same_vimeo_video``'s self-link exclusion, which then
+#: falls back to string compare; accepted as-is, widen the trim if it bites.
 _URL_TRIM = "".join(chr(c) for c in range(0x21))
 
 #: The hosts an id may be read from — the KEYS are the host gate, matched EXACTLY
