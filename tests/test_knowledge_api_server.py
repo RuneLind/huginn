@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import types
 
 import pytest
@@ -1992,6 +1993,507 @@ class TestTikTokIngest:
         category_dir = tmp_path / "ai" / "claude-code"
         assert len(list(category_dir.glob("*.md"))) == 1
         assert (tmp_path / second["file_path"]).read_text(encoding="utf-8").rstrip().endswith("v2 updated")
+
+
+class TestVimeoIngest:
+    """ingest_vimeo writes the summary plus an optional ## Transcript section."""
+
+    #: The real shape Muninn sends: one `### [HH:MM:SS]` HEADING per window, not
+    #: a bare cue line. See `ingest_vimeo`'s docstring — a heading is what makes
+    #: the splitter label a mid-window chunk with the window it came from, and
+    #: `TestVimeoDocumentThroughTheConverter` pins that end of it.
+    _TRANSCRIPT = (
+        "### [00:00:00]\n\nHello and welcome.\n\n### [00:02:00]\n\nOn to the demo."
+    )
+
+    def _req(self, **over):
+        from main.ingest.vimeo import VimeoIngestRequest
+        base = {
+            "title": "Trust but verify",
+            "url": "https://vimeo.com/1223358361",
+            "summary": "A conference talk about verifying model output.",
+            "category": "ai/claude-code",
+            "date": "2026-09-01",
+            "transcript_markdown": self._TRANSCRIPT,
+            "caption_lang": "en-x-autogen",
+            "caption_kind": "auto",
+            "duration_sec": 3180,
+        }
+        base.update(over)
+        return VimeoIngestRequest(**base)
+
+    def test_writes_frontmatter_and_transcript_section(self, tmp_path):
+        from main.ingest.vimeo import ingest_vimeo
+        result = ingest_vimeo(self._req(), sources_path=str(tmp_path))
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert 'url: "https://vimeo.com/1223358361"' in written
+        assert 'vimeo_video_id: "1223358361"' in written
+        assert 'caption_lang: "en-x-autogen"' in written
+        assert 'caption_kind: "auto"' in written
+        # Bare, not quoted: the reader serves it as a number (see
+        # TestVimeoDocumentThroughTheConverter::test_duration_is_a_number_not_a_string).
+        assert "duration_sec: 3180" in written
+        assert 'duration_sec: "3180"' not in written
+        # The summary comes first; the transcript is appended under its heading.
+        assert written.index("A conference talk") < written.index("## Transcript")
+        assert "[00:02:00]" in written
+        assert written.index("## Transcript") < written.index("Hello and welcome")
+
+    def test_transcript_is_not_in_the_response_summary(self, tmp_path):
+        # response_fields ships `summary` back over HTTP and the registry builds
+        # the similarity query from it — 50 minutes of captions belongs in
+        # neither.
+        from main.ingest.vimeo import ingest_vimeo
+        result = ingest_vimeo(self._req(), sources_path=str(tmp_path))
+        assert result["summary"] == "A conference talk about verifying model output."
+        assert "Hello and welcome" not in result["summary"]
+
+    def test_no_transcript_section_without_transcript(self, tmp_path):
+        from main.ingest.vimeo import ingest_vimeo
+        result = ingest_vimeo(
+            self._req(transcript_markdown=None), sources_path=str(tmp_path)
+        )
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert "## Transcript" not in written
+        assert written.rstrip().endswith("A conference talk about verifying model output.")
+
+    def test_blank_transcript_writes_no_heading(self, tmp_path):
+        from main.ingest.vimeo import ingest_vimeo
+        result = ingest_vimeo(
+            self._req(transcript_markdown="   \n\n  "), sources_path=str(tmp_path)
+        )
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert "## Transcript" not in written
+
+    def test_optional_provenance_fields_are_omitted_when_absent(self, tmp_path):
+        from main.ingest.vimeo import ingest_vimeo
+        result = ingest_vimeo(
+            self._req(caption_lang=None, caption_kind=None, duration_sec=None),
+            sources_path=str(tmp_path),
+        )
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert "caption_lang:" not in written
+        assert "caption_kind:" not in written
+        assert "duration_sec:" not in written
+        assert 'vimeo_video_id: "1223358361"' in written
+
+    def test_the_id_key_is_namespaced_against_the_other_video_sources(self, tmp_path):
+        # `video_id` is NOT this vertical's word: the YouTube channel fetcher
+        # writes a bare `video_id: <11-char YouTube id>` into every file of the
+        # `emma-hubbard-transcripts` collection, and the converter's allowlist is
+        # global. An unqualified key would have served a YouTube id under the
+        # name a Vimeo consumer reads.
+        from main.ingest.vimeo import ingest_vimeo
+        result = ingest_vimeo(self._req(), sources_path=str(tmp_path))
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert 'vimeo_video_id: "1223358361"' in written
+        assert not re.search(r"^video_id:", written, re.MULTILINE)
+
+    def test_zero_duration_still_written(self, tmp_path):
+        # 0 means "the player never said"; `is not None` keeps it, a falsy check
+        # would silently drop it.
+        from main.ingest.vimeo import ingest_vimeo
+        result = ingest_vimeo(self._req(duration_sec=0), sources_path=str(tmp_path))
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert "duration_sec: 0" in written
+
+    def test_same_url_reingest_overwrites(self, tmp_path):
+        from main.ingest.vimeo import ingest_vimeo
+        first = ingest_vimeo(self._req(summary="v1"), sources_path=str(tmp_path))
+        second = ingest_vimeo(self._req(summary="v2 updated"), sources_path=str(tmp_path))
+        assert first["file_path"] == second["file_path"]
+        assert len(list((tmp_path / "ai" / "claude-code").glob("*.md"))) == 1
+
+    def test_rejects_unknown_category(self, tmp_path):
+        from fastapi import HTTPException
+        from main.ingest.vimeo import ingest_vimeo
+        with pytest.raises(HTTPException) as exc:
+            ingest_vimeo(self._req(category="bogus/nope"), sources_path=str(tmp_path))
+        assert exc.value.status_code == 400
+
+
+class TestVimeoVideoIdFromUrl:
+    """The document's video_id is derived from the url, never sent alongside it.
+
+    Same accepted forms as Muninn's ``src/vimeo/url.ts``: a real Vimeo host, and
+    the id is the video-naming segment of a KNOWN path shape — never simply the
+    first run of digits in the string.
+    """
+
+    @pytest.mark.parametrize("url,expected", [
+        ("https://vimeo.com/1223358361", "1223358361"),
+        ("https://vimeo.com/1223358361/abc123", "1223358361"),
+        ("https://vimeo.com/1223358361?h=abc123", "1223358361"),
+        ("https://player.vimeo.com/video/1223358361", "1223358361"),
+        ("https://vimeo.com/notanid", None),
+        # A digit inside a word is not an id: the match is anchored on a path
+        # separator at the front and a segment boundary at the back, so a
+        # vanity/on-demand slug cannot donate its digits.
+        ("https://vimeo.com/ondemand/film2024", None),
+        ("https://vimeo.com/abc123", None),
+        ("https://vimeo.com/1223358361abc", None),
+        ("", None),
+        (None, None),
+    ])
+    def test_extracts_numeric_segment(self, url, expected):
+        from main.ingest.vimeo import vimeo_video_id_from_url
+        assert vimeo_video_id_from_url(url) == expected
+
+    @pytest.mark.parametrize("url,expected", [
+        # The container id comes FIRST in these two shapes: a first-numeric-run
+        # match keys the document on the showcase / group instead of the video.
+        ("https://vimeo.com/showcase/7654321/video/1223358361", "1223358361"),
+        ("https://vimeo.com/groups/12345/videos/1223358361", "1223358361"),
+        ("https://vimeo.com/channels/staffpicks/1223358361", "1223358361"),
+        ("https://www.vimeo.com/1223358361", "1223358361"),
+        ("https://player.vimeo.com/video/1223358361/deadbeef99", "1223358361"),
+    ])
+    def test_container_shapes_yield_the_video_id(self, url, expected):
+        from main.ingest.vimeo import vimeo_video_id_from_url
+        assert vimeo_video_id_from_url(url) == expected
+
+    @pytest.mark.parametrize("url", [
+        # No host gate at all is the security half: a url a third party controls
+        # can spell "vimeo.com" anywhere in its path and donate an id to a
+        # document keyed on it.
+        "https://evil.example/vimeo.com/999/redirect",
+        "https://evilvimeo.com/1223358361",
+        "https://vimeo.com.evil.example/1223358361",
+        "ftp://vimeo.com/1223358361",
+        # A leading zero is a malformed id, not a second video — Muninn refuses
+        # it, so huginn must not derive one either or the two disagree about
+        # what the same document is called.
+        "https://vimeo.com/0001223358361",
+        # A group / showcase landing page names no video.
+        "https://vimeo.com/groups/12345",
+        "https://vimeo.com/showcase/7654321",
+    ])
+    def test_rejected(self, url):
+        from main.ingest.vimeo import vimeo_video_id_from_url
+        assert vimeo_video_id_from_url(url) is None
+
+
+class TestVimeoPathShapesArePairedWithTheirHost:
+    """A path shape belongs to ONE host, as it does in Muninn's ``url.ts``.
+
+    Muninn matches ``PLAYER_PATH_RE`` against ``player.vimeo.com`` and
+    ``WATCH_PATH_RE`` against ``vimeo.com`` (``src/vimeo/url.ts``). Matching
+    every shape against both hosts invents ids for urls Muninn calls no video —
+    and the two sides then disagree about what a document is called.
+    """
+
+    @pytest.mark.parametrize("url", [
+        # Watch-host spelling of the embed path: Muninn's WATCH_PATH_RE wants
+        # `/<id>`, and "video" is not an id.
+        "https://vimeo.com/video/1223358361",
+        # Embed host without the `/video/` prefix: Muninn's PLAYER_PATH_RE
+        # requires it, and the watch shapes are not tried on this host.
+        "https://player.vimeo.com/1223358361",
+        # The same pairing for the container shapes.
+        "https://player.vimeo.com/channels/staffpicks/1223358361",
+        "https://player.vimeo.com/showcase/7654321/video/1223358361",
+    ])
+    def test_a_shape_from_the_other_host_names_no_video(self, url):
+        from main.ingest.vimeo import vimeo_video_id_from_url
+        assert vimeo_video_id_from_url(url) is None
+
+    @pytest.mark.parametrize("url,expected", [
+        # A trailing space is not part of the url: Muninn parses through
+        # `new URL`, which strips leading and trailing C0-control-or-space, so
+        # `.../123 ` is the same video there. (`urlsplit` lstrips only.)
+        ("https://vimeo.com/1223358361 ", "1223358361"),
+        ("  https://vimeo.com/1223358361  ", "1223358361"),
+        # NOT stripped, on either side: a non-breaking space is an ordinary
+        # character to the WHATWG parser, which percent-encodes it into the path.
+        ("https://vimeo.com/1223358361\u00a0", None),
+    ])
+    def test_surrounding_whitespace_matches_muninns_url_parser(self, url, expected):
+        from main.ingest.vimeo import vimeo_video_id_from_url
+        assert vimeo_video_id_from_url(url) == expected
+
+
+class TestVimeoSelfLinkExclusion:
+    """The ingest route's `similar` list must not link the document to itself.
+
+    The stored url and the incoming one address the same video through different
+    spellings (``www.``, an unlisted ``?h=`` hash, the player host), so an exact
+    string compare lets the just-written document come back as its own
+    "related reading".
+    """
+
+    _REQ_URL = "https://vimeo.com/1223358361"
+
+    def _exclude(self, doc_url):
+        from main.ingest.registry import source_by_name
+        from main.ingest.vimeo import VimeoIngestRequest
+        req = VimeoIngestRequest(title="T", url=self._REQ_URL, summary="S")
+        return source_by_name("vimeo").exclude_match(req, {"url": doc_url})
+
+    @pytest.mark.parametrize("doc_url", [
+        "https://vimeo.com/1223358361",
+        "https://www.vimeo.com/1223358361",
+        "https://vimeo.com/1223358361?h=deadbeef99",
+        "https://vimeo.com/1223358361/deadbeef99",
+        "https://player.vimeo.com/video/1223358361",
+    ])
+    def test_same_video_is_excluded(self, doc_url):
+        assert self._exclude(doc_url) is True
+
+    @pytest.mark.parametrize("doc_url", [
+        "https://vimeo.com/999999999",
+        "https://example.com/some-article",
+        "",
+    ])
+    def test_other_documents_are_kept(self, doc_url):
+        assert self._exclude(doc_url) is False
+
+    def test_falls_back_to_the_string_when_neither_side_parses(self):
+        # Nothing forces a stored doc's url to be a Vimeo one (a re-categorized
+        # paste, a hand-written page): with no id on either side the old exact
+        # compare is still the answer.
+        from main.ingest.registry import source_by_name
+        from main.ingest.vimeo import VimeoIngestRequest
+        req = VimeoIngestRequest(title="T", url="https://example.com/x", summary="S")
+        src = source_by_name("vimeo")
+        assert src.exclude_match(req, {"url": "https://example.com/x"}) is True
+        assert src.exclude_match(req, {"url": "https://example.com/y"}) is False
+
+
+class TestVimeoDocumentThroughTheConverter:
+    """What the INDEX ends up holding for a Vimeo capture.
+
+    The two halves the ingest tests above cannot see on their own: a search hit
+    can only cite a minute of a 50-minute talk if the chunk the searcher matched
+    carries the window cue as its heading, and a reader can only tell an ``auto``
+    transcript from a ``manual`` one if the provenance frontmatter survives the
+    converter's metadata allowlist.
+    """
+
+    _WINDOWS = ("[00:00:00]", "[00:02:00]", "[00:04:00]")
+    #: `w2s07` = window 2, sentence 7. Every sentence is uniquely attributable,
+    #: so a chunk's text alone says which window it was cut from.
+    _TOKEN_RE = re.compile(r"w(\d)s\d\d")
+
+    def _window_body(self, index):
+        return " ".join(
+            f"w{index}s{i:02d} the speaker keeps talking about verifying model output."
+            for i in range(1, 26)
+        )
+
+    def _transcript(self):
+        # ~1.7 kB per window, i.e. every window is longer than the splitter's
+        # 1000-char chunk_size and MUST be cut mid-section — which is the case
+        # the single `## Transcript` heading lost the cue on.
+        return "\n\n".join(
+            f"### {cue}\n\n{self._window_body(i + 1)}"
+            for i, cue in enumerate(self._WINDOWS)
+        )
+
+    def _convert(self, tmp_path, **over):
+        from main.ingest.vimeo import VimeoIngestRequest, ingest_vimeo
+        from main.sources.files.files_document_converter import FilesDocumentConverter
+        base = {
+            "title": "Trust but verify",
+            "url": "https://vimeo.com/1223358361",
+            "summary": "A conference talk about verifying model output.",
+            "category": "ai/claude-code",
+            "date": "2026-09-01",
+            "transcript_markdown": self._transcript(),
+            "caption_lang": "en-x-autogen",
+            "caption_kind": "auto",
+            "duration_sec": 3220,
+        }
+        base.update(over)
+        result = ingest_vimeo(VimeoIngestRequest(**base), sources_path=str(tmp_path))
+        full_path = tmp_path / result["file_path"]
+        document = {
+            "fileRelativePath": result["file_path"],
+            "fileFullPath": str(full_path),
+            "modifiedTime": "2026-09-01T00:00:00Z",
+            "content": [{"text": full_path.read_text(encoding="utf-8")}],
+        }
+        return FilesDocumentConverter().convert(document)[0]
+
+    def test_every_transcript_chunk_names_its_window(self, tmp_path):
+        converted = self._convert(tmp_path)
+        seen = {}
+        for chunk in converted["chunks"]:
+            windows = {int(m) for m in self._TOKEN_RE.findall(chunk["indexedData"])}
+            if not windows:
+                continue
+            assert len(windows) == 1, "a chunk spans two windows; the cue is ambiguous"
+            cue = self._WINDOWS[windows.pop() - 1]
+            assert chunk.get("heading") == cue
+            seen[cue] = seen.get(cue, 0) + 1
+        # Every window is represented, and each was cut into more than one chunk
+        # — so this pins the MID-SECTION chunk, not just the one that starts on
+        # the heading line.
+        assert set(seen) == set(self._WINDOWS)
+        assert all(count >= 2 for count in seen.values()), seen
+
+    def test_provenance_frontmatter_reaches_chunk_metadata(self, tmp_path):
+        converted = self._convert(tmp_path)
+        metadata = converted["metadata"]
+        assert metadata["vimeo_video_id"] == "1223358361"
+        assert metadata["caption_lang"] == "en-x-autogen"
+        assert metadata["caption_kind"] == "auto"
+        for chunk in converted["chunks"]:
+            assert chunk["metadata"]["caption_kind"] == "auto"
+            assert chunk["metadata"]["vimeo_video_id"] == "1223358361"
+
+    def test_a_youtube_video_id_is_not_surfaced_under_vimeos_key(self, tmp_path):
+        # `_FRONTMATTER_METADATA_FIELDS` is global: every markdown collection is
+        # converted here. The YouTube channel fetcher writes a bare `video_id:`
+        # into every transcript it saves, so an unqualified `video_id` in the
+        # allowlist serves a YouTube id under the key a Vimeo reader reads.
+        from main.sources.files.files_document_converter import FilesDocumentConverter
+        text = (
+            "---\ntitle: A parenting video\nvideo_id: -AbCdEf1234\n"
+            'channel: Some Channel\nurl: "https://www.youtube.com/watch?v=-AbCdEf1234"\n'
+            "upload_date: 2024-01-03\n---\n\nBody.\n"
+        )
+        path = tmp_path / "yt.md"
+        path.write_text(text, encoding="utf-8")
+        converted = FilesDocumentConverter().convert({
+            "fileRelativePath": "markdown/Channel/yt.md",
+            "fileFullPath": str(path),
+            "modifiedTime": "2026-09-01T00:00:00Z",
+            "content": [{"text": text}],
+        })[0]
+        assert "video_id" not in converted["metadata"]
+        assert "vimeo_video_id" not in converted["metadata"]
+        for chunk in converted["chunks"]:
+            assert "video_id" not in chunk["metadata"]
+
+    def test_duration_is_a_number_not_a_string(self, tmp_path):
+        # A quoted "3220" sorts and compares as text; every consumer would have
+        # to re-coerce it, and the ones that forget compare "1000" < "900".
+        converted = self._convert(tmp_path)
+        assert converted["metadata"]["duration_sec"] == 3220
+        assert isinstance(converted["metadata"]["duration_sec"], int)
+        assert converted["chunks"][0]["metadata"]["duration_sec"] == 3220
+
+    def test_unparseable_duration_is_dropped_rather_than_served_as_text(self, tmp_path):
+        # Nothing stops a hand-edited page from carrying `duration_sec: soon`.
+        # Same rule as the collection routes' score coercion: a field that is not
+        # a number is absent, so "key missing" is the single no-value signal.
+        from main.sources.files.files_document_converter import FilesDocumentConverter
+        text = (
+            '---\ndate: "2026-09-01"\nurl: "https://vimeo.com/1"\n'
+            'duration_sec: soon\ncategory: "ai/general"\n---\n\nBody.\n'
+        )
+        path = tmp_path / "page.md"
+        path.write_text(text, encoding="utf-8")
+        converted = FilesDocumentConverter().convert({
+            "fileRelativePath": "ai/general/page.md",
+            "fileFullPath": str(path),
+            "modifiedTime": "2026-09-01T00:00:00Z",
+            "content": [{"text": text}],
+        })[0]
+        assert "duration_sec" not in converted["metadata"]
+
+
+class TestWriteSummaryBodySuffix:
+    """``body_suffix`` distinguishes "nothing to append" from "append nothing"."""
+
+    def _write(self, tmp_path, title, **over):
+        from main.ingest._summary_ingest import write_summary
+        kwargs = {
+            "root": str(tmp_path),
+            "title": title,
+            "url": f"https://example.com/{title}",
+            "summary": "Body text.",
+            "category": "ai/general",
+            "date": "2026-09-04",
+        }
+        kwargs.update(over)
+        result = write_summary(**kwargs)
+        return (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+
+    def test_absent_suffix_leaves_the_summary_as_the_whole_body(self, tmp_path):
+        assert self._write(tmp_path, "absent", body_suffix=None).endswith("Body text.")
+
+    def test_empty_suffix_is_appended_rather_than_skipped(self, tmp_path):
+        # A falsy check conflates "" with None, so a caller that computes an
+        # empty section gets the silent skip the docstring does not promise.
+        assert self._write(tmp_path, "empty", body_suffix="").endswith("Body text.\n\n")
+
+    def test_non_empty_suffix_is_separated_by_one_blank_line(self, tmp_path):
+        written = self._write(tmp_path, "filled", body_suffix="## Transcript\n\nx\n")
+        assert written.endswith("Body text.\n\n## Transcript\n\nx\n")
+
+    def test_a_summary_ending_in_newlines_still_gets_exactly_one_blank_line(self, tmp_path):
+        # Nothing stops a summarizer from ending its answer with a newline; the
+        # separator is normalized rather than appended to whatever came back, or
+        # the transcript heading drifts one line further down per trailing
+        # newline and the section stops looking like a section.
+        written = self._write(
+            tmp_path, "trailing", summary="Body text.\n\n\n",
+            body_suffix="## Transcript\n\nx\n",
+        )
+        assert written.endswith("Body text.\n\n## Transcript\n\nx\n")
+
+
+class TestVimeoTranscriptCap:
+    """An unbounded transcript is a whole-file write and an index rebuild.
+
+    Muninn caps the VTT it harvests at 2 MB; the receiving end refuses the same
+    size rather than trusting the sender to have done it.
+    """
+
+    def _client(self):
+        from main.runtime.knowledge_store import KnowledgeStore, get_store
+        app.dependency_overrides[get_store] = lambda: KnowledgeStore()
+        return TestClient(app)
+
+    def teardown_method(self):
+        from main.runtime.knowledge_store import get_store
+        app.dependency_overrides.pop(get_store, None)
+
+    #: Spelled out here rather than imported so the size tests are a BEHAVIOUR
+    #: check (a 422 the route did not answer before) and not a tautology against
+    #: whatever the module happens to declare. The module's own constant is
+    #: pinned to this number by `test_cap_is_muninns_vtt_cap` below.
+    _CAP = 2 * 1024 * 1024
+
+    def _body(self, transcript):
+        return {
+            "title": "Capped talk",
+            "url": "https://vimeo.com/1223358361",
+            "summary": "A talk.",
+            "category": "ai/general",
+            "transcript_markdown": transcript,
+        }
+
+    def test_cap_is_muninns_vtt_cap(self):
+        from main.ingest.vimeo import VIMEO_TRANSCRIPT_MAX_BYTES
+        assert VIMEO_TRANSCRIPT_MAX_BYTES == self._CAP
+
+    def test_oversize_transcript_is_refused_with_422(self, tmp_path):
+        _set_ingest("vimeo", str(tmp_path), None)
+        resp = self._client().post(
+            "/api/vimeo/ingest", json=self._body("a" * (self._CAP + 1))
+        )
+        assert resp.status_code == 422
+        assert not list(tmp_path.rglob("*.md"))
+
+    def test_cap_counts_bytes_not_characters(self, tmp_path):
+        # Half a cap's worth of two-byte characters is over the byte cap while
+        # comfortably under it by len(), which is what a naive check measures.
+        _set_ingest("vimeo", str(tmp_path), None)
+        transcript = "é" * (self._CAP // 2 + 1)
+        assert len(transcript) < self._CAP
+        resp = self._client().post("/api/vimeo/ingest", json=self._body(transcript))
+        assert resp.status_code == 422
+        assert not list(tmp_path.rglob("*.md"))
+
+    def test_a_transcript_at_the_cap_is_accepted(self, tmp_path):
+        _set_ingest("vimeo", str(tmp_path), None)
+        resp = self._client().post(
+            "/api/vimeo/ingest", json=self._body("a" * self._CAP)
+        )
+        assert resp.status_code == 200
+        assert len(list(tmp_path.rglob("*.md"))) == 1
 
 
 # --- Ingest registry: parametrized suite over the summary push sources ---------

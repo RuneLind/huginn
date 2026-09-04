@@ -26,6 +26,7 @@ from main.ingest.anthropic_summaries import (
 from main.ingest.articles import ArticleIngestRequest, ingest_article
 from main.ingest.jira import JiraIngestRequest, ingest_jira
 from main.ingest.tiktok import TikTokIngestRequest, ingest_tiktok
+from main.ingest.vimeo import VimeoIngestRequest, ingest_vimeo, is_same_vimeo_video
 from main.ingest.x_articles import XArticleIngestRequest, ingest_x_article
 from main.ingest.youtube import YouTubeIngestRequest, ingest_youtube
 
@@ -183,6 +184,31 @@ INGEST_SOURCES: list[IngestSource] = [
         response_fields=("file_path", "author", "category", "summary"),
         similar_query=lambda req, result: req.summary[:2000],
         exclude_match=lambda req, doc: doc.get("url", "") == req.url,
+    ),
+    IngestSource(
+        name="vimeo",
+        route_path="/api/vimeo/ingest",
+        request_model=VimeoIngestRequest,
+        ingest_fn=ingest_vimeo,
+        path_kwarg="sources_path",
+        path_arg="--vimeo-sources-path",
+        path_env="VIMEO_SOURCES_PATH",
+        path_help="Path to save Vimeo summary markdown files",
+        collection_arg="--vimeo-collection",
+        collection_env="VIMEO_COLLECTION",
+        collection_default="vimeo-summaries",
+        collection_help="Collection name for Vimeo summaries",
+        operation="Vimeo ingest",
+        not_configured_detail="Vimeo sources path not configured (--vimeo-sources-path)",
+        response_fields=("file_path", "category", "summary"),
+        # The transcript is deliberately out of the similarity query: a talk's
+        # captions are 60 kB of speech and would drown the summary's topic.
+        similar_query=lambda req, result: req.summary[:2000],
+        # By VIDEO, not by url string: the document just written comes back from
+        # the searcher spelled however it was stored (`www.`, an unlisted `?h=`
+        # hash, the player host), and an exact compare offers it to the reader as
+        # its own related reading.
+        exclude_match=lambda req, doc: is_same_vimeo_video(req.url, doc.get("url", "")),
     ),
 ]
 

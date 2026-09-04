@@ -1,5 +1,6 @@
 from main.utils.frontmatter import (
     escape_frontmatter_value,
+    frontmatter_scalar,
     parse_tags,
     read_frontmatter,
     read_frontmatter_and_body,
@@ -39,6 +40,31 @@ class TestParseTags:
 
     def test_drops_empty_segments(self):
         assert parse_tags("[a, , b,]") == ["a", "b"]
+
+
+class TestFrontmatterScalar:
+    """The writer's value renderer: integers bare, everything else quoted."""
+
+    def test_int_is_written_bare(self):
+        assert frontmatter_scalar(3220) == "3220"
+
+    def test_negative_int_is_written_bare(self):
+        assert frontmatter_scalar(-1) == "-1"
+
+    def test_string_is_quoted_exactly_as_before(self):
+        assert frontmatter_scalar("3220") == escape_frontmatter_value("3220")
+        assert frontmatter_scalar('He said "hi"') == escape_frontmatter_value('He said "hi"')
+
+    def test_bool_is_quoted_not_bare(self):
+        # bool is an int subclass; `wip` is read back as the string "True"
+        # everywhere else in the pipeline, and a bare `wip: True` would be too
+        # (the parser is line-based) — but the bare branch is for numbers, and
+        # letting a bool through it invites a real YAML reader to disagree.
+        assert frontmatter_scalar(True) == '"True"'
+
+    def test_float_is_quoted(self):
+        # Only whole numbers get the bare branch; the reader coerces ints.
+        assert frontmatter_scalar(1.5) == '"1.5"'
 
 
 class TestEscapeRoundTrip:

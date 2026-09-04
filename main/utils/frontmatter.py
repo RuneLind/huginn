@@ -32,6 +32,23 @@ def escape_frontmatter_value(value) -> str:
     return '"' + text.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
+def frontmatter_scalar(value) -> str:
+    """Render one frontmatter value: integers bare, everything else quoted.
+
+    The parser here serves every value as a string (it is line-based, not YAML),
+    so a quoted ``"3220"`` reaches consumers as text that sorts lexicographically
+    — ``"1000" < "900"``. Writing an int bare lets the one reader that cares
+    coerce it (``files_document_converter``'s ``_FRONTMATTER_INT_FIELDS``)
+    without having to guess which quoted strings were meant as numbers.
+
+    ``bool`` is deliberately NOT in the bare branch: it is an ``int`` subclass,
+    and ``wip`` is read as the string ``"True"`` everywhere else in the pipeline.
+    """
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return escape_frontmatter_value(value)
+
+
 def parse_tags(value: str) -> list[str]:
     """Split a frontmatter ``tags`` scalar into a clean list of tag strings.
 
