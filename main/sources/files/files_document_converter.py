@@ -7,9 +7,38 @@ from main.sources.files.session_markdown_splitter import SessionMarkdownSplitter
 from main.utils.frontmatter import parse_tags, read_frontmatter, strip_frontmatter
 
 # Frontmatter fields to preserve as document metadata (key in frontmatter -> key in metadata)
+#
+# GLOBAL, not per source: every markdown collection is converted here, so a key
+# added below surfaces on any document that happens to carry it. That is why
+# this is an allowlist in the first place — a field an ingest writer emits and
+# this set does not name reaches no API consumer at all, however carefully it was
+# written. The vimeo four (`video_id`, `caption_lang`, `caption_kind`,
+# `duration_sec`) are spelled specifically enough that no other source writes
+# them today; if one starts, it gets the same treatment by construction.
 _FRONTMATTER_METADATA_FIELDS = {"wip", "title", "breadcrumb", "space", "page_id", "session_id", "project", "gitBranch", "tags", "category", "date", "url",
                                 "issue_key", "status", "issue_type", "epic_link", "epic_summary", "labels",
-                                "relevance_score", "combined_score", "engagement_score", "author_score"}
+                                "relevance_score", "combined_score", "engagement_score", "author_score",
+                                "video_id", "caption_lang", "caption_kind", "duration_sec"}
+
+#: Metadata fields served as INTEGERS rather than as the strings
+#: ``read_frontmatter`` hands back (it is a line parser, not YAML — every value
+#: arrives as text). Same rule as the collection routes' score coercion
+#: (``main/routes/collections.py``'s ``_resolve_doc_scores``): a value that is
+#: not a whole number is OMITTED rather than served as text or as a NaN, so
+#: "key missing" stays the single no-value signal for consumers.
+_FRONTMATTER_INT_FIELDS = {"duration_sec"}
+
+
+def _coerce_int(value):
+    """``value`` as an ``int``, or ``None`` when it is not a whole number."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
 
 
 class FilesDocumentConverter:
@@ -82,7 +111,16 @@ class FilesDocumentConverter:
         for content_part in document['content']:
             fm = read_frontmatter(content_part['text'])
             if fm:
-                metadata = {k: v for k, v in fm.items() if k in _FRONTMATTER_METADATA_FIELDS}
+                metadata = {}
+                for key, value in fm.items():
+                    if key not in _FRONTMATTER_METADATA_FIELDS:
+                        continue
+                    if key in _FRONTMATTER_INT_FIELDS:
+                        number = _coerce_int(value)
+                        if number is not None:
+                            metadata[key] = number
+                        continue
+                    metadata[key] = value
                 return metadata if metadata else None
         return None
 
