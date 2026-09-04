@@ -37,8 +37,12 @@ must be able to tell an ``auto`` transcript from a ``manual`` one without
 re-deriving it. They reach a consumer only because they are named in
 ``files_document_converter``'s ``_FRONTMATTER_METADATA_FIELDS`` allowlist — a
 field this module writes and that list does not name is invisible over the API.
-``video_id`` is derived from the url rather than sent, so it can never disagree
-with the url the document is keyed on.
+``vimeo_video_id`` is derived from the url rather than sent, so it can never
+disagree with the url the document is keyed on. The key is NAMESPACED because
+that allowlist is global and ``video_id`` is already taken: the YouTube channel
+fetcher (``main/fetchers/youtube/youtube_channel_fetcher.py``) writes a bare
+``video_id: <11-char YouTube id>`` into every transcript it saves, so an
+unqualified key would serve a YouTube id under the name a Vimeo consumer reads.
 """
 import logging
 import re
@@ -57,50 +61,81 @@ logger = logging.getLogger(__name__)
 #: capped it: this string is written to disk whole and then reindexed.
 VIMEO_TRANSCRIPT_MAX_BYTES = 2 * 1024 * 1024
 
-#: The hosts an id may be read from, matched EXACTLY (after dropping a ``www.``
-#: prefix and a trailing root dot). A suffix test would also accept
-#: ``evilvimeo.com``, and no host test at all accepts
-#: ``https://evil.example/vimeo.com/999/redirect`` — a url a third party
-#: controls, donating an id to a document keyed on it.
-_VIMEO_HOSTS = frozenset({"vimeo.com", "player.vimeo.com"})
-
 #: No leading zero: ``/0123`` and ``/123`` are the same video to Vimeo but two
 #: different keys, and Vimeo never writes the first. Muninn's ``VIDEO_ID_RE``
 #: refuses one, so deriving an id here would make the two sides disagree about
 #: what the same document is called.
 _ID = r"[1-9][0-9]*"
 
-#: The url shapes an id may be read from, as WHOLE-PATH matches — Muninn's
-#: ``src/vimeo/url.ts`` accepted forms, plus the showcase/group shapes its
-#: capture entry point never produces but a stored document can carry.
+#: The url shapes an id may be read from, as WHOLE-PATH matches, PAIRED WITH
+#: THE HOST that spells them — the same pairing Muninn makes, where
+#: ``PLAYER_PATH_RE`` is matched against ``player.vimeo.com`` and
+#: ``WATCH_PATH_RE`` against ``vimeo.com`` (``src/vimeo/url.ts``). Matching every
+#: shape against both hosts read ``https://vimeo.com/video/123`` and
+#: ``https://player.vimeo.com/123`` as video 123 where Muninn reads neither as a
+#: video at all, and two sides that disagree about a document's id disagree about
+#: what the document IS.
 #:
 #: Enumerated rather than "take the last numeric path segment": ``/groups/12345``
 #: is a group landing page whose last numeric segment names no video, and
 #: enumerating is equally what refuses ``/showcase/7654321`` while accepting
 #: ``/showcase/7654321/video/1223358361``. A first-numeric-segment ``search`` got
 #: both of those backwards — it keyed the showcase and group urls on the
-#: CONTAINER id, so two different talks in one showcase became one document key.
-_VIMEO_PATH_RES = tuple(re.compile(pattern) for pattern in (
-    rf"^/({_ID})/?$",                       # /<id>
-    rf"^/({_ID})/[^/]+/?$",                 # /<id>/<unlisted hash>
-    rf"^/video/({_ID})/?$",                 # player embed
-    rf"^/video/({_ID})/[^/]+/?$",           # player embed + hash
-    rf"^/channels/[^/]+/({_ID})/?$",        # channel page
-    rf"^/showcase/[^/]+/video/({_ID})/?$",  # showcase page
-    rf"^/groups/[^/]+/videos/({_ID})/?$",   # group page
+#: CONTAINER id, so a showcase url and the video url of a talk inside it derived
+#: the same id.
+#:
+#: ``\Z`` rather than ``$``: ``$`` also matches just before a trailing newline.
+#: Nothing can reach it (``urlsplit`` removes tab/CR/LF from the whole url before
+#: the path exists, measured), but the anchor should not depend on that.
+_PLAYER_PATH_RES = tuple(re.compile(pattern) for pattern in (
+    rf"^/video/({_ID})/?\Z",               # player embed
+    rf"^/video/({_ID})/[^/]+/?\Z",         # player embed + hash
 ))
+
+#: The watch host's shapes: Muninn's accepted forms, plus the showcase/group
+#: shapes its capture entry point never produces but a stored document can carry
+#: (a declared superset — see the PR body).
+_WATCH_PATH_RES = tuple(re.compile(pattern) for pattern in (
+    rf"^/({_ID})/?\Z",                       # /<id>
+    rf"^/({_ID})/[^/]+/?\Z",                 # /<id>/<unlisted hash>
+    rf"^/channels/[^/]+/({_ID})/?\Z",        # channel page
+    rf"^/showcase/[^/]+/video/({_ID})/?\Z",  # showcase page
+    rf"^/groups/[^/]+/videos/({_ID})/?\Z",   # group page
+))
+
+#: Leading and trailing characters a WHATWG url parser strips before parsing —
+#: C0 controls and space, and nothing else. Muninn parses with ``new URL``, which
+#: does exactly this, so ``"https://vimeo.com/123 "`` is a video there;
+#: ``urlsplit`` only lstrips them, so the trailing half has to be done here or
+#: the two sides disagree. Deliberately NOT ``str.strip()``: that also strips
+#: U+00A0 and friends, which the WHATWG parser percent-encodes into the path
+#: (i.e. names no video) — stripping them would invent the opposite divergence.
+_URL_TRIM = "".join(chr(c) for c in range(0x21))
+
+#: The hosts an id may be read from — the KEYS are the host gate, matched EXACTLY
+#: (after dropping a ``www.`` prefix and a trailing root dot). A suffix test would
+#: also accept ``evilvimeo.com``, and no host test at all accepts
+#: ``https://evil.example/vimeo.com/999/redirect`` — a url a third party
+#: controls, donating an id to a document keyed on it. One mapping rather than a
+#: host set plus a shape tuple, so a host can never be accepted with nothing to
+#: match it against.
+_HOST_PATH_RES = {
+    "vimeo.com": _WATCH_PATH_RES,
+    "player.vimeo.com": _PLAYER_PATH_RES,
+}
 
 
 def vimeo_video_id_from_url(url: Optional[str]) -> Optional[str]:
     """The video id a Vimeo URL names, or ``None`` when it names none.
 
-    Host-gated first, then matched against the known path shapes — see
-    ``_VIMEO_HOSTS`` and ``_VIMEO_PATH_RES`` for why neither half is optional.
+    Host-gated first, then matched against the path shapes THAT HOST spells —
+    see ``_HOST_PATH_RES`` for why neither half is optional and why the two are
+    paired rather than crossed.
     """
     if not url:
         return None
     try:
-        parts = urlsplit(url)
+        parts = urlsplit(url.strip(_URL_TRIM))
         host = (parts.hostname or "").rstrip(".")
     except ValueError:
         return None
@@ -108,9 +143,10 @@ def vimeo_video_id_from_url(url: Optional[str]) -> Optional[str]:
         return None
     if host.startswith("www."):
         host = host[4:]
-    if host not in _VIMEO_HOSTS:
+    shapes = _HOST_PATH_RES.get(host)
+    if shapes is None:
         return None
-    for pattern in _VIMEO_PATH_RES:
+    for pattern in shapes:
         match = pattern.match(parts.path)
         if match:
             return match.group(1)
@@ -171,7 +207,9 @@ def ingest_vimeo(req: VimeoIngestRequest, *, sources_path: str) -> dict:
     extra: dict[str, object] = {}
     video_id = vimeo_video_id_from_url(req.url)
     if video_id:
-        extra["video_id"] = video_id
+        # NAMESPACED: `video_id` is the YouTube channel fetcher's key and the
+        # converter's metadata allowlist is global. See the module docstring.
+        extra["vimeo_video_id"] = video_id
     if req.caption_lang:
         extra["caption_lang"] = req.caption_lang
     if req.caption_kind:
@@ -198,7 +236,7 @@ def ingest_vimeo(req: VimeoIngestRequest, *, sources_path: str) -> dict:
     )
     logger.info(
         f"Vimeo ingest: saved {result['file_path']} "
-        f"(video_id: {video_id}, category: {result['category']}, "
+        f"(vimeo_video_id: {video_id}, category: {result['category']}, "
         f"transcript: {'yes' if body_suffix else 'no'})"
     )
     return result

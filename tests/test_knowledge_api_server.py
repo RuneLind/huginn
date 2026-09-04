@@ -2027,7 +2027,7 @@ class TestVimeoIngest:
         result = ingest_vimeo(self._req(), sources_path=str(tmp_path))
         written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
         assert 'url: "https://vimeo.com/1223358361"' in written
-        assert 'video_id: "1223358361"' in written
+        assert 'vimeo_video_id: "1223358361"' in written
         assert 'caption_lang: "en-x-autogen"' in written
         assert 'caption_kind: "auto"' in written
         # Bare, not quoted: the reader serves it as a number (see
@@ -2075,7 +2075,19 @@ class TestVimeoIngest:
         assert "caption_lang:" not in written
         assert "caption_kind:" not in written
         assert "duration_sec:" not in written
-        assert 'video_id: "1223358361"' in written
+        assert 'vimeo_video_id: "1223358361"' in written
+
+    def test_the_id_key_is_namespaced_against_the_other_video_sources(self, tmp_path):
+        # `video_id` is NOT this vertical's word: the YouTube channel fetcher
+        # writes a bare `video_id: <11-char YouTube id>` into every file of the
+        # `emma-hubbard-transcripts` collection, and the converter's allowlist is
+        # global. An unqualified key would have served a YouTube id under the
+        # name a Vimeo consumer reads.
+        from main.ingest.vimeo import ingest_vimeo
+        result = ingest_vimeo(self._req(), sources_path=str(tmp_path))
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert 'vimeo_video_id: "1223358361"' in written
+        assert not re.search(r"^video_id:", written, re.MULTILINE)
 
     def test_zero_duration_still_written(self, tmp_path):
         # 0 means "the player never said"; `is not None` keeps it, a falsy check
@@ -2159,6 +2171,45 @@ class TestVimeoVideoIdFromUrl:
     def test_rejected(self, url):
         from main.ingest.vimeo import vimeo_video_id_from_url
         assert vimeo_video_id_from_url(url) is None
+
+
+class TestVimeoPathShapesArePairedWithTheirHost:
+    """A path shape belongs to ONE host, as it does in Muninn's ``url.ts``.
+
+    Muninn matches ``PLAYER_PATH_RE`` against ``player.vimeo.com`` and
+    ``WATCH_PATH_RE`` against ``vimeo.com`` (``src/vimeo/url.ts``). Matching
+    every shape against both hosts invents ids for urls Muninn calls no video —
+    and the two sides then disagree about what a document is called.
+    """
+
+    @pytest.mark.parametrize("url", [
+        # Watch-host spelling of the embed path: Muninn's WATCH_PATH_RE wants
+        # `/<id>`, and "video" is not an id.
+        "https://vimeo.com/video/1223358361",
+        # Embed host without the `/video/` prefix: Muninn's PLAYER_PATH_RE
+        # requires it, and the watch shapes are not tried on this host.
+        "https://player.vimeo.com/1223358361",
+        # The same pairing for the container shapes.
+        "https://player.vimeo.com/channels/staffpicks/1223358361",
+        "https://player.vimeo.com/showcase/7654321/video/1223358361",
+    ])
+    def test_a_shape_from_the_other_host_names_no_video(self, url):
+        from main.ingest.vimeo import vimeo_video_id_from_url
+        assert vimeo_video_id_from_url(url) is None
+
+    @pytest.mark.parametrize("url,expected", [
+        # A trailing space is not part of the url: Muninn parses through
+        # `new URL`, which strips leading and trailing C0-control-or-space, so
+        # `.../123 ` is the same video there. (`urlsplit` lstrips only.)
+        ("https://vimeo.com/1223358361 ", "1223358361"),
+        ("  https://vimeo.com/1223358361  ", "1223358361"),
+        # NOT stripped, on either side: a non-breaking space is an ordinary
+        # character to the WHATWG parser, which percent-encodes it into the path.
+        ("https://vimeo.com/1223358361\u00a0", None),
+    ])
+    def test_surrounding_whitespace_matches_muninns_url_parser(self, url, expected):
+        from main.ingest.vimeo import vimeo_video_id_from_url
+        assert vimeo_video_id_from_url(url) == expected
 
 
 class TestVimeoSelfLinkExclusion:
@@ -2283,12 +2334,36 @@ class TestVimeoDocumentThroughTheConverter:
     def test_provenance_frontmatter_reaches_chunk_metadata(self, tmp_path):
         converted = self._convert(tmp_path)
         metadata = converted["metadata"]
-        assert metadata["video_id"] == "1223358361"
+        assert metadata["vimeo_video_id"] == "1223358361"
         assert metadata["caption_lang"] == "en-x-autogen"
         assert metadata["caption_kind"] == "auto"
         for chunk in converted["chunks"]:
             assert chunk["metadata"]["caption_kind"] == "auto"
-            assert chunk["metadata"]["video_id"] == "1223358361"
+            assert chunk["metadata"]["vimeo_video_id"] == "1223358361"
+
+    def test_a_youtube_video_id_is_not_surfaced_under_vimeos_key(self, tmp_path):
+        # `_FRONTMATTER_METADATA_FIELDS` is global: every markdown collection is
+        # converted here. The YouTube channel fetcher writes a bare `video_id:`
+        # into every transcript it saves, so an unqualified `video_id` in the
+        # allowlist serves a YouTube id under the key a Vimeo reader reads.
+        from main.sources.files.files_document_converter import FilesDocumentConverter
+        text = (
+            "---\ntitle: A parenting video\nvideo_id: -AbCdEf1234\n"
+            'channel: Some Channel\nurl: "https://www.youtube.com/watch?v=-AbCdEf1234"\n'
+            "upload_date: 2024-01-03\n---\n\nBody.\n"
+        )
+        path = tmp_path / "yt.md"
+        path.write_text(text, encoding="utf-8")
+        converted = FilesDocumentConverter().convert({
+            "fileRelativePath": "markdown/Channel/yt.md",
+            "fileFullPath": str(path),
+            "modifiedTime": "2026-09-01T00:00:00Z",
+            "content": [{"text": text}],
+        })[0]
+        assert "video_id" not in converted["metadata"]
+        assert "vimeo_video_id" not in converted["metadata"]
+        for chunk in converted["chunks"]:
+            assert "video_id" not in chunk["metadata"]
 
     def test_duration_is_a_number_not_a_string(self, tmp_path):
         # A quoted "3220" sorts and compares as text; every consumer would have

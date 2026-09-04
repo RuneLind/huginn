@@ -12,13 +12,21 @@ from main.utils.frontmatter import parse_tags, read_frontmatter, strip_frontmatt
 # added below surfaces on any document that happens to carry it. That is why
 # this is an allowlist in the first place — a field an ingest writer emits and
 # this set does not name reaches no API consumer at all, however carefully it was
-# written. The vimeo four (`video_id`, `caption_lang`, `caption_kind`,
-# `duration_sec`) are spelled specifically enough that no other source writes
-# them today; if one starts, it gets the same treatment by construction.
+# written.
+#
+# It is also why the vimeo id is `vimeo_video_id` and not `video_id`: `video_id`
+# is ALREADY WRITTEN, by main/fetchers/youtube/youtube_channel_fetcher.py, into
+# every file of the youtube-transcripts collection (75 on disk 2026-09-04), so
+# allowlisting the bare key would serve a YouTube id under the name a Vimeo
+# consumer reads. The other three were greped the same day: no writer in `main/`
+# emits `caption_lang`, `caption_kind` or `duration_sec` as a frontmatter key
+# except the vimeo ingest, and the only files under `data/sources/` carrying any
+# of them are the two vimeo captures. (`duration_sec` also appears in the
+# YouTube fetcher as a local variable spelling a mm:ss line — not a key.)
 _FRONTMATTER_METADATA_FIELDS = {"wip", "title", "breadcrumb", "space", "page_id", "session_id", "project", "gitBranch", "tags", "category", "date", "url",
                                 "issue_key", "status", "issue_type", "epic_link", "epic_summary", "labels",
                                 "relevance_score", "combined_score", "engagement_score", "author_score",
-                                "video_id", "caption_lang", "caption_kind", "duration_sec"}
+                                "vimeo_video_id", "caption_lang", "caption_kind", "duration_sec"}
 
 #: Metadata fields served as INTEGERS rather than as the strings
 #: ``read_frontmatter`` hands back (it is a line parser, not YAML — every value
@@ -30,7 +38,14 @@ _FRONTMATTER_INT_FIELDS = {"duration_sec"}
 
 
 def _coerce_int(value):
-    """``value`` as an ``int``, or ``None`` when it is not a whole number."""
+    """``value`` as an ``int``, or ``None`` when it does not parse as one.
+
+    "Parses as an int" is `int()`'s rule, which is wider than "is a whole
+    number": it accepts surrounding whitespace, a sign, underscores between
+    digits and any Unicode decimal digit (`٣٢٢٠` is 3220). Nothing narrows it,
+    because the input is a line from a frontmatter block a human may have typed
+    and the alternative to accepting those is serving them as text.
+    """
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
