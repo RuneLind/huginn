@@ -2214,6 +2214,38 @@ class TestVimeoIngest:
             self._req(tags=["ok", "x" * (self._FIELD_CAP + 1)])
         self._req(tags=["x" * self._FIELD_CAP])
 
+    #: The WHOLE-request bound — the property the per-field cap cannot give,
+    #: since `tags` is a list of any length. Spelled out like the others.
+    _FRONTMATTER_CAP = 3072
+
+    def test_the_frontmatter_total_is_bounded_and_the_number_is_pinned(self):
+        from pydantic import ValidationError
+        from main.ingest.vimeo import VIMEO_FRONTMATTER_MAX_BYTES
+        assert VIMEO_FRONTMATTER_MAX_BYTES == self._FRONTMATTER_CAP
+        # Many small tags, each under the per-item cap, over the total.
+        with pytest.raises(ValidationError, match="frontmatter exceeds"):
+            self._req(tags=["x" * 100] * (self._FRONTMATTER_CAP // 100 + 1))
+        # Nine fields each under the per-item cap, over the total.
+        v = "x" * 400
+        with pytest.raises(ValidationError, match="frontmatter exceeds"):
+            self._req(date=v, caption_lang=v, caption_kind=v, summary_kind=v, summary_lang=v,
+                      author=v, upload_date=v, speaker=v, thumbnail_url=v)
+
+    def test_a_request_at_the_total_bound_never_forks_on_reingest(self, tmp_path):
+        # The property itself, in its worst shape: every byte a quote, which
+        # the writer escapes to two characters, so the head is at its fullest.
+        from main.ingest.vimeo import ingest_vimeo
+        from main.utils.frontmatter import read_frontmatter_from_path
+        per = self._FRONTMATTER_CAP // 12  # nine fields + three tags
+        q = '"' * per
+        req = self._req(date=q, caption_lang=q, caption_kind=q, summary_kind=q, summary_lang=q,
+                        author=q, upload_date=q, speaker=q, thumbnail_url=q, tags=[q, q, q])
+        first = ingest_vimeo(req, sources_path=str(tmp_path))
+        second = ingest_vimeo(req, sources_path=str(tmp_path))
+        assert first["file_path"] == second["file_path"]
+        head = read_frontmatter_from_path(str(tmp_path / first["file_path"]))
+        assert head.get("url") == "https://vimeo.com/1223358361"
+
     def test_the_cap_counts_bytes_not_characters(self):
         from pydantic import ValidationError
         # "é" is two bytes: 256 of them fit, 257 do not, though both are far

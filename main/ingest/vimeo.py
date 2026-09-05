@@ -49,7 +49,7 @@ import re
 from typing import Optional
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 from main.ingest._summary_ingest import write_summary
 
@@ -63,9 +63,19 @@ VIMEO_TRANSCRIPT_MAX_BYTES = 2 * 1024 * 1024
 
 #: Cap on each frontmatter-bound string of the request (see
 #: `_cap_frontmatter_field` for the enumeration). Well above any real value (a
-#: Vimeo CDN thumbnail url is ~80 bytes) and, all of them together at the cap,
-#: inside the 8192-character frontmatter head the readers parse.
+#: Vimeo CDN thumbnail url is ~80 bytes). It bounds a VALUE; the head is
+#: bounded by the total below — nine fields at this cap plus any number of
+#: tags is not inside anything.
 VIMEO_FIELD_MAX_BYTES = 512
+
+#: The WHOLE request's frontmatter-bound bytes — every capped string plus every
+#: tag, summed — which is what keeps the closing `---` inside the
+#: 8192-CHARACTER head `read_frontmatter_from_path` parses. Worst case every
+#: byte is a quote, which the writer escapes to two characters: 3072 → 6144,
+#: plus the keys, `url` and `category`, stays under 8192 (measured: an
+#: all-quote request at this bound re-ingests to the same file with its url
+#: parsed back).
+VIMEO_FRONTMATTER_MAX_BYTES = 3072
 
 #: No leading zero: ``/0123`` and ``/123`` are the same video to Vimeo but two
 #: different keys, and Vimeo never writes the first. Muninn's ``VIDEO_ID_RE``
@@ -228,10 +238,12 @@ class VimeoIngestRequest(BaseModel):
         # 2026-09-05: a 20 000-char value in any one of them forked the
         # document; `title` is the FILENAME, truncated to 200 chars on its
         # own, and `summary`/`transcript_markdown` are body). `tags` is capped
-        # per item below; `url` is the dedup key and is bounded by the route
-        # that resolves it. The other five verticals share `write_summary`
-        # and stay uncapped — a whole-frontmatter bound in the writer is the
-        # follow-up for THEM, not for this request.
+        # per item below and the WHOLE set by `_cap_frontmatter_total` — the
+        # per-value cap alone bounds nothing, since `tags` is a list of any
+        # length. `url` is the dedup key and is bounded by the route that
+        # resolves it. The other five verticals share `write_summary` and stay
+        # uncapped — a whole-frontmatter bound in the writer is the follow-up
+        # for THEM, not for this request.
         if value is not None and len(value.encode("utf-8")) > VIMEO_FIELD_MAX_BYTES:
             raise ValueError(f"field exceeds {VIMEO_FIELD_MAX_BYTES} bytes")
         return value
@@ -244,6 +256,22 @@ class VimeoIngestRequest(BaseModel):
                 if len(tag.encode("utf-8")) > VIMEO_FIELD_MAX_BYTES:
                     raise ValueError(f"tag exceeds {VIMEO_FIELD_MAX_BYTES} bytes")
         return value
+
+    _FRONTMATTER_STRING_FIELDS = (
+        "date", "caption_lang", "caption_kind", "summary_kind", "summary_lang",
+        "author", "upload_date", "speaker", "thumbnail_url",
+    )
+
+    @model_validator(mode="after")
+    def _cap_frontmatter_total(self) -> "VimeoIngestRequest":
+        total = sum(
+            len(v.encode("utf-8"))
+            for v in (getattr(self, f) for f in self._FRONTMATTER_STRING_FIELDS)
+            if v is not None
+        ) + sum(len(t.encode("utf-8")) for t in (self.tags or []))
+        if total > VIMEO_FRONTMATTER_MAX_BYTES:
+            raise ValueError(f"frontmatter exceeds {VIMEO_FRONTMATTER_MAX_BYTES} bytes")
+        return self
 
     @field_validator("transcript_markdown")
     @classmethod
