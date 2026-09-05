@@ -102,7 +102,11 @@ def _resolve_doc_date(doc: dict) -> str | None:
     Prefers the frontmatter ``date`` (day-precision, set at ingest) and falls
     back to ``modifiedTime`` (file mtime, which can be reset by bulk reindexing).
     """
-    metadata = doc.get("metadata") or {}
+    # Same guard as the thumbnail branch: a document whose `metadata` parsed
+    # to a string used to 500 the whole listing here.
+    metadata = doc.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
     return metadata.get("date") or doc.get("modifiedTime")
 
 
@@ -224,7 +228,10 @@ def list_collection_documents(
             if include_scores:
                 doc.update(_resolve_doc_scores(raw))
             if include_thumbnails:
-                thumbnail = (raw.get("metadata") or {}).get("thumbnail_url")
+                # `metadata` guarded like `raw` above: a document whose metadata
+                # is a string must collapse to the no-op, not 500 the listing.
+                metadata = raw.get("metadata")
+                thumbnail = metadata.get("thumbnail_url") if isinstance(metadata, dict) else None
                 if isinstance(thumbnail, str) and thumbnail:
                     doc["thumbnail_url"] = thumbnail
         documents.append(doc)

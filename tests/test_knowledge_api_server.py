@@ -674,6 +674,10 @@ class TestCollectionDocumentThumbnails(_CollectionDocumentsCase):
                   "documentPath": "vm/documents/ai/B.md.json"},
             "3": {"documentId": "ai/C.md", "documentUrl": "https://vimeo.com/3",
                   "documentPath": "vm/documents/ai/C.md.json"},
+            "4": {"documentId": "ai/D.md", "documentUrl": "https://vimeo.com/4",
+                  "documentPath": "vm/documents/ai/D.md.json"},
+            "5": {"documentId": "ai/E.md", "documentUrl": "https://vimeo.com/5",
+                  "documentPath": "vm/documents/ai/E.md.json"},
         }
         files = {
             "vm/indexes/index_document_mapping.json": json.dumps(mapping),
@@ -684,6 +688,11 @@ class TestCollectionDocumentThumbnails(_CollectionDocumentsCase):
             "vm/documents/ai/B.md.json": json.dumps({"metadata": {"date": "2026-09-05"}}),
             # A non-string value is not a thumbnail.
             "vm/documents/ai/C.md.json": json.dumps({"metadata": {"thumbnail_url": 7}}),
+            # An EMPTY string is not one either — omitted, never served as "".
+            "vm/documents/ai/D.md.json": json.dumps({"metadata": {"thumbnail_url": ""}}),
+            # A document whose metadata is not a dict at all collapses to the
+            # no-op, like the dates branch's non-dict document — not a 500.
+            "vm/documents/ai/E.md.json": json.dumps({"metadata": "a string"}),
         }
         return _FakeStore(files, {"vm"})
 
@@ -699,6 +708,9 @@ class TestCollectionDocumentThumbnails(_CollectionDocumentsCase):
         assert by_id["ai/A.md"]["thumbnail_url"] == "https://i.vimeocdn.com/video/a.jpg"
         assert "thumbnail_url" not in by_id["ai/B.md"]
         assert "thumbnail_url" not in by_id["ai/C.md"]
+        assert "thumbnail_url" not in by_id["ai/D.md"]
+        assert "thumbnail_url" not in by_id["ai/E.md"]
+        assert len(docs) == 5
 
     def test_thumbnails_and_dates_share_one_read(self):
         store = self._store()
@@ -2080,7 +2092,7 @@ class TestVimeoIngest:
             "summary_lang": "en",
             "author": "JavaZone",
             "upload_date": "2026-09-03 12:11:41",
-            "speaker": "Totto - Thor Henning Hetland",
+            "speaker": "Totto - Kari Nordmann",
             "thumbnail_url": "https://i.vimeocdn.com/video/x-1280x720.jpg",
         }
         base.update(over)
@@ -2103,7 +2115,7 @@ class TestVimeoIngest:
         # v2 PR 2 — what oEmbed knew and the route used to throw away.
         assert 'author: "JavaZone"' in written
         assert 'upload_date: "2026-09-03 12:11:41"' in written
-        assert 'speaker: "Totto - Thor Henning Hetland"' in written
+        assert 'speaker: "Totto - Kari Nordmann"' in written
         assert 'thumbnail_url: "https://i.vimeocdn.com/video/x-1280x720.jpg"' in written
         # Bare, not quoted: the reader serves it as a number (see
         # TestVimeoDocumentThroughTheConverter::test_duration_is_a_number_not_a_string).
@@ -2139,6 +2151,20 @@ class TestVimeoIngest:
         )
         written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
         assert "## Transcript" not in written
+
+    def test_the_http_response_carries_author_like_the_other_author_sources(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VIMEO_SOURCES_PATH", str(tmp_path))
+        from main.ingest.registry import INGEST_SOURCES
+        vimeo = next(s for s in INGEST_SOURCES if s.name == "vimeo")
+        assert "author" in vimeo.response_fields
+
+    def test_oembed_fields_are_capped_like_the_transcript(self):
+        from pydantic import ValidationError
+        from main.ingest.vimeo import VIMEO_FIELD_MAX_BYTES
+        for key in ("author", "upload_date", "speaker", "thumbnail_url"):
+            with pytest.raises(ValidationError):
+                self._req(**{key: "x" * (VIMEO_FIELD_MAX_BYTES + 1)})
+            self._req(**{key: "x" * VIMEO_FIELD_MAX_BYTES})  # at the cap: fine
 
     def test_optional_provenance_fields_are_omitted_when_absent(self, tmp_path):
         from main.ingest.vimeo import ingest_vimeo
@@ -2391,7 +2417,7 @@ class TestVimeoDocumentThroughTheConverter:
             "summary_lang": "nb",
             "author": "JavaZone",
             "upload_date": "2026-09-03 12:11:41",
-            "speaker": "Thor Henning Hetland",
+            "speaker": "Kari Nordmann",
             "thumbnail_url": "https://i.vimeocdn.com/video/x-1280x720.jpg",
         }
         base.update(over)
@@ -2435,7 +2461,7 @@ class TestVimeoDocumentThroughTheConverter:
         assert metadata["summary_lang"] == "nb"
         assert metadata["author"] == "JavaZone"
         assert metadata["upload_date"] == "2026-09-03 12:11:41"
-        assert metadata["speaker"] == "Thor Henning Hetland"
+        assert metadata["speaker"] == "Kari Nordmann"
         assert metadata["thumbnail_url"] == "https://i.vimeocdn.com/video/x-1280x720.jpg"
         for chunk in converted["chunks"]:
             assert chunk["metadata"]["caption_kind"] == "auto"

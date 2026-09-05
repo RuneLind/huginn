@@ -61,6 +61,11 @@ logger = logging.getLogger(__name__)
 #: capped it: this string is written to disk whole and then reindexed.
 VIMEO_TRANSCRIPT_MAX_BYTES = 2 * 1024 * 1024
 
+#: Cap on each oEmbed-derived frontmatter field (author, upload_date, speaker,
+#: thumbnail_url). Well above any real value (a Vimeo CDN thumbnail url is
+#: ~80 bytes) and well inside the 8192-byte frontmatter head the readers parse.
+VIMEO_FIELD_MAX_BYTES = 512
+
 #: No leading zero: ``/0123`` and ``/123`` are the same video to Vimeo but two
 #: different keys, and Vimeo never writes the first. Muninn's ``VIDEO_ID_RE``
 #: refuses one, so deriving an id here would make the two sides disagree about
@@ -181,7 +186,7 @@ class VimeoIngestRequest(BaseModel):
     url: str
     summary: str  # pre-made summary from the Muninn summarizer
     category: Optional[str] = None  # falls back to ai/general
-    date: Optional[str] = None  # oEmbed upload date
+    date: Optional[str] = None  # the CAPTURE day (muninn #519); the upload date is `upload_date`
     tags: Optional[list[str]] = None
     transcript_markdown: Optional[str] = None  # ### [HH:MM:SS] windows
     caption_lang: Optional[str] = None  # BCP-47 tag of the chosen track
@@ -205,6 +210,19 @@ class VimeoIngestRequest(BaseModel):
     speaker: Optional[str] = None
     thumbnail_url: Optional[str] = None
 
+    @field_validator("author", "upload_date", "speaker", "thumbnail_url")
+    @classmethod
+    def _cap_oembed_field(cls, value: Optional[str]) -> Optional[str]:
+        # Same reason as the transcript cap, smaller number: these are written
+        # VERBATIM into the frontmatter, and `read_frontmatter_from_path` reads
+        # only the first 8192 bytes of a file — a value that pushes the closing
+        # `---` past that makes the overwrite check see no url and fork
+        # `Title (2).md` on every re-ingest, silently. oEmbed values are tens
+        # of bytes; the cap refuses a sender that is not oEmbed.
+        if value is not None and len(value.encode("utf-8")) > VIMEO_FIELD_MAX_BYTES:
+            raise ValueError(f"field exceeds {VIMEO_FIELD_MAX_BYTES} bytes")
+        return value
+
     @field_validator("transcript_markdown")
     @classmethod
     def _cap_transcript(cls, value: Optional[str]) -> Optional[str]:
@@ -222,9 +240,11 @@ class VimeoIngestRequest(BaseModel):
 def ingest_vimeo(req: VimeoIngestRequest, *, sources_path: str) -> dict:
     """Save a Vimeo summary (+ optional transcript) under its category.
 
-    Returns ``{file_path, category, summary}`` — ``summary`` without the
-    transcript, so the response stays small and the similarity query stays about
-    the summary rather than 50 minutes of captions.
+    Returns ``{file_path, author, category, summary}`` — ``author`` echoed back
+    (``None`` when the request carried none) like the other author-bearing
+    sources, and ``summary`` without the transcript, so the response stays
+    small and the similarity query stays about the summary rather than 50
+    minutes of captions.
     """
     extra: dict[str, object] = {}
     video_id = vimeo_video_id_from_url(req.url)
@@ -268,8 +288,8 @@ def ingest_vimeo(req: VimeoIngestRequest, *, sources_path: str) -> dict:
         extra_frontmatter=extra or None,
         body_suffix=body_suffix,
     )
-    # The registry contract every author-carrying source keeps (x_articles,
-    # tiktok, articles): the author rides on the response too.
+    # Echoed back like the other author-bearing sources — and it reaches the
+    # HTTP body only because the registry's `response_fields` names it.
     result["author"] = req.author
     logger.info(
         f"Vimeo ingest: saved {result['file_path']} "
