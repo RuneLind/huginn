@@ -662,6 +662,111 @@ class TestCollectionDocumentDates(_CollectionDocumentsCase):
         assert client.get("/api/collection/nope/documents").status_code == 404
 
 
+class TestCollectionDocumentThumbnails(_CollectionDocumentsCase):
+    """Opt-in ``include_thumbnails`` — the shelf card's picture, off the same
+    one-read-per-document pass the dates use."""
+
+    def _store(self) -> _FakeStore:
+        mapping = {
+            "1": {"documentId": "ai/A.md", "documentUrl": "https://vimeo.com/1",
+                  "documentPath": "vm/documents/ai/A.md.json"},
+            "2": {"documentId": "ai/B.md", "documentUrl": "https://vimeo.com/2",
+                  "documentPath": "vm/documents/ai/B.md.json"},
+            "3": {"documentId": "ai/C.md", "documentUrl": "https://vimeo.com/3",
+                  "documentPath": "vm/documents/ai/C.md.json"},
+            "4": {"documentId": "ai/D.md", "documentUrl": "https://vimeo.com/4",
+                  "documentPath": "vm/documents/ai/D.md.json"},
+            "5": {"documentId": "ai/E.md", "documentUrl": "https://vimeo.com/5",
+                  "documentPath": "vm/documents/ai/E.md.json"},
+        }
+        files = {
+            "vm/indexes/index_document_mapping.json": json.dumps(mapping),
+            "vm/documents/ai/A.md.json": json.dumps(
+                {"metadata": {"date": "2026-09-05", "thumbnail_url": "https://i.vimeocdn.com/video/a.jpg"}}
+            ),
+            # No thumbnail in the frontmatter → the key is OMITTED, not null.
+            "vm/documents/ai/B.md.json": json.dumps({"metadata": {"date": "2026-09-05"}}),
+            # A non-string value is not a thumbnail.
+            "vm/documents/ai/C.md.json": json.dumps({"metadata": {"thumbnail_url": 7}}),
+            # An EMPTY string is not one either — omitted, never served as "".
+            "vm/documents/ai/D.md.json": json.dumps({"metadata": {"thumbnail_url": ""}}),
+            # A document whose metadata is not a dict at all collapses to the
+            # no-op, like the dates branch's non-dict document — not a 500.
+            "vm/documents/ai/E.md.json": json.dumps({"metadata": "a string"}),
+        }
+        return _FakeStore(files, {"vm"})
+
+    def test_default_listing_has_no_thumbnail(self):
+        client = self._client(self._store())
+        docs = client.get("/api/collection/vm/documents").json()["documents"]
+        assert all("thumbnail_url" not in d for d in docs)
+
+    def test_include_thumbnails_attaches_the_url_when_present(self):
+        client = self._client(self._store())
+        docs = client.get("/api/collection/vm/documents", params={"include_thumbnails": "1"}).json()["documents"]
+        by_id = {d["id"]: d for d in docs}
+        assert by_id["ai/A.md"]["thumbnail_url"] == "https://i.vimeocdn.com/video/a.jpg"
+        assert "thumbnail_url" not in by_id["ai/B.md"]
+        assert "thumbnail_url" not in by_id["ai/C.md"]
+        assert "thumbnail_url" not in by_id["ai/D.md"]
+        assert "thumbnail_url" not in by_id["ai/E.md"]
+        assert len(docs) == 5
+
+    def test_the_listing_reads_metadata_through_the_one_accessor(self):
+        # The mechanical half of `_doc_metadata`'s docstring: a resolver that
+        # reads `metadata` any other way re-opens the string-metadata 500, and
+        # the flag-enumeration test below cannot see a flag it does not know.
+        import ast, inspect
+        from main.routes import collections
+        tree = ast.parse(inspect.getsource(collections))
+        # Over the AST, so prose (comments, docstrings) is invisible and every
+        # spelling is seen: `x.get("metadata")`, `x.get("metadata", {})`,
+        # `x["metadata"]`. Exactly one read site — the accessor.
+        reads = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) and node.slice.value == "metadata":
+                reads.append(ast.unparse(node))
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get"
+                    and node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == "metadata"):
+                reads.append(ast.unparse(node))
+        assert reads == ['doc.get(\'metadata\')'], reads
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "_doc_metadata"]
+        assert len(calls) == 3, len(calls)  # the three resolvers
+
+    def test_a_non_dict_metadata_document_never_500s_the_listing_whatever_is_asked_for(self):
+        # The three resolvers on the one-read pass share ONE metadata accessor;
+        # this is the enumeration of the flags that reach it.
+        client = self._client(self._store())
+        for params in (
+            {"include_dates": "1"},
+            {"include_scores": "1"},
+            {"include_thumbnails": "1"},
+            {"include_dates": "1", "include_scores": "1", "include_thumbnails": "1"},
+        ):
+            res = client.get("/api/collection/vm/documents", params=params)
+            assert res.status_code == 200, params
+            assert {d["id"] for d in res.json()["documents"]} >= {"ai/E.md"}, params
+
+    def test_thumbnails_and_dates_share_one_read(self):
+        store = self._store()
+        reads = []
+        real = store.read_text_file
+        def counting(path):
+            reads.append(path)
+            return real(path)
+        store.read_text_file = counting
+        client = self._client(store)
+        docs = client.get(
+            "/api/collection/vm/documents",
+            params={"include_dates": "1", "include_thumbnails": "1"},
+        ).json()["documents"]
+        by_id = {d["id"]: d for d in docs}
+        assert by_id["ai/A.md"]["date"] == "2026-09-05"
+        assert by_id["ai/A.md"]["thumbnail_url"] == "https://i.vimeocdn.com/video/a.jpg"
+        # One mapping read + one read per document, never two per document.
+        assert reads.count("vm/documents/ai/A.md.json") == 1
+
+
 class TestCollectionDocumentScores(_CollectionDocumentsCase):
     """Opt-in score enrichment on /api/collection/{name}/documents."""
 
@@ -2020,6 +2125,10 @@ class TestVimeoIngest:
             "duration_sec": 3180,
             "summary_kind": "standard",
             "summary_lang": "en",
+            "author": "JavaZone",
+            "upload_date": "2026-09-03 12:11:41",
+            "speaker": "Totto - Kari Nordmann",
+            "thumbnail_url": "https://i.vimeocdn.com/video/x-1280x720.jpg",
         }
         base.update(over)
         return VimeoIngestRequest(**base)
@@ -2038,6 +2147,11 @@ class TestVimeoIngest:
         # is in which language without re-deriving it.
         assert 'summary_kind: "standard"' in written
         assert 'summary_lang: "en"' in written
+        # v2 PR 2 — what oEmbed knew and the route used to throw away.
+        assert 'author: "JavaZone"' in written
+        assert 'upload_date: "2026-09-03 12:11:41"' in written
+        assert 'speaker: "Totto - Kari Nordmann"' in written
+        assert 'thumbnail_url: "https://i.vimeocdn.com/video/x-1280x720.jpg"' in written
         # Bare, not quoted: the reader serves it as a number (see
         # TestVimeoDocumentThroughTheConverter::test_duration_is_a_number_not_a_string).
         assert "duration_sec: 3180" in written
@@ -2073,12 +2187,59 @@ class TestVimeoIngest:
         written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
         assert "## Transcript" not in written
 
+    def test_the_response_field_set_names_author(self):
+        # The HTTP half is `TestVimeoTranscriptCap::test_the_http_response_carries_author`
+        # (a real POST); this pins the registry tuple the route projects from.
+        from main.ingest.registry import INGEST_SOURCES
+        vimeo = next(s for s in INGEST_SOURCES if s.name == "vimeo")
+        assert "author" in vimeo.response_fields
+
+    #: Spelled out, not imported (the transcript cap's rule): a test that builds
+    #: its boundary from the constant cannot notice the constant moving, and the
+    #: number matters — four of these at the cap must stay well inside the
+    #: 8192-CHARACTER frontmatter head the readers parse.
+    _FIELD_CAP = 512
+
+    def test_the_field_cap_is_the_number_the_frontmatter_head_allows(self):
+        from main.ingest.vimeo import VIMEO_FIELD_MAX_BYTES
+        assert VIMEO_FIELD_MAX_BYTES == self._FIELD_CAP
+
+    def test_oembed_fields_are_capped_like_the_transcript(self):
+        from pydantic import ValidationError
+        for key in ("author", "upload_date", "speaker", "thumbnail_url"):
+            with pytest.raises(ValidationError):
+                self._req(**{key: "x" * (self._FIELD_CAP + 1)})
+            self._req(**{key: "x" * self._FIELD_CAP})  # at the cap: fine
+
+    def test_every_frontmatter_bound_string_on_the_request_is_capped(self):
+        # The enumeration, not a sample: every Optional[str] the request writes
+        # into the frontmatter, and each tag. `title` is the FILENAME (its own
+        # 200-char truncation) and `summary`/`transcript_markdown` are body,
+        # so they are not in this set.
+        from pydantic import ValidationError
+        for key in ("date", "caption_lang", "caption_kind", "summary_kind", "summary_lang",
+                    "author", "upload_date", "speaker", "thumbnail_url"):
+            with pytest.raises(ValidationError, match="exceeds"):
+                self._req(**{key: "x" * (self._FIELD_CAP + 1)})
+        with pytest.raises(ValidationError, match="exceeds"):
+            self._req(tags=["ok", "x" * (self._FIELD_CAP + 1)])
+        self._req(tags=["x" * self._FIELD_CAP])
+
+    def test_the_cap_counts_bytes_not_characters(self):
+        from pydantic import ValidationError
+        # "é" is two bytes: 256 of them fit, 257 do not, though both are far
+        # under the cap counted as characters.
+        self._req(speaker="é" * (self._FIELD_CAP // 2))
+        with pytest.raises(ValidationError):
+            self._req(speaker="é" * (self._FIELD_CAP // 2 + 1))
+
     def test_optional_provenance_fields_are_omitted_when_absent(self, tmp_path):
         from main.ingest.vimeo import ingest_vimeo
         result = ingest_vimeo(
             self._req(
                 caption_lang=None, caption_kind=None, duration_sec=None,
                 summary_kind=None, summary_lang=None,
+                author=None, upload_date=None, speaker=None, thumbnail_url=None,
             ),
             sources_path=str(tmp_path),
         )
@@ -2088,6 +2249,10 @@ class TestVimeoIngest:
         assert "duration_sec:" not in written
         assert "summary_kind:" not in written
         assert "summary_lang:" not in written
+        assert "author:" not in written
+        assert "upload_date:" not in written
+        assert "speaker:" not in written
+        assert "thumbnail_url:" not in written
         assert 'vimeo_video_id: "1223358361"' in written
 
     def test_the_id_key_is_namespaced_against_the_other_video_sources(self, tmp_path):
@@ -2317,6 +2482,10 @@ class TestVimeoDocumentThroughTheConverter:
             "duration_sec": 3220,
             "summary_kind": "talk-notes",
             "summary_lang": "nb",
+            "author": "JavaZone",
+            "upload_date": "2026-09-03 12:11:41",
+            "speaker": "Kari Nordmann",
+            "thumbnail_url": "https://i.vimeocdn.com/video/x-1280x720.jpg",
         }
         base.update(over)
         result = ingest_vimeo(VimeoIngestRequest(**base), sources_path=str(tmp_path))
@@ -2357,6 +2526,10 @@ class TestVimeoDocumentThroughTheConverter:
         # over the API, which is the silent half of this contract.
         assert metadata["summary_kind"] == "talk-notes"
         assert metadata["summary_lang"] == "nb"
+        assert metadata["author"] == "JavaZone"
+        assert metadata["upload_date"] == "2026-09-03 12:11:41"
+        assert metadata["speaker"] == "Kari Nordmann"
+        assert metadata["thumbnail_url"] == "https://i.vimeocdn.com/video/x-1280x720.jpg"
         for chunk in converted["chunks"]:
             assert chunk["metadata"]["caption_kind"] == "auto"
             assert chunk["metadata"]["vimeo_video_id"] == "1223358361"
@@ -2489,6 +2662,71 @@ class TestVimeoTranscriptCap:
     def test_cap_is_muninns_vtt_cap(self):
         from main.ingest.vimeo import VIMEO_TRANSCRIPT_MAX_BYTES
         assert VIMEO_TRANSCRIPT_MAX_BYTES == self._CAP
+
+    #: The rendered frontmatter's bound, spelled out (see `_summary_ingest`):
+    #: 75% of the 8192-character head `read_frontmatter_from_path` parses.
+    _HEAD_CAP = 6144
+
+    def _near_bound_body(self, tags):
+        # A hashed url, three long-but-legal strings, and `tags` distinct tags:
+        # 250 renders 5573 characters (under the bound), 400 renders 6773 (over
+        # it, under the readers' 8192) — both measured.
+        return {**self._body("t"), "url": "https://vimeo.com/1223358361?h=" + "a" * 2000,
+                "tags": [f"tag{i}" for i in range(tags)],
+                "speaker": "s" * 500, "author": "a" * 500,
+                "thumbnail_url": "https://i.vimeocdn.com/" + "x" * 480}
+
+    def test_the_head_cap_is_pinned(self):
+        from main.ingest._summary_ingest import FRONTMATTER_MAX_CHARS
+        assert FRONTMATTER_MAX_CHARS == self._HEAD_CAP
+
+    def test_a_frontmatter_that_would_overrun_the_head_is_refused_413_whatever_carries_it(self, tmp_path):
+        # The OUTPUT is bounded, so the door does not depend on which field is
+        # the long one: url, a numeric field, or many small tags.
+        _set_ingest("vimeo", str(tmp_path), None)
+        client = self._client()
+        long_url = "https://vimeo.com/1223358361?h=" + "a" * 20000
+        assert client.post("/api/vimeo/ingest", json={**self._body("t"), "url": long_url}).status_code == 413
+        # A bare numeric field has no string cap at all: 4000 digits beside a
+        # url that alone is fine.
+        raw = json.dumps({**self._body("t"), "url": "https://vimeo.com/1223358361?h=" + "a" * 2500, "duration_sec": 0})
+        raw = raw.replace('"duration_sec": 0', '"duration_sec": ' + "9" * 4000)
+        assert client.post("/api/vimeo/ingest", content=raw, headers={"content-type": "application/json"}).status_code == 413
+        many = client.post("/api/vimeo/ingest", json={**self._body("t"), "tags": [f"t{i}" for i in range(3000)]})
+        assert many.status_code == 413
+        # And the case that sits BETWEEN the bound and the readers' 8192 head —
+        # every field under its own cap, 6773 rendered characters (measured):
+        # this is the case a raised bound would let through.
+        mid = client.post("/api/vimeo/ingest", json=self._near_bound_body(tags=400))
+        assert mid.status_code == 413, mid.text
+        assert (tmp_path / "ai" / "general").exists() is False or not list((tmp_path / "ai" / "general").glob("*.md"))
+
+    def test_whatever_the_writer_accepts_parses_back_and_never_forks(self, tmp_path):
+        # Just under the bound, with the longest thing a real sender could carry
+        # (a hashed url) and distinct tags: the head still parses, so a
+        # re-ingest lands on the SAME file.
+        from main.utils.frontmatter import read_frontmatter_from_path
+        _set_ingest("vimeo", str(tmp_path), None)
+        client = self._client()
+        body = self._near_bound_body(tags=250)
+        url = body["url"]
+        first = client.post("/api/vimeo/ingest", json=body)
+        assert first.status_code == 200, first.text
+        second = client.post("/api/vimeo/ingest", json=body).json()
+        assert second["file_path"] == first.json()["file_path"]
+        head = read_frontmatter_from_path(str(tmp_path / first.json()["file_path"]))
+        assert head.get("url") == url
+
+    def test_the_http_response_carries_author(self, tmp_path):
+        _set_ingest("vimeo", str(tmp_path), None)
+        body = self._client().post("/api/vimeo/ingest", json={**self._body("t"), "author": "JavaZone"}).json()
+        assert body["author"] == "JavaZone"
+        # And null, not absent, when the request carried none — the key is in
+        # the response contract either way.
+        without = self._client().post(
+            "/api/vimeo/ingest", json={**self._body("t"), "url": "https://vimeo.com/1223358362"}
+        ).json()
+        assert "author" in without and without["author"] is None
 
     def test_oversize_transcript_is_refused_with_422(self, tmp_path):
         _set_ingest("vimeo", str(tmp_path), None)

@@ -61,6 +61,16 @@ logger = logging.getLogger(__name__)
 #: capped it: this string is written to disk whole and then reindexed.
 VIMEO_TRANSCRIPT_MAX_BYTES = 2 * 1024 * 1024
 
+#: Cap on each frontmatter-bound string of the request (see
+#: `_cap_frontmatter_field`). Well above any real value (a Vimeo CDN thumbnail
+#: url is ~80 bytes). It bounds a VALUE and answers a clear 422 naming the
+#: field; the HEAD is bounded where it is rendered — `write_summary` refuses a
+#: frontmatter over `FRONTMATTER_MAX_CHARS` whichever field carries it, url
+#: and the bare numeric `duration_sec` included, which no cap on this model's
+#: string fields could do.
+VIMEO_FIELD_MAX_BYTES = 512
+
+
 #: No leading zero: ``/0123`` and ``/123`` are the same video to Vimeo but two
 #: different keys, and Vimeo never writes the first. Muninn's ``VIDEO_ID_RE``
 #: refuses one, so deriving an id here would make the two sides disagree about
@@ -181,7 +191,7 @@ class VimeoIngestRequest(BaseModel):
     url: str
     summary: str  # pre-made summary from the Muninn summarizer
     category: Optional[str] = None  # falls back to ai/general
-    date: Optional[str] = None  # oEmbed upload date
+    date: Optional[str] = None  # the CAPTURE day (muninn #519); the upload date is `upload_date`
     tags: Optional[list[str]] = None
     transcript_markdown: Optional[str] = None  # ### [HH:MM:SS] windows
     caption_lang: Optional[str] = None  # BCP-47 tag of the chosen track
@@ -195,6 +205,49 @@ class VimeoIngestRequest(BaseModel):
     # so neither is derivable from `caption_lang`.
     summary_kind: Optional[str] = None
     summary_lang: Optional[str] = None
+    # What Vimeo's oEmbed said about the video, which the muninn route holds
+    # before a job exists: the account that uploaded it (`author_name`, e.g.
+    # "JavaZone"), its upload timestamp (kept apart from `date`, which is the
+    # CAPTURE day the shelf buckets on), the speaker muninn derives from a
+    # conference account's title convention, and the poster frame.
+    author: Optional[str] = None
+    upload_date: Optional[str] = None
+    speaker: Optional[str] = None
+    thumbnail_url: Optional[str] = None
+
+    @field_validator(
+        "date", "caption_lang", "caption_kind", "summary_kind", "summary_lang",
+        "author", "upload_date", "speaker", "thumbnail_url",
+    )
+    @classmethod
+    def _cap_frontmatter_field(cls, value: Optional[str]) -> Optional[str]:
+        # Same reason as the transcript cap, smaller number: these are written
+        # VERBATIM into the frontmatter, and `read_frontmatter_from_path` reads
+        # only the first 8192 CHARACTERS of a file (`_MAX_HEAD_BYTES` is a
+        # text-mode read) — a value that pushes the closing `---` past that
+        # makes the overwrite check see no url and fork `Title (2).md` on
+        # every re-ingest, silently. Real values are tens of bytes; the cap
+        # refuses a sender that is not muninn, with a 422 naming the field.
+        # It is a courtesy, not the bound: the set above is this request's
+        # frontmatter-bound STRINGS (measured 2026-09-05: a 20 000-char value
+        # in any one of them forked the document; `title` is the FILENAME,
+        # truncated to 200 chars on its own, and `summary`/
+        # `transcript_markdown` are body), but `url`, the bare numeric
+        # `duration_sec` and a tags list of any length reach the head too.
+        # The head itself is bounded in `write_summary`
+        # (`FRONTMATTER_MAX_CHARS`, a 413), for every vertical.
+        if value is not None and len(value.encode("utf-8")) > VIMEO_FIELD_MAX_BYTES:
+            raise ValueError(f"field exceeds {VIMEO_FIELD_MAX_BYTES} bytes")
+        return value
+
+    @field_validator("tags")
+    @classmethod
+    def _cap_tags(cls, value: Optional[list[str]]) -> Optional[list[str]]:
+        if value is not None:
+            for tag in value:
+                if len(tag.encode("utf-8")) > VIMEO_FIELD_MAX_BYTES:
+                    raise ValueError(f"tag exceeds {VIMEO_FIELD_MAX_BYTES} bytes")
+        return value
 
     @field_validator("transcript_markdown")
     @classmethod
@@ -213,9 +266,11 @@ class VimeoIngestRequest(BaseModel):
 def ingest_vimeo(req: VimeoIngestRequest, *, sources_path: str) -> dict:
     """Save a Vimeo summary (+ optional transcript) under its category.
 
-    Returns ``{file_path, category, summary}`` — ``summary`` without the
-    transcript, so the response stays small and the similarity query stays about
-    the summary rather than 50 minutes of captions.
+    Returns ``{file_path, author, category, summary}`` — ``author`` echoed back
+    (``None`` when the request carried none) like the other author-bearing
+    sources, and ``summary`` without the transcript, so the response stays
+    small and the similarity query stays about the summary rather than 50
+    minutes of captions.
     """
     extra: dict[str, object] = {}
     video_id = vimeo_video_id_from_url(req.url)
@@ -231,6 +286,14 @@ def ingest_vimeo(req: VimeoIngestRequest, *, sources_path: str) -> dict:
         extra["summary_kind"] = req.summary_kind
     if req.summary_lang:
         extra["summary_lang"] = req.summary_lang
+    if req.author:
+        extra["author"] = req.author
+    if req.upload_date:
+        extra["upload_date"] = req.upload_date
+    if req.speaker:
+        extra["speaker"] = req.speaker
+    if req.thumbnail_url:
+        extra["thumbnail_url"] = req.thumbnail_url
     if req.duration_sec is not None:
         # Written as an int, so the writer emits a bare `duration_sec: 3220` and
         # the converter can serve it as a number. A quoted "3220" compares and
@@ -251,6 +314,9 @@ def ingest_vimeo(req: VimeoIngestRequest, *, sources_path: str) -> dict:
         extra_frontmatter=extra or None,
         body_suffix=body_suffix,
     )
+    # Echoed back like the other author-bearing sources — and it reaches the
+    # HTTP body only because the registry's `response_fields` names it.
+    result["author"] = req.author
     logger.info(
         f"Vimeo ingest: saved {result['file_path']} "
         f"(vimeo_video_id: {video_id}, category: {result['category']}, "

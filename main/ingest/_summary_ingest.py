@@ -17,6 +17,21 @@ from main.ingest.categories import CATEGORIES
 from main.ingest._markdown_writer import write_categorized_markdown
 from main.utils.frontmatter import escape_frontmatter_value, frontmatter_scalar
 
+#: The rendered frontmatter's bound, in CHARACTERS: `read_frontmatter_from_path`
+#: parses only the first 8192 characters of a file (`_MAX_HEAD_BYTES` is a
+#: text-mode read), and `write_categorized_markdown`'s overwrite check reads the
+#: url through it — a head that overruns it parses to nothing, the check sees
+#: no url, and every re-ingest of the same url forks `Title (2).md`, silently.
+#: Bounding the OUTPUT closes that for every field that reaches the head, on
+#: every vertical that writes through here — url, a numeric field, any number
+#: of tags — where a per-field cap on one request model kept missing one.
+#: 75% of the head: real frontmatter is a few hundred characters. Two
+#: residuals, knowingly outside this bound: `main/ingest/jira.py` renders its
+#: own frontmatter and does not pass through here, and
+#: `scripts/cross_collection_gap_analysis.py` reads a 2000-character head of
+#: its own — a document between 2000 and 6144 is invisible to that script.
+FRONTMATTER_MAX_CHARS = 6144
+
 
 def build_summary_tags(category: str, tags: Optional[list[str]]) -> str:
     """Category parts + explicit tags, de-duped, order preserved, comma-joined."""
@@ -42,7 +57,8 @@ def write_summary(
     """Validate + write a summary as categorized markdown.
 
     ``category`` defaults to ``ai/general`` and must be one of ``CATEGORIES``
-    (400 otherwise). ``extra_frontmatter`` keys are emitted between ``url`` and
+    (400 otherwise). A rendered frontmatter over ``FRONTMATTER_MAX_CHARS`` is
+    refused with 413 before anything is written (see the constant). ``extra_frontmatter`` keys are emitted between ``url`` and
     ``category`` in insertion order, so callers control field placement (e.g.
     ``author`` for X/TikTok); an ``int`` value is written BARE (``duration_sec:
     3220``) so the reader can serve it as a number — see ``frontmatter_scalar``.
@@ -79,6 +95,11 @@ def write_summary(
     lines.append(f"tags: {escape_frontmatter_value(tags_str)}")
     lines.append("---")
     frontmatter = "\n".join(lines) + "\n\n"
+    if len(frontmatter) > FRONTMATTER_MAX_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"frontmatter would be {len(frontmatter)} characters; the readers parse {FRONTMATTER_MAX_CHARS}",
+        )
 
     body = summary
     if body_suffix is not None:

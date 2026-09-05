@@ -96,14 +96,27 @@ def list_tags(
     return result
 
 
+def _doc_metadata(doc: dict) -> dict:
+    """The document's frontmatter metadata, or ``{}`` when it is not a dict.
+
+    THE one accessor for every resolver on the listing's one-read pass (dates,
+    scores, thumbnails). A document whose ``metadata`` parsed to a string used
+    to 500 the whole listing from whichever resolver touched it first — the
+    class was closed one branch at a time until this, which is the enumeration:
+    a resolver that reads the metadata key any other way re-opens it (pinned by
+    a test that counts the read sites in this module).
+    """
+    metadata = doc.get("metadata")
+    return metadata if isinstance(metadata, dict) else {}
+
+
 def _resolve_doc_date(doc: dict) -> str | None:
     """Best-effort 'added' date for a document.
 
     Prefers the frontmatter ``date`` (day-precision, set at ingest) and falls
     back to ``modifiedTime`` (file mtime, which can be reset by bulk reindexing).
     """
-    metadata = doc.get("metadata") or {}
-    return metadata.get("date") or doc.get("modifiedTime")
+    return _doc_metadata(doc).get("date") or doc.get("modifiedTime")
 
 
 #: Ranking scores attached by ``include_scores``. ``combined_score`` is the one
@@ -120,7 +133,7 @@ def _resolve_doc_scores(doc: dict) -> dict[str, float]:
     or non-finite is *omitted* rather than emitted as a string or a NaN — callers
     can then treat "key missing" as the single "no score" signal.
     """
-    metadata = doc.get("metadata") or {}
+    metadata = _doc_metadata(doc)
     scores: dict[str, float] = {}
     for field in SCORE_FIELDS:
         raw = metadata.get(field)
@@ -163,6 +176,10 @@ def list_collection_documents(
         False,
         description="Attach each document's ranking scores as floats. Slower — reads every document file.",
     ),
+    include_thumbnails: bool = Query(
+        False,
+        description="Attach each document's frontmatter thumbnail_url when it has one. Slower — reads every document file.",
+    ),
     store: KnowledgeStore = Depends(get_store),
 ):
     """List all documents in a collection with their IDs and URLs.
@@ -177,9 +194,14 @@ def list_collection_documents(
     has, coerced to floats (see ``_resolve_doc_scores``) so callers can rank the
     listing before fetching bodies. Absent/unparseable scores are omitted.
 
-    Both flags read every document file, so they are opt-in to keep the default
-    listing (used by hot paths like duplicate checks) cheap. Setting both still
-    reads each file only once.
+    When ``include_thumbnails`` is set, each entry that has a string
+    ``thumbnail_url`` in its frontmatter carries it (the Vimeo ingest writes
+    one); absent or non-string is omitted, so "key missing" stays the one
+    no-thumbnail signal.
+
+    All three flags read every document file, so they are opt-in to keep the
+    default listing (used by hot paths like duplicate checks) cheap. Setting
+    several still reads each file only once.
     """
     if not store.has_collection(name):
         raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
@@ -201,7 +223,7 @@ def list_collection_documents(
             continue
         seen_ids.add(doc_id)
         doc = {"id": doc_id, "url": doc_url}
-        if include_dates or include_scores:
+        if include_dates or include_scores or include_thumbnails:
             parsed = _read_doc(store, entry.get("documentPath", ""))
             # A document JSON that parses to a list/string is still "unreadable"
             # for our purposes — the resolvers below call ``.get``, so anything
@@ -214,6 +236,10 @@ def list_collection_documents(
                     doc["modifiedTime"] = modified_time
             if include_scores:
                 doc.update(_resolve_doc_scores(raw))
+            if include_thumbnails:
+                thumbnail = _doc_metadata(raw).get("thumbnail_url")
+                if isinstance(thumbnail, str) and thumbnail:
+                    doc["thumbnail_url"] = thumbnail
         documents.append(doc)
 
     return {"documents": documents}
