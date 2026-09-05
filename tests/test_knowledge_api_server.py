@@ -662,6 +662,64 @@ class TestCollectionDocumentDates(_CollectionDocumentsCase):
         assert client.get("/api/collection/nope/documents").status_code == 404
 
 
+class TestCollectionDocumentThumbnails(_CollectionDocumentsCase):
+    """Opt-in ``include_thumbnails`` — the shelf card's picture, off the same
+    one-read-per-document pass the dates use."""
+
+    def _store(self) -> _FakeStore:
+        mapping = {
+            "1": {"documentId": "ai/A.md", "documentUrl": "https://vimeo.com/1",
+                  "documentPath": "vm/documents/ai/A.md.json"},
+            "2": {"documentId": "ai/B.md", "documentUrl": "https://vimeo.com/2",
+                  "documentPath": "vm/documents/ai/B.md.json"},
+            "3": {"documentId": "ai/C.md", "documentUrl": "https://vimeo.com/3",
+                  "documentPath": "vm/documents/ai/C.md.json"},
+        }
+        files = {
+            "vm/indexes/index_document_mapping.json": json.dumps(mapping),
+            "vm/documents/ai/A.md.json": json.dumps(
+                {"metadata": {"date": "2026-09-05", "thumbnail_url": "https://i.vimeocdn.com/video/a.jpg"}}
+            ),
+            # No thumbnail in the frontmatter → the key is OMITTED, not null.
+            "vm/documents/ai/B.md.json": json.dumps({"metadata": {"date": "2026-09-05"}}),
+            # A non-string value is not a thumbnail.
+            "vm/documents/ai/C.md.json": json.dumps({"metadata": {"thumbnail_url": 7}}),
+        }
+        return _FakeStore(files, {"vm"})
+
+    def test_default_listing_has_no_thumbnail(self):
+        client = self._client(self._store())
+        docs = client.get("/api/collection/vm/documents").json()["documents"]
+        assert all("thumbnail_url" not in d for d in docs)
+
+    def test_include_thumbnails_attaches_the_url_when_present(self):
+        client = self._client(self._store())
+        docs = client.get("/api/collection/vm/documents", params={"include_thumbnails": "1"}).json()["documents"]
+        by_id = {d["id"]: d for d in docs}
+        assert by_id["ai/A.md"]["thumbnail_url"] == "https://i.vimeocdn.com/video/a.jpg"
+        assert "thumbnail_url" not in by_id["ai/B.md"]
+        assert "thumbnail_url" not in by_id["ai/C.md"]
+
+    def test_thumbnails_and_dates_share_one_read(self):
+        store = self._store()
+        reads = []
+        real = store.read_text_file
+        def counting(path):
+            reads.append(path)
+            return real(path)
+        store.read_text_file = counting
+        client = self._client(store)
+        docs = client.get(
+            "/api/collection/vm/documents",
+            params={"include_dates": "1", "include_thumbnails": "1"},
+        ).json()["documents"]
+        by_id = {d["id"]: d for d in docs}
+        assert by_id["ai/A.md"]["date"] == "2026-09-05"
+        assert by_id["ai/A.md"]["thumbnail_url"] == "https://i.vimeocdn.com/video/a.jpg"
+        # One mapping read + one read per document, never two per document.
+        assert reads.count("vm/documents/ai/A.md.json") == 1
+
+
 class TestCollectionDocumentScores(_CollectionDocumentsCase):
     """Opt-in score enrichment on /api/collection/{name}/documents."""
 
@@ -2020,6 +2078,10 @@ class TestVimeoIngest:
             "duration_sec": 3180,
             "summary_kind": "standard",
             "summary_lang": "en",
+            "author": "JavaZone",
+            "upload_date": "2026-09-03 12:11:41",
+            "speaker": "Totto - Thor Henning Hetland",
+            "thumbnail_url": "https://i.vimeocdn.com/video/x-1280x720.jpg",
         }
         base.update(over)
         return VimeoIngestRequest(**base)
@@ -2038,6 +2100,11 @@ class TestVimeoIngest:
         # is in which language without re-deriving it.
         assert 'summary_kind: "standard"' in written
         assert 'summary_lang: "en"' in written
+        # v2 PR 2 — what oEmbed knew and the route used to throw away.
+        assert 'author: "JavaZone"' in written
+        assert 'upload_date: "2026-09-03 12:11:41"' in written
+        assert 'speaker: "Totto - Thor Henning Hetland"' in written
+        assert 'thumbnail_url: "https://i.vimeocdn.com/video/x-1280x720.jpg"' in written
         # Bare, not quoted: the reader serves it as a number (see
         # TestVimeoDocumentThroughTheConverter::test_duration_is_a_number_not_a_string).
         assert "duration_sec: 3180" in written
@@ -2079,6 +2146,7 @@ class TestVimeoIngest:
             self._req(
                 caption_lang=None, caption_kind=None, duration_sec=None,
                 summary_kind=None, summary_lang=None,
+                author=None, upload_date=None, speaker=None, thumbnail_url=None,
             ),
             sources_path=str(tmp_path),
         )
@@ -2088,6 +2156,10 @@ class TestVimeoIngest:
         assert "duration_sec:" not in written
         assert "summary_kind:" not in written
         assert "summary_lang:" not in written
+        assert "author:" not in written
+        assert "upload_date:" not in written
+        assert "speaker:" not in written
+        assert "thumbnail_url:" not in written
         assert 'vimeo_video_id: "1223358361"' in written
 
     def test_the_id_key_is_namespaced_against_the_other_video_sources(self, tmp_path):
@@ -2317,6 +2389,10 @@ class TestVimeoDocumentThroughTheConverter:
             "duration_sec": 3220,
             "summary_kind": "talk-notes",
             "summary_lang": "nb",
+            "author": "JavaZone",
+            "upload_date": "2026-09-03 12:11:41",
+            "speaker": "Thor Henning Hetland",
+            "thumbnail_url": "https://i.vimeocdn.com/video/x-1280x720.jpg",
         }
         base.update(over)
         result = ingest_vimeo(VimeoIngestRequest(**base), sources_path=str(tmp_path))
@@ -2357,6 +2433,10 @@ class TestVimeoDocumentThroughTheConverter:
         # over the API, which is the silent half of this contract.
         assert metadata["summary_kind"] == "talk-notes"
         assert metadata["summary_lang"] == "nb"
+        assert metadata["author"] == "JavaZone"
+        assert metadata["upload_date"] == "2026-09-03 12:11:41"
+        assert metadata["speaker"] == "Thor Henning Hetland"
+        assert metadata["thumbnail_url"] == "https://i.vimeocdn.com/video/x-1280x720.jpg"
         for chunk in converted["chunks"]:
             assert chunk["metadata"]["caption_kind"] == "auto"
             assert chunk["metadata"]["vimeo_video_id"] == "1223358361"

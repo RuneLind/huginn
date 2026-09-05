@@ -195,6 +195,15 @@ class VimeoIngestRequest(BaseModel):
     # so neither is derivable from `caption_lang`.
     summary_kind: Optional[str] = None
     summary_lang: Optional[str] = None
+    # What Vimeo's oEmbed said about the video, which the muninn route holds
+    # before a job exists: the account that uploaded it (`author_name`, e.g.
+    # "JavaZone"), its upload timestamp (kept apart from `date`, which is the
+    # CAPTURE day the shelf buckets on), the speaker muninn derives from a
+    # conference account's title convention, and the poster frame.
+    author: Optional[str] = None
+    upload_date: Optional[str] = None
+    speaker: Optional[str] = None
+    thumbnail_url: Optional[str] = None
 
     @field_validator("transcript_markdown")
     @classmethod
@@ -231,6 +240,14 @@ def ingest_vimeo(req: VimeoIngestRequest, *, sources_path: str) -> dict:
         extra["summary_kind"] = req.summary_kind
     if req.summary_lang:
         extra["summary_lang"] = req.summary_lang
+    if req.author:
+        extra["author"] = req.author
+    if req.upload_date:
+        extra["upload_date"] = req.upload_date
+    if req.speaker:
+        extra["speaker"] = req.speaker
+    if req.thumbnail_url:
+        extra["thumbnail_url"] = req.thumbnail_url
     if req.duration_sec is not None:
         # Written as an int, so the writer emits a bare `duration_sec: 3220` and
         # the converter can serve it as a number. A quoted "3220" compares and
@@ -251,6 +268,9 @@ def ingest_vimeo(req: VimeoIngestRequest, *, sources_path: str) -> dict:
         extra_frontmatter=extra or None,
         body_suffix=body_suffix,
     )
+    # The registry contract every author-carrying source keeps (x_articles,
+    # tiktok, articles): the author rides on the response too.
+    result["author"] = req.author
     logger.info(
         f"Vimeo ingest: saved {result['file_path']} "
         f"(vimeo_video_id: {video_id}, category: {result['category']}, "

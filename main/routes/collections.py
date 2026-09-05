@@ -163,6 +163,10 @@ def list_collection_documents(
         False,
         description="Attach each document's ranking scores as floats. Slower — reads every document file.",
     ),
+    include_thumbnails: bool = Query(
+        False,
+        description="Attach each document's frontmatter thumbnail_url when it has one. Slower — reads every document file.",
+    ),
     store: KnowledgeStore = Depends(get_store),
 ):
     """List all documents in a collection with their IDs and URLs.
@@ -177,9 +181,14 @@ def list_collection_documents(
     has, coerced to floats (see ``_resolve_doc_scores``) so callers can rank the
     listing before fetching bodies. Absent/unparseable scores are omitted.
 
-    Both flags read every document file, so they are opt-in to keep the default
-    listing (used by hot paths like duplicate checks) cheap. Setting both still
-    reads each file only once.
+    When ``include_thumbnails`` is set, each entry that has a string
+    ``thumbnail_url`` in its frontmatter carries it (the Vimeo ingest writes
+    one); absent or non-string is omitted, so "key missing" stays the one
+    no-thumbnail signal.
+
+    All three flags read every document file, so they are opt-in to keep the
+    default listing (used by hot paths like duplicate checks) cheap. Setting
+    several still reads each file only once.
     """
     if not store.has_collection(name):
         raise HTTPException(status_code=404, detail=f"Collection '{name}' not found")
@@ -201,7 +210,7 @@ def list_collection_documents(
             continue
         seen_ids.add(doc_id)
         doc = {"id": doc_id, "url": doc_url}
-        if include_dates or include_scores:
+        if include_dates or include_scores or include_thumbnails:
             parsed = _read_doc(store, entry.get("documentPath", ""))
             # A document JSON that parses to a list/string is still "unreadable"
             # for our purposes — the resolvers below call ``.get``, so anything
@@ -214,6 +223,10 @@ def list_collection_documents(
                     doc["modifiedTime"] = modified_time
             if include_scores:
                 doc.update(_resolve_doc_scores(raw))
+            if include_thumbnails:
+                thumbnail = (raw.get("metadata") or {}).get("thumbnail_url")
+                if isinstance(thumbnail, str) and thumbnail:
+                    doc["thumbnail_url"] = thumbnail
         documents.append(doc)
 
     return {"documents": documents}

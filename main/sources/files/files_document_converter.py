@@ -36,8 +36,13 @@ _FRONTMATTER_METADATA_FIELDS = {"wip", "title", "breadcrumb", "space", "page_id"
                                 # verticals, and any of them growing a kind/language picker
                                 # writes these two keys with this meaning. Greped 2026-09-05:
                                 # only the vimeo ingest emits either, and zero of the 809
-                                # markdown files under data/ + huginn-jarvis/data/ carry one.
-                                "summary_kind", "summary_lang"}
+                                # markdown files under data/ and the sister data trees carry one.
+                                "summary_kind", "summary_lang",
+                                # Vimeo v2 PR 2: what oEmbed knew. `author` is ALREADY
+                                # written by the x_articles/tiktok/articles ingests and
+                                # was never served; allowlisting it surfaces theirs too,
+                                # with the same meaning (who published the source).
+                                "author", "upload_date", "speaker", "thumbnail_url"}
 
 #: Metadata fields served as INTEGERS rather than as the strings
 #: ``read_frontmatter`` hands back (it is a line parser, not YAML — every value
