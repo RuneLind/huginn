@@ -61,10 +61,10 @@ logger = logging.getLogger(__name__)
 #: capped it: this string is written to disk whole and then reindexed.
 VIMEO_TRANSCRIPT_MAX_BYTES = 2 * 1024 * 1024
 
-#: Cap on each oEmbed-derived frontmatter field (author, upload_date, speaker,
-#: thumbnail_url). Well above any real value (a Vimeo CDN thumbnail url is
-#: ~80 bytes) and, four of them together, well inside the 8192-character
-#: frontmatter head the readers parse.
+#: Cap on each frontmatter-bound string of the request (see
+#: `_cap_frontmatter_field` for the enumeration). Well above any real value (a
+#: Vimeo CDN thumbnail url is ~80 bytes) and, all of them together at the cap,
+#: inside the 8192-character frontmatter head the readers parse.
 VIMEO_FIELD_MAX_BYTES = 512
 
 #: No leading zero: ``/0123`` and ``/123`` are the same video to Vimeo but two
@@ -211,22 +211,38 @@ class VimeoIngestRequest(BaseModel):
     speaker: Optional[str] = None
     thumbnail_url: Optional[str] = None
 
-    @field_validator("author", "upload_date", "speaker", "thumbnail_url")
+    @field_validator(
+        "date", "caption_lang", "caption_kind", "summary_kind", "summary_lang",
+        "author", "upload_date", "speaker", "thumbnail_url",
+    )
     @classmethod
-    def _cap_oembed_field(cls, value: Optional[str]) -> Optional[str]:
+    def _cap_frontmatter_field(cls, value: Optional[str]) -> Optional[str]:
         # Same reason as the transcript cap, smaller number: these are written
         # VERBATIM into the frontmatter, and `read_frontmatter_from_path` reads
         # only the first 8192 CHARACTERS of a file (`_MAX_HEAD_BYTES` is a
         # text-mode read) — a value that pushes the closing `---` past that
         # makes the overwrite check see no url and fork `Title (2).md` on
-        # every re-ingest, silently. oEmbed values are tens of bytes; the cap
-        # refuses a sender that is not oEmbed. It bounds THESE four fields
-        # only: `title`, `date` and `tags` reach the same frontmatter uncapped
-        # (shared by six verticals via `write_summary`), so the fork is still
-        # reachable through them — a whole-frontmatter bound in the writer is
-        # the follow-up, not this validator.
+        # every re-ingest, silently. Real values are tens of bytes; the cap
+        # refuses a sender that is not muninn. The set above is THE
+        # ENUMERATION of this request's frontmatter-bound strings (measured
+        # 2026-09-05: a 20 000-char value in any one of them forked the
+        # document; `title` is the FILENAME, truncated to 200 chars on its
+        # own, and `summary`/`transcript_markdown` are body). `tags` is capped
+        # per item below; `url` is the dedup key and is bounded by the route
+        # that resolves it. The other five verticals share `write_summary`
+        # and stay uncapped — a whole-frontmatter bound in the writer is the
+        # follow-up for THEM, not for this request.
         if value is not None and len(value.encode("utf-8")) > VIMEO_FIELD_MAX_BYTES:
             raise ValueError(f"field exceeds {VIMEO_FIELD_MAX_BYTES} bytes")
+        return value
+
+    @field_validator("tags")
+    @classmethod
+    def _cap_tags(cls, value: Optional[list[str]]) -> Optional[list[str]]:
+        if value is not None:
+            for tag in value:
+                if len(tag.encode("utf-8")) > VIMEO_FIELD_MAX_BYTES:
+                    raise ValueError(f"tag exceeds {VIMEO_FIELD_MAX_BYTES} bytes")
         return value
 
     @field_validator("transcript_markdown")

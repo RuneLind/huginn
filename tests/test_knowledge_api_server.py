@@ -712,6 +712,16 @@ class TestCollectionDocumentThumbnails(_CollectionDocumentsCase):
         assert "thumbnail_url" not in by_id["ai/E.md"]
         assert len(docs) == 5
 
+    def test_the_listing_reads_metadata_through_the_one_accessor(self):
+        # The mechanical half of `_doc_metadata`'s docstring: a resolver that
+        # reads `metadata` any other way re-opens the string-metadata 500, and
+        # the flag-enumeration test below cannot see a flag it does not know.
+        import inspect
+        from main.routes import collections
+        src = inspect.getsource(collections)
+        assert src.count('.get("metadata")') == 1, "read metadata via _doc_metadata"
+        assert src.count("_doc_metadata(") >= 4  # the def + three resolvers
+
     def test_a_non_dict_metadata_document_never_500s_the_listing_whatever_is_asked_for(self):
         # The three resolvers on the one-read pass share ONE metadata accessor;
         # this is the enumeration of the flags that reach it.
@@ -2189,6 +2199,20 @@ class TestVimeoIngest:
             with pytest.raises(ValidationError):
                 self._req(**{key: "x" * (self._FIELD_CAP + 1)})
             self._req(**{key: "x" * self._FIELD_CAP})  # at the cap: fine
+
+    def test_every_frontmatter_bound_string_on_the_request_is_capped(self):
+        # The enumeration, not a sample: every Optional[str] the request writes
+        # into the frontmatter, and each tag. `title` is the FILENAME (its own
+        # 200-char truncation) and `summary`/`transcript_markdown` are body,
+        # so they are not in this set.
+        from pydantic import ValidationError
+        for key in ("date", "caption_lang", "caption_kind", "summary_kind", "summary_lang",
+                    "author", "upload_date", "speaker", "thumbnail_url"):
+            with pytest.raises(ValidationError, match="exceeds"):
+                self._req(**{key: "x" * (self._FIELD_CAP + 1)})
+        with pytest.raises(ValidationError, match="exceeds"):
+            self._req(tags=["ok", "x" * (self._FIELD_CAP + 1)])
+        self._req(tags=["x" * self._FIELD_CAP])
 
     def test_the_cap_counts_bytes_not_characters(self):
         from pydantic import ValidationError
