@@ -712,6 +712,20 @@ class TestCollectionDocumentThumbnails(_CollectionDocumentsCase):
         assert "thumbnail_url" not in by_id["ai/E.md"]
         assert len(docs) == 5
 
+    def test_a_non_dict_metadata_document_never_500s_the_listing_whatever_is_asked_for(self):
+        # The three resolvers on the one-read pass share ONE metadata accessor;
+        # this is the enumeration of the flags that reach it.
+        client = self._client(self._store())
+        for params in (
+            {"include_dates": "1"},
+            {"include_scores": "1"},
+            {"include_thumbnails": "1"},
+            {"include_dates": "1", "include_scores": "1", "include_thumbnails": "1"},
+        ):
+            res = client.get("/api/collection/vm/documents", params=params)
+            assert res.status_code == 200, params
+            assert {d["id"] for d in res.json()["documents"]} >= {"ai/E.md"}, params
+
     def test_thumbnails_and_dates_share_one_read(self):
         store = self._store()
         reads = []
@@ -2152,19 +2166,37 @@ class TestVimeoIngest:
         written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
         assert "## Transcript" not in written
 
-    def test_the_http_response_carries_author_like_the_other_author_sources(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("VIMEO_SOURCES_PATH", str(tmp_path))
+    def test_the_response_field_set_names_author(self):
+        # The HTTP half is `TestVimeoTranscriptCap::test_the_http_response_carries_author`
+        # (a real POST); this pins the registry tuple the route projects from.
         from main.ingest.registry import INGEST_SOURCES
         vimeo = next(s for s in INGEST_SOURCES if s.name == "vimeo")
         assert "author" in vimeo.response_fields
 
+    #: Spelled out, not imported (the transcript cap's rule): a test that builds
+    #: its boundary from the constant cannot notice the constant moving, and the
+    #: number matters — four of these at the cap must stay well inside the
+    #: 8192-CHARACTER frontmatter head the readers parse.
+    _FIELD_CAP = 512
+
+    def test_the_field_cap_is_the_number_the_frontmatter_head_allows(self):
+        from main.ingest.vimeo import VIMEO_FIELD_MAX_BYTES
+        assert VIMEO_FIELD_MAX_BYTES == self._FIELD_CAP
+
     def test_oembed_fields_are_capped_like_the_transcript(self):
         from pydantic import ValidationError
-        from main.ingest.vimeo import VIMEO_FIELD_MAX_BYTES
         for key in ("author", "upload_date", "speaker", "thumbnail_url"):
             with pytest.raises(ValidationError):
-                self._req(**{key: "x" * (VIMEO_FIELD_MAX_BYTES + 1)})
-            self._req(**{key: "x" * VIMEO_FIELD_MAX_BYTES})  # at the cap: fine
+                self._req(**{key: "x" * (self._FIELD_CAP + 1)})
+            self._req(**{key: "x" * self._FIELD_CAP})  # at the cap: fine
+
+    def test_the_cap_counts_bytes_not_characters(self):
+        from pydantic import ValidationError
+        # "é" is two bytes: 256 of them fit, 257 do not, though both are far
+        # under the cap counted as characters.
+        self._req(speaker="é" * (self._FIELD_CAP // 2))
+        with pytest.raises(ValidationError):
+            self._req(speaker="é" * (self._FIELD_CAP // 2 + 1))
 
     def test_optional_provenance_fields_are_omitted_when_absent(self, tmp_path):
         from main.ingest.vimeo import ingest_vimeo
@@ -2595,6 +2627,17 @@ class TestVimeoTranscriptCap:
     def test_cap_is_muninns_vtt_cap(self):
         from main.ingest.vimeo import VIMEO_TRANSCRIPT_MAX_BYTES
         assert VIMEO_TRANSCRIPT_MAX_BYTES == self._CAP
+
+    def test_the_http_response_carries_author(self, tmp_path):
+        _set_ingest("vimeo", str(tmp_path), None)
+        body = self._client().post("/api/vimeo/ingest", json={**self._body("t"), "author": "JavaZone"}).json()
+        assert body["author"] == "JavaZone"
+        # And null, not absent, when the request carried none — the key is in
+        # the response contract either way.
+        without = self._client().post(
+            "/api/vimeo/ingest", json={**self._body("t"), "url": "https://vimeo.com/1223358362"}
+        ).json()
+        assert "author" in without and without["author"] is None
 
     def test_oversize_transcript_is_refused_with_422(self, tmp_path):
         _set_ingest("vimeo", str(tmp_path), None)

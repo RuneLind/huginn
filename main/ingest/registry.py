@@ -200,8 +200,9 @@ INGEST_SOURCES: list[IngestSource] = [
         collection_help="Collection name for Vimeo summaries",
         operation="Vimeo ingest",
         not_configured_detail="Vimeo sources path not configured (--vimeo-sources-path)",
-        # `author` echoed back like the other author-bearing sources
-        # (x_article, tiktok, article) — null when the request carried none.
+        # `author` echoed back like the other author-bearing sources. Null when
+        # the request carried none — as `article` does; `x_article` requires
+        # one and `tiktok` substitutes "unknown", so only the key is shared.
         response_fields=("file_path", "author", "category", "summary"),
         # The transcript is deliberately out of the similarity query: a talk's
         # captions are 60 kB of speech and would drown the summary's topic.

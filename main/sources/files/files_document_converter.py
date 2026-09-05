@@ -36,9 +36,9 @@ _FRONTMATTER_METADATA_FIELDS = {"wip", "title", "breadcrumb", "space", "page_id"
                                 # verticals, and any of them growing a kind/language picker
                                 # writes these two keys with this meaning. Greped 2026-09-05:
                                 # only the vimeo ingest emits either, and zero of the 809
-                                # markdown files under data/ and the sister wiki tree carry one (the mini,
-# 2026-09-05; the x/tiktok/article source trees live on the laptop and were
-# not in that grep — their `author:` is the one this allowlist now serves).
+                                # markdown files under data/ and the sister wiki tree carry one — on the
+# mini; the x/tiktok/article source trees live on the laptop and were not in
+# that grep, and their `author:` is the one this allowlist now serves.
                                 "summary_kind", "summary_lang",
                                 # Vimeo v2 PR 2: what oEmbed knew. `author` is ALREADY
                                 # written by the x_articles/tiktok/articles ingests and

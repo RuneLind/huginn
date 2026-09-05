@@ -96,18 +96,26 @@ def list_tags(
     return result
 
 
+def _doc_metadata(doc: dict) -> dict:
+    """The document's frontmatter metadata, or ``{}`` when it is not a dict.
+
+    THE one accessor for every resolver on the listing's one-read pass (dates,
+    scores, thumbnails). A document whose ``metadata`` parsed to a string used
+    to 500 the whole listing from whichever resolver touched it first — the
+    class was closed one branch at a time until this, which is the enumeration:
+    a resolver that reads ``doc["metadata"]`` any other way re-opens it.
+    """
+    metadata = doc.get("metadata")
+    return metadata if isinstance(metadata, dict) else {}
+
+
 def _resolve_doc_date(doc: dict) -> str | None:
     """Best-effort 'added' date for a document.
 
     Prefers the frontmatter ``date`` (day-precision, set at ingest) and falls
     back to ``modifiedTime`` (file mtime, which can be reset by bulk reindexing).
     """
-    # Same guard as the thumbnail branch: a document whose `metadata` parsed
-    # to a string used to 500 the whole listing here.
-    metadata = doc.get("metadata")
-    if not isinstance(metadata, dict):
-        metadata = {}
-    return metadata.get("date") or doc.get("modifiedTime")
+    return _doc_metadata(doc).get("date") or doc.get("modifiedTime")
 
 
 #: Ranking scores attached by ``include_scores``. ``combined_score`` is the one
@@ -124,7 +132,7 @@ def _resolve_doc_scores(doc: dict) -> dict[str, float]:
     or non-finite is *omitted* rather than emitted as a string or a NaN — callers
     can then treat "key missing" as the single "no score" signal.
     """
-    metadata = doc.get("metadata") or {}
+    metadata = _doc_metadata(doc)
     scores: dict[str, float] = {}
     for field in SCORE_FIELDS:
         raw = metadata.get(field)
@@ -228,10 +236,7 @@ def list_collection_documents(
             if include_scores:
                 doc.update(_resolve_doc_scores(raw))
             if include_thumbnails:
-                # `metadata` guarded like `raw` above: a document whose metadata
-                # is a string must collapse to the no-op, not 500 the listing.
-                metadata = raw.get("metadata")
-                thumbnail = metadata.get("thumbnail_url") if isinstance(metadata, dict) else None
+                thumbnail = _doc_metadata(raw).get("thumbnail_url")
                 if isinstance(thumbnail, str) and thumbnail:
                     doc["thumbnail_url"] = thumbnail
         documents.append(doc)

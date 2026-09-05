@@ -63,7 +63,8 @@ VIMEO_TRANSCRIPT_MAX_BYTES = 2 * 1024 * 1024
 
 #: Cap on each oEmbed-derived frontmatter field (author, upload_date, speaker,
 #: thumbnail_url). Well above any real value (a Vimeo CDN thumbnail url is
-#: ~80 bytes) and well inside the 8192-byte frontmatter head the readers parse.
+#: ~80 bytes) and, four of them together, well inside the 8192-character
+#: frontmatter head the readers parse.
 VIMEO_FIELD_MAX_BYTES = 512
 
 #: No leading zero: ``/0123`` and ``/123`` are the same video to Vimeo but two
@@ -215,10 +216,15 @@ class VimeoIngestRequest(BaseModel):
     def _cap_oembed_field(cls, value: Optional[str]) -> Optional[str]:
         # Same reason as the transcript cap, smaller number: these are written
         # VERBATIM into the frontmatter, and `read_frontmatter_from_path` reads
-        # only the first 8192 bytes of a file — a value that pushes the closing
-        # `---` past that makes the overwrite check see no url and fork
-        # `Title (2).md` on every re-ingest, silently. oEmbed values are tens
-        # of bytes; the cap refuses a sender that is not oEmbed.
+        # only the first 8192 CHARACTERS of a file (`_MAX_HEAD_BYTES` is a
+        # text-mode read) — a value that pushes the closing `---` past that
+        # makes the overwrite check see no url and fork `Title (2).md` on
+        # every re-ingest, silently. oEmbed values are tens of bytes; the cap
+        # refuses a sender that is not oEmbed. It bounds THESE four fields
+        # only: `title`, `date` and `tags` reach the same frontmatter uncapped
+        # (shared by six verticals via `write_summary`), so the fork is still
+        # reachable through them — a whole-frontmatter bound in the writer is
+        # the follow-up, not this validator.
         if value is not None and len(value.encode("utf-8")) > VIMEO_FIELD_MAX_BYTES:
             raise ValueError(f"field exceeds {VIMEO_FIELD_MAX_BYTES} bytes")
         return value
