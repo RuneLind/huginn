@@ -716,17 +716,22 @@ class TestCollectionDocumentThumbnails(_CollectionDocumentsCase):
         # The mechanical half of `_doc_metadata`'s docstring: a resolver that
         # reads `metadata` any other way re-opens the string-metadata 500, and
         # the flag-enumeration test below cannot see a flag it does not know.
-        import inspect, re
+        import ast, inspect
         from main.routes import collections
-        code = "\n".join(
-            line for line in inspect.getsource(collections).splitlines()
-            if not line.lstrip().startswith("#")
-        )
-        # Every spelling of a metadata read — .get('metadata'), .get("metadata"),
-        # ["metadata"], ['metadata'] — over the code lines; exactly one, the accessor.
-        reads = re.findall(r"""(?:\.get\(\s*['"]metadata['"]\s*\)|\[\s*['"]metadata['"]\s*\])""", code)
-        assert len(reads) == 1, reads
-        assert code.count("_doc_metadata(") >= 4  # the def + three resolvers
+        tree = ast.parse(inspect.getsource(collections))
+        # Over the AST, so prose (comments, docstrings) is invisible and every
+        # spelling is seen: `x.get("metadata")`, `x.get("metadata", {})`,
+        # `x["metadata"]`. Exactly one read site — the accessor.
+        reads = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) and node.slice.value == "metadata":
+                reads.append(ast.unparse(node))
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get"
+                    and node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == "metadata"):
+                reads.append(ast.unparse(node))
+        assert reads == ['doc.get(\'metadata\')'], reads
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "_doc_metadata"]
+        assert len(calls) == 3, len(calls)  # the three resolvers
 
     def test_a_non_dict_metadata_document_never_500s_the_listing_whatever_is_asked_for(self):
         # The three resolvers on the one-read pass share ONE metadata accessor;
@@ -2663,8 +2668,9 @@ class TestVimeoTranscriptCap:
     _HEAD_CAP = 6144
 
     def _near_bound_body(self, tags):
-        # A hashed url, every capped string at its cap, and `tags` distinct
-        # tags: 250 renders under the bound, 400 over it (6773, measured).
+        # A hashed url, three long-but-legal strings, and `tags` distinct tags:
+        # 250 renders 5573 characters (under the bound), 400 renders 6773 (over
+        # it, under the readers' 8192) — both measured.
         return {**self._body("t"), "url": "https://vimeo.com/1223358361?h=" + "a" * 2000,
                 "tags": [f"tag{i}" for i in range(tags)],
                 "speaker": "s" * 500, "author": "a" * 500,

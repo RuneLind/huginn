@@ -25,7 +25,11 @@ from main.utils.frontmatter import escape_frontmatter_value, frontmatter_scalar
 #: Bounding the OUTPUT closes that for every field that reaches the head, on
 #: every vertical that writes through here — url, a numeric field, any number
 #: of tags — where a per-field cap on one request model kept missing one.
-#: 75% of the head: real frontmatter is a few hundred characters.
+#: 75% of the head: real frontmatter is a few hundred characters. Two
+#: residuals, knowingly outside this bound: `main/ingest/jira.py` renders its
+#: own frontmatter and does not pass through here, and
+#: `scripts/cross_collection_gap_analysis.py` reads a 2000-character head of
+#: its own — a document between 2000 and 6144 is invisible to that script.
 FRONTMATTER_MAX_CHARS = 6144
 
 
@@ -53,7 +57,8 @@ def write_summary(
     """Validate + write a summary as categorized markdown.
 
     ``category`` defaults to ``ai/general`` and must be one of ``CATEGORIES``
-    (400 otherwise). ``extra_frontmatter`` keys are emitted between ``url`` and
+    (400 otherwise). A rendered frontmatter over ``FRONTMATTER_MAX_CHARS`` is
+    refused with 413 before anything is written (see the constant). ``extra_frontmatter`` keys are emitted between ``url`` and
     ``category`` in insertion order, so callers control field placement (e.g.
     ``author`` for X/TikTok); an ``int`` value is written BARE (``duration_sec:
     3220``) so the reader can serve it as a number — see ``frontmatter_scalar``.
