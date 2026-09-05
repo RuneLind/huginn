@@ -187,6 +187,14 @@ class VimeoIngestRequest(BaseModel):
     caption_lang: Optional[str] = None  # BCP-47 tag of the chosen track
     caption_kind: Optional[str] = None  # "manual" | "auto"
     duration_sec: Optional[int] = None  # from oEmbed, not the player
+    # The SUMMARY's own provenance, beside the caption's: which of Muninn's
+    # summary kinds wrote the body ("standard" | "deep" | "talk-notes", an open
+    # set — a per-bot preset id lands here verbatim) and the language it was
+    # written in ("nb" | "en" — the RESOLVED language, never the picker's
+    # "talk"). A Norwegian summary of an English talk is a legitimate document,
+    # so neither is derivable from `caption_lang`.
+    summary_kind: Optional[str] = None
+    summary_lang: Optional[str] = None
 
     @field_validator("transcript_markdown")
     @classmethod
@@ -219,6 +227,10 @@ def ingest_vimeo(req: VimeoIngestRequest, *, sources_path: str) -> dict:
         extra["caption_lang"] = req.caption_lang
     if req.caption_kind:
         extra["caption_kind"] = req.caption_kind
+    if req.summary_kind:
+        extra["summary_kind"] = req.summary_kind
+    if req.summary_lang:
+        extra["summary_lang"] = req.summary_lang
     if req.duration_sec is not None:
         # Written as an int, so the writer emits a bare `duration_sec: 3220` and
         # the converter can serve it as a number. A quoted "3220" compares and

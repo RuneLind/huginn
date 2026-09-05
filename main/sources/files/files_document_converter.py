@@ -29,7 +29,10 @@ from main.utils.frontmatter import parse_tags, read_frontmatter, strip_frontmatt
 _FRONTMATTER_METADATA_FIELDS = {"wip", "title", "breadcrumb", "space", "page_id", "session_id", "project", "gitBranch", "tags", "category", "date", "url",
                                 "issue_key", "status", "issue_type", "epic_link", "epic_summary", "labels",
                                 "relevance_score", "combined_score", "engagement_score", "author_score",
-                                "vimeo_video_id", "caption_lang", "caption_kind", "duration_sec"}
+                                "vimeo_video_id", "caption_lang", "caption_kind", "duration_sec",
+                                # The vimeo ingest's summary provenance (kind + resolved
+                                # language) — same writer, same rule as the four above.
+                                "summary_kind", "summary_lang"}
 
 #: Metadata fields served as INTEGERS rather than as the strings
 #: ``read_frontmatter`` hands back (it is a line parser, not YAML — every value
