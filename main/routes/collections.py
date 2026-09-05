@@ -103,7 +103,8 @@ def _doc_metadata(doc: dict) -> dict:
     scores, thumbnails). A document whose ``metadata`` parsed to a string used
     to 500 the whole listing from whichever resolver touched it first — the
     class was closed one branch at a time until this, which is the enumeration:
-    a resolver that reads ``doc["metadata"]`` any other way re-opens it.
+    a resolver that reads the metadata key any other way re-opens it (pinned by
+    a test that counts the read sites in this module).
     """
     metadata = doc.get("metadata")
     return metadata if isinstance(metadata, dict) else {}

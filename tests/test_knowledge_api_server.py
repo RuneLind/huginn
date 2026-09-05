@@ -716,11 +716,17 @@ class TestCollectionDocumentThumbnails(_CollectionDocumentsCase):
         # The mechanical half of `_doc_metadata`'s docstring: a resolver that
         # reads `metadata` any other way re-opens the string-metadata 500, and
         # the flag-enumeration test below cannot see a flag it does not know.
-        import inspect
+        import inspect, re
         from main.routes import collections
-        src = inspect.getsource(collections)
-        assert src.count('.get("metadata")') == 1, "read metadata via _doc_metadata"
-        assert src.count("_doc_metadata(") >= 4  # the def + three resolvers
+        code = "\n".join(
+            line for line in inspect.getsource(collections).splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        # Every spelling of a metadata read — .get('metadata'), .get("metadata"),
+        # ["metadata"], ['metadata'] — over the code lines; exactly one, the accessor.
+        reads = re.findall(r"""(?:\.get\(\s*['"]metadata['"]\s*\)|\[\s*['"]metadata['"]\s*\])""", code)
+        assert len(reads) == 1, reads
+        assert code.count("_doc_metadata(") >= 4  # the def + three resolvers
 
     def test_a_non_dict_metadata_document_never_500s_the_listing_whatever_is_asked_for(self):
         # The three resolvers on the one-read pass share ONE metadata accessor;
@@ -2214,38 +2220,6 @@ class TestVimeoIngest:
             self._req(tags=["ok", "x" * (self._FIELD_CAP + 1)])
         self._req(tags=["x" * self._FIELD_CAP])
 
-    #: The WHOLE-request bound — the property the per-field cap cannot give,
-    #: since `tags` is a list of any length. Spelled out like the others.
-    _FRONTMATTER_CAP = 3072
-
-    def test_the_frontmatter_total_is_bounded_and_the_number_is_pinned(self):
-        from pydantic import ValidationError
-        from main.ingest.vimeo import VIMEO_FRONTMATTER_MAX_BYTES
-        assert VIMEO_FRONTMATTER_MAX_BYTES == self._FRONTMATTER_CAP
-        # Many small tags, each under the per-item cap, over the total.
-        with pytest.raises(ValidationError, match="frontmatter exceeds"):
-            self._req(tags=["x" * 100] * (self._FRONTMATTER_CAP // 100 + 1))
-        # Nine fields each under the per-item cap, over the total.
-        v = "x" * 400
-        with pytest.raises(ValidationError, match="frontmatter exceeds"):
-            self._req(date=v, caption_lang=v, caption_kind=v, summary_kind=v, summary_lang=v,
-                      author=v, upload_date=v, speaker=v, thumbnail_url=v)
-
-    def test_a_request_at_the_total_bound_never_forks_on_reingest(self, tmp_path):
-        # The property itself, in its worst shape: every byte a quote, which
-        # the writer escapes to two characters, so the head is at its fullest.
-        from main.ingest.vimeo import ingest_vimeo
-        from main.utils.frontmatter import read_frontmatter_from_path
-        per = self._FRONTMATTER_CAP // 12  # nine fields + three tags
-        q = '"' * per
-        req = self._req(date=q, caption_lang=q, caption_kind=q, summary_kind=q, summary_lang=q,
-                        author=q, upload_date=q, speaker=q, thumbnail_url=q, tags=[q, q, q])
-        first = ingest_vimeo(req, sources_path=str(tmp_path))
-        second = ingest_vimeo(req, sources_path=str(tmp_path))
-        assert first["file_path"] == second["file_path"]
-        head = read_frontmatter_from_path(str(tmp_path / first["file_path"]))
-        assert head.get("url") == "https://vimeo.com/1223358361"
-
     def test_the_cap_counts_bytes_not_characters(self):
         from pydantic import ValidationError
         # "é" is two bytes: 256 of them fit, 257 do not, though both are far
@@ -2683,6 +2657,59 @@ class TestVimeoTranscriptCap:
     def test_cap_is_muninns_vtt_cap(self):
         from main.ingest.vimeo import VIMEO_TRANSCRIPT_MAX_BYTES
         assert VIMEO_TRANSCRIPT_MAX_BYTES == self._CAP
+
+    #: The rendered frontmatter's bound, spelled out (see `_summary_ingest`):
+    #: 75% of the 8192-character head `read_frontmatter_from_path` parses.
+    _HEAD_CAP = 6144
+
+    def _near_bound_body(self, tags):
+        # A hashed url, every capped string at its cap, and `tags` distinct
+        # tags: 250 renders under the bound, 400 over it (6773, measured).
+        return {**self._body("t"), "url": "https://vimeo.com/1223358361?h=" + "a" * 2000,
+                "tags": [f"tag{i}" for i in range(tags)],
+                "speaker": "s" * 500, "author": "a" * 500,
+                "thumbnail_url": "https://i.vimeocdn.com/" + "x" * 480}
+
+    def test_the_head_cap_is_pinned(self):
+        from main.ingest._summary_ingest import FRONTMATTER_MAX_CHARS
+        assert FRONTMATTER_MAX_CHARS == self._HEAD_CAP
+
+    def test_a_frontmatter_that_would_overrun_the_head_is_refused_413_whatever_carries_it(self, tmp_path):
+        # The OUTPUT is bounded, so the door does not depend on which field is
+        # the long one: url, a numeric field, or many small tags.
+        _set_ingest("vimeo", str(tmp_path), None)
+        client = self._client()
+        long_url = "https://vimeo.com/1223358361?h=" + "a" * 20000
+        assert client.post("/api/vimeo/ingest", json={**self._body("t"), "url": long_url}).status_code == 413
+        # A bare numeric field has no string cap at all: 4000 digits beside a
+        # url that alone is fine.
+        raw = json.dumps({**self._body("t"), "url": "https://vimeo.com/1223358361?h=" + "a" * 2500, "duration_sec": 0})
+        raw = raw.replace('"duration_sec": 0', '"duration_sec": ' + "9" * 4000)
+        assert client.post("/api/vimeo/ingest", content=raw, headers={"content-type": "application/json"}).status_code == 413
+        many = client.post("/api/vimeo/ingest", json={**self._body("t"), "tags": [f"t{i}" for i in range(3000)]})
+        assert many.status_code == 413
+        # And the case that sits BETWEEN the bound and the readers' 8192 head —
+        # every field under its own cap, 6773 rendered characters (measured):
+        # this is the case a raised bound would let through.
+        mid = client.post("/api/vimeo/ingest", json=self._near_bound_body(tags=400))
+        assert mid.status_code == 413, mid.text
+        assert (tmp_path / "ai" / "general").exists() is False or not list((tmp_path / "ai" / "general").glob("*.md"))
+
+    def test_whatever_the_writer_accepts_parses_back_and_never_forks(self, tmp_path):
+        # Just under the bound, with the longest thing a real sender could carry
+        # (a hashed url) and distinct tags: the head still parses, so a
+        # re-ingest lands on the SAME file.
+        from main.utils.frontmatter import read_frontmatter_from_path
+        _set_ingest("vimeo", str(tmp_path), None)
+        client = self._client()
+        body = self._near_bound_body(tags=250)
+        url = body["url"]
+        first = client.post("/api/vimeo/ingest", json=body)
+        assert first.status_code == 200, first.text
+        second = client.post("/api/vimeo/ingest", json=body).json()
+        assert second["file_path"] == first.json()["file_path"]
+        head = read_frontmatter_from_path(str(tmp_path / first.json()["file_path"]))
+        assert head.get("url") == url
 
     def test_the_http_response_carries_author(self, tmp_path):
         _set_ingest("vimeo", str(tmp_path), None)

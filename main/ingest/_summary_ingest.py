@@ -17,6 +17,17 @@ from main.ingest.categories import CATEGORIES
 from main.ingest._markdown_writer import write_categorized_markdown
 from main.utils.frontmatter import escape_frontmatter_value, frontmatter_scalar
 
+#: The rendered frontmatter's bound, in CHARACTERS: `read_frontmatter_from_path`
+#: parses only the first 8192 characters of a file (`_MAX_HEAD_BYTES` is a
+#: text-mode read), and `write_categorized_markdown`'s overwrite check reads the
+#: url through it — a head that overruns it parses to nothing, the check sees
+#: no url, and every re-ingest of the same url forks `Title (2).md`, silently.
+#: Bounding the OUTPUT closes that for every field that reaches the head, on
+#: every vertical that writes through here — url, a numeric field, any number
+#: of tags — where a per-field cap on one request model kept missing one.
+#: 75% of the head: real frontmatter is a few hundred characters.
+FRONTMATTER_MAX_CHARS = 6144
+
 
 def build_summary_tags(category: str, tags: Optional[list[str]]) -> str:
     """Category parts + explicit tags, de-duped, order preserved, comma-joined."""
@@ -79,6 +90,11 @@ def write_summary(
     lines.append(f"tags: {escape_frontmatter_value(tags_str)}")
     lines.append("---")
     frontmatter = "\n".join(lines) + "\n\n"
+    if len(frontmatter) > FRONTMATTER_MAX_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"frontmatter would be {len(frontmatter)} characters; the readers parse {FRONTMATTER_MAX_CHARS}",
+        )
 
     body = summary
     if body_suffix is not None:
