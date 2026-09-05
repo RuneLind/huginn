@@ -30,8 +30,13 @@ _FRONTMATTER_METADATA_FIELDS = {"wip", "title", "breadcrumb", "space", "page_id"
                                 "issue_key", "status", "issue_type", "epic_link", "epic_summary", "labels",
                                 "relevance_score", "combined_score", "engagement_score", "author_score",
                                 "vimeo_video_id", "caption_lang", "caption_kind", "duration_sec",
-                                # The vimeo ingest's summary provenance (kind + resolved
-                                # language) — same writer, same rule as the four above.
+                                # The summary's own provenance — which summary KIND wrote the
+                                # body and the language it is written in. Deliberately NOT
+                                # namespaced under vimeo: `write_summary` is shared by six
+                                # verticals, and any of them growing a kind/language picker
+                                # writes these two keys with this meaning. Greped 2026-09-05:
+                                # only the vimeo ingest emits either, and zero of the 809
+                                # markdown files under data/ + huginn-jarvis/data/ carry one.
                                 "summary_kind", "summary_lang"}
 
 #: Metadata fields served as INTEGERS rather than as the strings
