@@ -2018,6 +2018,8 @@ class TestVimeoIngest:
             "caption_lang": "en-x-autogen",
             "caption_kind": "auto",
             "duration_sec": 3180,
+            "summary_kind": "standard",
+            "summary_lang": "en",
         }
         base.update(over)
         return VimeoIngestRequest(**base)
@@ -2030,6 +2032,12 @@ class TestVimeoIngest:
         assert 'vimeo_video_id: "1223358361"' in written
         assert 'caption_lang: "en-x-autogen"' in written
         assert 'caption_kind: "auto"' in written
+        # The summary's own provenance (Muninn's v2 kind + language picker),
+        # beside the caption's: a Norwegian summary of an English talk is a
+        # legitimate document, and the reader must be able to tell which half
+        # is in which language without re-deriving it.
+        assert 'summary_kind: "standard"' in written
+        assert 'summary_lang: "en"' in written
         # Bare, not quoted: the reader serves it as a number (see
         # TestVimeoDocumentThroughTheConverter::test_duration_is_a_number_not_a_string).
         assert "duration_sec: 3180" in written
@@ -2068,13 +2076,18 @@ class TestVimeoIngest:
     def test_optional_provenance_fields_are_omitted_when_absent(self, tmp_path):
         from main.ingest.vimeo import ingest_vimeo
         result = ingest_vimeo(
-            self._req(caption_lang=None, caption_kind=None, duration_sec=None),
+            self._req(
+                caption_lang=None, caption_kind=None, duration_sec=None,
+                summary_kind=None, summary_lang=None,
+            ),
             sources_path=str(tmp_path),
         )
         written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
         assert "caption_lang:" not in written
         assert "caption_kind:" not in written
         assert "duration_sec:" not in written
+        assert "summary_kind:" not in written
+        assert "summary_lang:" not in written
         assert 'vimeo_video_id: "1223358361"' in written
 
     def test_the_id_key_is_namespaced_against_the_other_video_sources(self, tmp_path):
@@ -2302,6 +2315,8 @@ class TestVimeoDocumentThroughTheConverter:
             "caption_lang": "en-x-autogen",
             "caption_kind": "auto",
             "duration_sec": 3220,
+            "summary_kind": "talk-notes",
+            "summary_lang": "nb",
         }
         base.update(over)
         result = ingest_vimeo(VimeoIngestRequest(**base), sources_path=str(tmp_path))
@@ -2337,9 +2352,15 @@ class TestVimeoDocumentThroughTheConverter:
         assert metadata["vimeo_video_id"] == "1223358361"
         assert metadata["caption_lang"] == "en-x-autogen"
         assert metadata["caption_kind"] == "auto"
+        # The two v2 keys are ALLOWLISTED, not just written: a key the writer
+        # emits and `_FRONTMATTER_METADATA_FIELDS` does not name is invisible
+        # over the API, which is the silent half of this contract.
+        assert metadata["summary_kind"] == "talk-notes"
+        assert metadata["summary_lang"] == "nb"
         for chunk in converted["chunks"]:
             assert chunk["metadata"]["caption_kind"] == "auto"
             assert chunk["metadata"]["vimeo_video_id"] == "1223358361"
+            assert chunk["metadata"]["summary_lang"] == "nb"
 
     def test_a_youtube_video_id_is_not_surfaced_under_vimeos_key(self, tmp_path):
         # `_FRONTMATTER_METADATA_FIELDS` is global: every markdown collection is

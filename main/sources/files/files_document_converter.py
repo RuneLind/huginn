@@ -29,7 +29,15 @@ from main.utils.frontmatter import parse_tags, read_frontmatter, strip_frontmatt
 _FRONTMATTER_METADATA_FIELDS = {"wip", "title", "breadcrumb", "space", "page_id", "session_id", "project", "gitBranch", "tags", "category", "date", "url",
                                 "issue_key", "status", "issue_type", "epic_link", "epic_summary", "labels",
                                 "relevance_score", "combined_score", "engagement_score", "author_score",
-                                "vimeo_video_id", "caption_lang", "caption_kind", "duration_sec"}
+                                "vimeo_video_id", "caption_lang", "caption_kind", "duration_sec",
+                                # The summary's own provenance — which summary KIND wrote the
+                                # body and the language it is written in. Deliberately NOT
+                                # namespaced under vimeo: `write_summary` is shared by six
+                                # verticals, and any of them growing a kind/language picker
+                                # writes these two keys with this meaning. Greped 2026-09-05:
+                                # only the vimeo ingest emits either, and zero of the 809
+                                # markdown files under data/ + huginn-jarvis/data/ carry one.
+                                "summary_kind", "summary_lang"}
 
 #: Metadata fields served as INTEGERS rather than as the strings
 #: ``read_frontmatter`` hands back (it is a line parser, not YAML — every value
