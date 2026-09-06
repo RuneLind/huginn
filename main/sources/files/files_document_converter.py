@@ -163,15 +163,26 @@ class FilesDocumentConverter:
         text = self._MD_IMAGE_RE.sub('', text)
         return self._S3_URL_RE.sub('[file]', text)
 
+    #: An image the document-level text DROPS even though images are kept
+    #: there: a data: URI (a base64 blob that would ride into every
+    #: contextual-prefix prompt and sensitivity-sweep window) or a signed S3
+    #: url (stripped as an image rather than left as a broken ``![x]([file])``).
+    _MD_DROPPED_IMAGE_RE = re.compile(
+        r'!\[[^\]]*\]\(\s*(?:data:|https://[a-zA-Z0-9._-]+\.s3\.[a-zA-Z0-9-]+\.amazonaws\.com/)', re.IGNORECASE)
+
     def _clean_document_text(self, text):
-        """The document-level ``text`` (what ``/api/document`` serves and a
-        reader renders) keeps its images and fenced code — only the chunk text
-        that feeds the embeddings drops them. Muninn's Vimeo captures quote
-        slides as ``![Slide at HH:MM:SS](/api/vimeo/frames/...)``; cleaning
-        ``text`` with the chunk rule erased every one of them from the stored
-        copy while the source .md still had them (measured 2026-09-06).
-        The signed-S3-url replacement stays: that is about the url, not the
-        markdown."""
+        """The document-level ``text`` — what ``/api/document`` serves and a
+        reader renders — keeps ordinary markdown images; the chunk text that
+        feeds the embeddings drops them. Muninn's Vimeo captures quote slides as
+        ``![Slide at HH:MM:SS](/api/vimeo/frames/...)``, and the chunk rule
+        erased every one from the stored copy while the source .md still had
+        them (measured 2026-09-06). Fenced code is still dropped here: ``text``
+        also feeds the contextual-prefix prompt, the sensitivity sweep, the
+        search dedup hash and the graph blurb, and widening what those see is a
+        separate decision."""
+        text = self._CODE_BLOCK_RE.sub('', text)
+        text = self._MD_IMAGE_RE.sub(
+            lambda m: '' if self._MD_DROPPED_IMAGE_RE.match(m.group(0)) else m.group(0), text)
         return self._S3_URL_RE.sub('[file]', text)
 
     def __split_to_chunks(self, document, breadcrumb, fm_metadata=None, is_session=False):

@@ -94,7 +94,8 @@ def test_converter_without_registry_is_byte_identical_to_the_snapshot():
     existed. Covers all three shapes: plain markdown (code-block/image/S3
     stripping), frontmatter with tags + epic_summary (the injected context
     lines), and a session_id document (the is_session splitter path, which keeps
-    code blocks).
+    code blocks). Retaken 2026-09-06 (huginn #128): the document-level ``text``
+    keeps ordinary markdown images now; chunks still drop them.
     """
     expected = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
     actual = {doc_id: normalized(doc) for doc_id, doc in convert_all(alias_registry=None).items()}
@@ -108,6 +109,8 @@ def test_snapshot_covers_all_three_converter_shapes():
     assert "tags:" in expected["tagged.md"]["chunks"][0]["indexedData"]
     assert expected["plain.md"]["text"].count("[file]") == 1        # S3 url stripped
     assert "```" not in expected["plain.md"]["text"]                 # code block stripped
+    assert "![screenshot](img/shot.png)" in expected["plain.md"]["text"]  # image kept in text (#128)
+    assert "![screenshot]" not in json.dumps(expected["plain.md"]["chunks"])  # …but not in chunks
     assert "```bash" in expected["session.md"]["chunks"][0]["indexedData"]  # …but kept for sessions
     assert expected["Team/Sub/Deeper/nested-deep-page.md"]["text"].startswith(
         "[Team > Sub > Deeper > nested-deep-page]")
