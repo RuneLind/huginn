@@ -151,10 +151,23 @@ for _src in INGEST_SOURCES:
 
 
 @router.get("/api/youtube/transcript/{video_id}")
-def youtube_transcript(video_id: str):
-    """Fetch raw YouTube transcript without summarizing. Used by javrvis to get transcript for its own Claude call."""
-    text = fetch_transcript(video_id)
-    return {"video_id": video_id, "transcript": text, "char_count": len(text)}
+def youtube_transcript(video_id: str, timestamps: bool = False):
+    """Fetch raw YouTube transcript without summarizing. Used by muninn to get transcript for its own Claude call.
+
+    ``?timestamps=1`` returns the windowed form instead: ``### [HH:MM:SS]``
+    headings over two-minute windows, the same shape muninn's Vimeo capture
+    ingests. A caller that has to place something at a point in the video — a
+    slide frame, a citation — needs a clock, and the default form has none. The
+    default is unchanged and stays the plain segment-joined string; the
+    ``timestamps`` field echoes the mode that was resolved.
+    """
+    text = fetch_transcript(video_id, timestamps=timestamps)
+    return {
+        "video_id": video_id,
+        "transcript": text,
+        "char_count": len(text),
+        "timestamps": timestamps,
+    }
 
 
 @router.get("/api/youtube/categories")

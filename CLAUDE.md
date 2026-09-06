@@ -77,6 +77,46 @@ Collections live in `data/collections/`. Source documents live in `data/sources/
 
 Check `data/collections/<name>/manifest.json` — confirm `numberOfDocuments` matches expectations and `excludePatterns` show single backslashes in JSON (e.g. `"^\\.excluded/.*"`, not `"^\\\\.excluded/.*"`).
 
+## Fetching a YouTube transcript
+
+`GET /api/youtube/transcript/{video_id}` returns a video's transcript without
+summarizing it — muninn's YouTube and Anthropic captures call it and run their own
+model pass. Answer: `{video_id, transcript, char_count, timestamps}`.
+
+```sh
+curl "http://127.0.0.1:8321/api/youtube/transcript/<video_id>"
+# {"video_id":"<video_id>","transcript":"This is a 3. It's ...","char_count":18430,"timestamps":false}
+
+curl "http://127.0.0.1:8321/api/youtube/transcript/<video_id>?timestamps=1"
+# {"video_id":"<video_id>","transcript":"### [00:00:00]\nThis is a 3. It's ...","char_count":18589,"timestamps":true}
+```
+
+(Both counts measured on one 19-minute video: 10 windows, so +159 characters —
+10 headings of `### [HH:MM:SS]\n` at 15 each, plus 9 of the joining spaces
+widened to a blank line. No transcript text is added or lost.)
+
+- **The default has no clock, deliberately.** `format_transcript_plain` joins the
+  segments with spaces, and that is what every existing caller reads. This response
+  is a cross-repo contract — muninn reads `transcript` out of it — so the default
+  stays byte-identical; `timestamps` is an additive echo of the mode that was
+  resolved, and the query parameter defaults to off.
+- **`?timestamps=1` returns the WINDOWED form**: the segments collapsed into
+  two-minute windows, each headed `### [HH:MM:SS]`
+  (`format_transcript_windows`, `main/fetchers/youtube/youtube_transcript_downloader.py`).
+  Boundaries are absolute (0, 120, 240 …), never relative to the first segment, so
+  two fetches of one video window identically and a cue names one place.
+- **A `###` heading, not a bare bracketed line, and 120 s, not 60.** The heading is
+  what `MarkdownHeadingSplitter` carries into every chunk, so a hit in the middle of
+  a 50-minute talk still cites to the minute — with bare lines only the chunks that
+  happened to start on a boundary would carry a cue. 120 s is muninn's Vimeo window
+  (`DEFAULT_WINDOW_SEC` in its `src/vimeo/vtt.ts`), so a YouTube talk and a Vimeo
+  talk chunk alike.
+- Windows with no text are not emitted, segment text is whitespace-normalised, and
+  out-of-order or negative-start segments fold into their bucket rather than opening
+  a second window with the same cue.
+- A video with no transcript is **422**, an unparseable `timestamps` value **422**
+  (FastAPI's bool parsing: `1`/`true`/`yes`/`on` and their negatives).
+
 ## Deleting a document
 
 `DELETE /api/document/{collection}/{doc_id}` (localFiles collections only) removes a

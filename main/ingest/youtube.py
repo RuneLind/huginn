@@ -11,7 +11,10 @@ from typing import Optional
 from fastapi import HTTPException
 from pydantic import BaseModel
 
-from main.fetchers.youtube.youtube_transcript_downloader import YouTubeTranscriptDownloader
+from main.fetchers.youtube.youtube_transcript_downloader import (
+    YouTubeTranscriptDownloader,
+    format_transcript_windows,
+)
 from main.ingest.categories import CATEGORIES
 from main.ingest._summary_ingest import write_summary
 from main.utils.claude_cli import call_claude
@@ -76,8 +79,14 @@ def _fetch_youtube_title(video_id: str) -> Optional[str]:
         return None
 
 
-def fetch_transcript(video_id_or_url: str) -> str:
-    """Fetch YouTube transcript server-side using YouTubeTranscriptDownloader."""
+def fetch_transcript(video_id_or_url: str, timestamps: bool = False) -> str:
+    """Fetch YouTube transcript server-side using YouTubeTranscriptDownloader.
+
+    ``timestamps=True`` returns the windowed form — ``### [HH:MM:SS]``-headed
+    paragraphs, see :func:`format_transcript_windows` — for a caller that has to
+    place something (a slide frame, a citation) at a point in the video. The
+    default stays the plain segment-joined string every existing caller reads.
+    """
     video_id = _extract_video_id(video_id_or_url)
     downloader = YouTubeTranscriptDownloader(max_retries=3, prefer_languages=["en"])
 
@@ -85,7 +94,12 @@ def fetch_transcript(video_id_or_url: str) -> str:
     if not transcript_data or not transcript_data.get("available"):
         raise HTTPException(status_code=422, detail=f"No transcript available for video {video_id}")
 
-    text = downloader.format_transcript_plain(transcript_data["segments"])
+    segments = transcript_data["segments"]
+    text = (
+        format_transcript_windows(segments)
+        if timestamps
+        else downloader.format_transcript_plain(segments)
+    )
     if not text.strip():
         raise HTTPException(status_code=422, detail="Transcript is empty")
 
