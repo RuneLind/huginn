@@ -3,12 +3,14 @@ YouTube Transcript Downloader - Downloads transcripts using youtube-transcript-a
 
 This module provides functionality to:
 1. Download transcripts for YouTube videos
-2. Format transcripts with timestamps
+2. Format transcripts plain, with per-segment timestamps, or collapsed into
+   ``### [HH:MM:SS]``-headed windows (see ``format_transcript_windows``)
 3. Handle videos without available transcripts
 4. Use browser cookies to avoid rate limiting
 """
 
 import logging
+import math
 from typing import Optional, Dict, List
 from http.cookiejar import CookieJar
 import requests
@@ -20,6 +22,83 @@ from youtube_transcript_api._errors import (
 )
 
 from .retry_utils import execute_with_exponential_backoff
+
+#: Window width for :func:`format_transcript_windows`, in seconds. The same
+#: number muninn's Vimeo capture uses (``DEFAULT_WINDOW_SEC`` in
+#: ``src/vimeo/vtt.ts``) so a YouTube talk and a Vimeo talk chunk alike and a
+#: citation timestamp means the same thing in both collections.
+DEFAULT_WINDOW_SEC = 120
+
+
+def _format_window_timestamp(seconds: float) -> str:
+    """``3661`` → ``01:01:01``. Fixed width, always, unlike
+    :meth:`YouTubeTranscriptDownloader._format_timestamp`.
+
+    The width is the point: these strings become markdown headings that a
+    reader and a citation both parse, and a cue that is ``05:30`` in the first
+    hour and ``01:05:30`` after it cannot be matched by one pattern.
+    """
+    total = int(max(0, math.floor(seconds)))
+    return f"{total // 3600:02d}:{(total % 3600) // 60:02d}:{total % 60:02d}"
+
+
+def format_transcript_windows(
+    segments: List[Dict],
+    window_sec: float = DEFAULT_WINDOW_SEC,
+) -> str:
+    """Collapse caption segments into fixed windows headed by ``### [HH:MM:SS]``.
+
+    A `###` HEADING, not a bare bracketed line, and that is the whole point:
+    the ingested transcript is split by ``MarkdownHeadingSplitter``, which cuts
+    on headings and then on ~1000 characters, and carries the nearest heading
+    into every chunk. With bare lines only the chunks that happened to START on
+    a window boundary would carry a timestamp, so a hit inside a long talk
+    could not be cited to the minute — which is the reason for windowing at all.
+
+    Boundaries are ABSOLUTE (0, 120, 240 …), not relative to the first segment,
+    so two fetches of the same video window identically. Segments are grouped by
+    bucket rather than compared against the previous one: a track whose
+    segments step back in time would otherwise open a SECOND window with the
+    same start, and ``[00:00:00]`` would name two places in the transcript.
+
+    Empty windows are not emitted (a silent stretch is an absent heading, not an
+    empty one), segment text is whitespace-normalised (caption line breaks are
+    layout, and a raw newline inside a window body would read as a new markdown
+    block), and a negative or non-finite start folds into the first window
+    rather than minting a second ``[00:00:00]``.
+
+    Args:
+        segments: ``{"start": float, "text": str, ...}`` items, any order.
+        window_sec: Window width in seconds; must be finite and positive.
+
+    Returns:
+        Windows joined by a blank line, or ``""`` when nothing survives.
+
+    Example:
+        >>> format_transcript_windows([{"start": 0.0, "text": "Hello world"}])
+        '### [00:00:00]\\nHello world'
+    """
+    # `math.inf > 0` is true, and an infinite window makes every bucket nan and
+    # every heading `[nan]`.
+    if not isinstance(window_sec, (int, float)) or not math.isfinite(window_sec) or window_sec <= 0:
+        raise ValueError(f"window_sec must be a finite number > 0, got {window_sec!r}")
+
+    buckets: Dict[float, List[str]] = {}
+    for segment in segments or []:
+        text = " ".join(str(segment.get("text") or "").split())
+        if not text:
+            continue
+        start = segment.get("start", 0) or 0
+        start = float(start)
+        if not math.isfinite(start) or start < 0:
+            start = 0.0
+        bucket = math.floor(start / window_sec) * window_sec
+        buckets.setdefault(bucket, []).append(text)
+
+    return "\n\n".join(
+        f"### [{_format_window_timestamp(start)}]\n{' '.join(parts)}"
+        for start, parts in sorted(buckets.items())
+    )
 
 
 def create_http_client_with_cookies() -> Optional[requests.Session]:

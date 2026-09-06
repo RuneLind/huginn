@@ -77,6 +77,59 @@ Collections live in `data/collections/`. Source documents live in `data/sources/
 
 Check `data/collections/<name>/manifest.json` — confirm `numberOfDocuments` matches expectations and `excludePatterns` show single backslashes in JSON (e.g. `"^\\.excluded/.*"`, not `"^\\\\.excluded/.*"`).
 
+## Fetching a YouTube transcript
+
+`GET /api/youtube/transcript/{video_id}` returns a video's transcript without
+summarizing it — muninn's YouTube and Anthropic captures call it and run their own
+model pass. Answer: `{video_id, transcript, char_count, timestamps}`.
+
+```sh
+curl "http://127.0.0.1:8321/api/youtube/transcript/<video_id>"
+# {"video_id":"<video_id>","transcript":"This is a 3. It's ...","char_count":18430,"timestamps":false}
+
+curl "http://127.0.0.1:8321/api/youtube/transcript/<video_id>?timestamps=1"
+# {"video_id":"<video_id>","transcript":"### [00:00:00]\nThis is a 3. It's ...","char_count":18589,"timestamps":true}
+```
+
+(Both counts measured on one 19-minute video: 10 windows, +159 characters *for that
+track* — 10 headings of `### [HH:MM:SS]\n` at 15 each, plus 9 of the joining spaces
+widened to a blank line. It is not a general formula. The windowed form also
+collapses whitespace runs and drops blank cues, neither of which the plain form
+does, so a track whose cues carry double spaces or tabs comes out shorter than the
+heading bytes alone predict. No transcript WORD is added or dropped; the character
+count is not a conserved quantity.)
+
+- **The default has no clock, deliberately.** `format_transcript_plain` joins the
+  segments with spaces, and that is what every existing caller reads. This response
+  is a cross-repo contract — muninn reads `transcript` out of it — so the default
+  stays byte-identical; `timestamps` is an additive echo of the mode that was
+  resolved, and the query parameter defaults to off.
+- **`?timestamps=1` returns the WINDOWED form**: the segments collapsed into
+  two-minute windows, each headed `### [HH:MM:SS]`
+  (`format_transcript_windows`, `main/fetchers/youtube/youtube_transcript_downloader.py`).
+  Boundaries are absolute (0, 120, 240 …), never relative to the first segment, so
+  two fetches of one video window identically and a cue names one place.
+- **A `###` heading, not a bare bracketed line, and 120 s, not 60** — the reasons
+  live once, beside the code: `format_transcript_windows`'s docstring for the
+  heading, `DEFAULT_WINDOW_SEC`'s comment for the width.
+- Windows with no text are not emitted, each segment's whitespace runs (double
+  spaces, tabs, line breaks) collapse to single spaces, and out-of-order or
+  negative-start segments fold into their bucket rather than opening a second window
+  with the same cue. The collapsing is a deliberate divergence from muninn's
+  `parseVttCues` (`src/vimeo/vtt.ts`), which trims each of a cue's lines and joins
+  them with one space: a line BREAK collapses on both sides, but a run *inside* a
+  line survives there and is collapsed here.
+- A video with no transcript is **422**, a segment with a `start` that `float()`
+  cannot read is **422** (a `start` of some other shape entirely — a list, say — is
+  a TypeError and a 500), and an empty or unparseable `timestamps` value is **422**
+  — send the parameter only when you mean it (FastAPI's bool parsing:
+  `1`/`true`/`yes`/`on` and their negatives). The windowing 422 is raised from a
+  `try` around `format_transcript_windows` alone and catches `ValueError` only, so a
+  failure in the download half is never dressed up as a windowing failure (today
+  `download_transcript` catches everything itself and the route answers "No
+  transcript available"; the narrow `try` keeps that true should that catch ever
+  narrow, since a `requests` `JSONDecodeError` is a `ValueError` too).
+
 ## Deleting a document
 
 `DELETE /api/document/{collection}/{doc_id}` (localFiles collections only) removes a
