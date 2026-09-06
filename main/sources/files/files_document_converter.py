@@ -1,5 +1,6 @@
 import os
 import re
+import unicodedata
 from urllib.parse import urlsplit
 
 from main.privacy.alias_registry import ALIAS_CHANGED_KEY
@@ -74,6 +75,10 @@ def _coerce_int(value):
         return int(str(value).strip())
     except (TypeError, ValueError):
         return None
+
+
+#: Unicode categories a stored image destination may not contain.
+_NON_PRINTABLE = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
 
 class FilesDocumentConverter:
@@ -175,10 +180,13 @@ class FilesDocumentConverter:
     #: set — unicode word characters and caption punctuation — and the whole
     #: alt at most 80; no token is scheme-shaped. No ``/``, ``?``, ``&``,
     #: ``;``, ``=``, ``#``, tab or line break is in the set, so no url or blob
-    #: can be spelled, and the 20-character token bound is shorter than any
-    #: API-token class (a JWT, ``ghp_…``, ``sk-…`` are 40+ characters of that
-    #: alphabet, which a 200-character free bound admitted — measured).
-    #: ``Slide at 00:01:33`` and ``Diagram: the 3-step loop`` pass.
+    #: can be spelled. The RESIDUAL, stated exactly: up to 80 characters of
+    #: that alphabet in words of ≤20 survive — an AWS access key id (20 chars)
+    #: or a 16-hex secret fits in one word, and a longer secret split into
+    #: 20-char words fits in four; a JWT, ``ghp_…`` or ``sk-…`` token (40+
+    #: chars, unsplit) does not. Accepted: a caption is free text and cannot
+    #: be told from a short token by shape. ``Slide at 00:01:33`` and
+    #: ``Diagram: the 3-step loop`` pass.
     _ALT_TOKEN_RE = re.compile(r"\A(?![a-z][a-z0-9+.\-]*:\S)[\w.,:!'\u2019()\-\u2013\u2014\u2026]{1,20}\Z", re.IGNORECASE)
     _ALT_MAX = 80
     #: IDNA label separators besides ``.`` — a host spelled with one resolves
@@ -228,9 +236,10 @@ class FilesDocumentConverter:
             return None
         alt = cls._plain_alt(m.group(1))
         dest = (m.group(2) if m.group(2) is not None else m.group(3)).strip()
-        # A destination is bounded and printable: a 100 KB base64 path or a
-        # NUL byte is dropped, not stored.
-        if len(dest) > cls._DEST_MAX or any(ord(c) < 0x20 or ord(c) == 0x7f for c in dest):
+        # A destination is bounded and printable: a 100 KB base64 path, a NUL
+        # or DEL, a C1 control, a bidi override or a zero-width character
+        # (categories Cc/Cf/Zl/Zp) is dropped, not stored.
+        if len(dest) > cls._DEST_MAX or any(unicodedata.category(c) in _NON_PRINTABLE for c in dest):
             return None
         # After the destination only a title or the close may follow: a stray
         # ``>`` (``<a>b.png>``) or a bare token (``<a.png> extra``) is dropped
@@ -250,7 +259,10 @@ class FilesDocumentConverter:
             # Userinfo is the authority's credential slot: never re-emitted.
             if "@" in parts.netloc:
                 return None
-            host = (parts.hostname or "").translate(cls._IDNA_DOTS).rstrip(".").lower()
+            # NFKC folds fullwidth letters. The format characters IDNA ignores
+            # (soft hyphen, ZWSP, BOM) never reach here: the printable gate
+            # above drops every Cf character in the destination.
+            host = unicodedata.normalize("NFKC", parts.hostname or "").translate(cls._IDNA_DOTS).rstrip(".").lower()
             if host == "amazonaws.com" or host.endswith(".amazonaws.com"):
                 return None
         # ``;params`` ride in the PATH for urlsplit; a credential there counts.

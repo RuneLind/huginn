@@ -283,6 +283,13 @@ class TestNormalChunking:
         "https://bucket\uff0es3\uff0eamazonaws\uff0ecom/k.png",
         "https://x.com/" + "A" * 2100 + ".png",
         "https://exa\x00mple.com/k.png",
+        "https://example.com/k\x7f.png",
+        "https://example.com/k\x85.png",
+        "https://example.com/\u202ek.png",
+        "https://example.com/k\u200b.png",
+        "https://bucket.s3.\uff41\uff4d\uff41\uff5a\uff4f\uff4e\uff41\uff57\uff53.com/k.png",
+        "https://bucket.s3.amazon\u00adaws.com/k.png",
+        "https://bucket.s3.ama\u200bzonaws.com/k.png",
     ]
     KEPT_IMAGE_DESTS = [
         "/api/vimeo/frames/123/93.jpg",
