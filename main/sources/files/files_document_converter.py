@@ -164,56 +164,68 @@ class FilesDocumentConverter:
         text = self._MD_IMAGE_RE.sub('', text)
         return self._S3_URL_RE.sub('[file]', text)
 
-    #: The destination of a markdown image: ``(<dest>)`` or ``(dest "title")``.
-    _MD_IMAGE_DEST_RE = re.compile(r'!\[[^\]]*\]\(\s*(?:<([^>]*)>|([^)\s]*))')
-    _URL_SCHEME_RE = re.compile(r'^([a-zA-Z][a-zA-Z0-9+.\-]*):')
-
+    #: A markdown image, split: alt text, destination (``<dest>`` or the first
+    #: token), and whatever follows (a title) — which is never re-emitted.
+    _MD_IMAGE_PARTS_RE = re.compile(r'!\[([^\]]*)\]\(\s*(?:<([^>]*)>|([^)\s]*))')
     #: Query keys that carry a credential: AWS SigV4/V2, CloudFront, Google
-    #: Cloud Storage and Azure SAS. Matched as ``key=`` prefixes after ``?``/``&``.
-    _SIGNED_QUERY_RE = re.compile(r'(?:^|&)(?:x-amz-[^=&]*|signature|sig|x-goog-[^=&]*|key-pair-id)=', re.IGNORECASE)
+    #: Cloud Storage and Azure SAS. Matched as ``key=`` after ``?``, ``&`` or ``;``.
+    _SIGNED_QUERY_RE = re.compile(r'(?:^|[&;])(?:x-amz-[^=&;]*|signature|sig|x-goog-[^=&;]*|key-pair-id)=', re.IGNORECASE)
+    #: Alt text the document-level text keeps verbatim: bounded, no leading
+    #: scheme (``data:…`` — a word, a colon, then a non-space), no ``://`` and no query/fragment character, so
+    #: nothing url-shaped — a ``data:`` blob, a signed url — can ride in
+    #: through the alt channel. A clock (``Slide at 00:01:33``) is fine.
+    _PLAIN_ALT_RE = re.compile(r'^(?![a-z][a-z0-9+.\-]*:\S)(?!.*://)[^?&;=#]{0,200}$', re.IGNORECASE)
 
     @classmethod
-    def _image_kept_in_document_text(cls, image_markdown):
-        """A WHITELIST over the destination — the document-level text keeps an
-        image whose destination is a relative path, or a url on a plain http(s)
-        host, and whose query carries no credential. The state space, enumerated
-        (scheme × authority × host × query), because two blacklists in a row
-        each missed a shape:
+    def _document_text_image(cls, image_markdown):
+        """What the document-level text keeps of a markdown image: ``None`` to
+        drop it, else a NORMALIZED ``![alt](dest)`` — the title is never
+        re-emitted, the alt is kept only when ``_PLAIN_ALT_RE`` accepts it, and
+        the destination must pass a WHITELIST. Every channel of the image is
+        therefore bounded, not just the destination: a round that judged the
+        destination and re-emitted the whole match let a signature ride in
+        through the title and a base64 blob through the alt.
+
+        The destination whitelist, decided over scheme × authority × host ×
+        query with ``urlsplit`` (a ``ValueError`` from it drops the image):
 
         * no scheme, no authority (``img/a.png``, ``/api/x.jpg``) — kept unless
           the query is signed;
         * an authority — protocol-relative ``//host/…`` or ``http(s)://host/…``
           — kept unless the host (trailing dot stripped) is ``amazonaws.com``
           or under it, or the query is signed;
-        * ``http(s):`` with NO authority (``https:example.com/k.png``, legal
-          RFC 3986) — dropped: not a plain url, and the previous parser crashed
-          on it;
+        * ``http(s):`` with NO authority (``https:example.com/k.png`` — generic
+          URI syntax, not an http url) — dropped; a previous parser crashed on it;
         * any other scheme (``data:``, ``javascript:``, ``ftp:``) — dropped; a
           ``data:`` blob would ride into every contextual-prefix prompt and
           sensitivity-sweep window.
 
-        ``urlsplit`` does the parsing (a ``ValueError`` drops the image), so an
-        angle-bracket ``<dest>``, a userinfo ``@``, a port and a trailing-dot
-        FQDN are handled by it rather than by string splitting."""
-        m = cls._MD_IMAGE_DEST_RE.match(image_markdown)
-        dest = ((m.group(1) if m.group(1) is not None else m.group(2)) if m else "").strip()
+        A signature in the FRAGMENT is not a credential the server ever sees
+        and is kept."""
+        m = cls._MD_IMAGE_PARTS_RE.match(image_markdown)
+        if not m:
+            return None
+        alt = m.group(1)
+        dest = (m.group(2) if m.group(2) is not None else m.group(3)).strip()
         try:
             parts = urlsplit(dest)
         except ValueError:
-            return False
+            return None
         scheme = parts.scheme.lower()
         if scheme and scheme not in ("http", "https"):
-            return False
+            return None
         if scheme and not parts.netloc:
-            return False
+            return None
         if parts.netloc:
-            try:
-                host = (parts.hostname or "").rstrip(".").lower()
-            except ValueError:
-                return False
+            host = (parts.hostname or "").rstrip(".").lower()
             if host == "amazonaws.com" or host.endswith(".amazonaws.com"):
-                return False
-        return cls._SIGNED_QUERY_RE.search(parts.query) is None
+                return None
+        if cls._SIGNED_QUERY_RE.search(parts.query) is not None:
+            return None
+        if not cls._PLAIN_ALT_RE.match(alt):
+            alt = ""
+        # The angle-bracket form is what lets a destination carry a space.
+        return f"![{alt}](<{dest}>)" if m.group(2) is not None else f"![{alt}]({dest})"
 
     def _clean_document_text(self, text):
         """The document-level ``text`` — what ``/api/document`` serves and a
@@ -221,14 +233,14 @@ class FilesDocumentConverter:
         feeds the embeddings drops them. Muninn's Vimeo captures quote slides as
         ``![Slide at HH:MM:SS](/api/vimeo/frames/...)``, and the chunk rule
         erased every one from the stored copy while the source .md still had
-        them (measured 2026-09-06). Which images: ``_image_kept_in_document_text``,
-        a whitelist. Fenced code is still dropped here: ``text``
+        them (measured 2026-09-06). Which images, and re-emitted how:
+        ``_document_text_image``. Fenced code is still dropped here: ``text``
         also feeds the contextual-prefix prompt, the sensitivity sweep, the
         search dedup hash and the graph blurb, and widening what those see is a
         separate decision."""
         text = self._CODE_BLOCK_RE.sub('', text)
         text = self._MD_IMAGE_RE.sub(
-            lambda m: m.group(0) if self._image_kept_in_document_text(m.group(0)) else '', text)
+            lambda m: self._document_text_image(m.group(0)) or '', text)
         return self._S3_URL_RE.sub('[file]', text)
 
     def __split_to_chunks(self, document, breadcrumb, fm_metadata=None, is_session=False):

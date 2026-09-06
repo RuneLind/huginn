@@ -269,6 +269,7 @@ class TestNormalChunking:
         "https:example.com/k.png",
         "http:/k.png",
         "https:",
+        "https://cdn.example.com/k.png?a=1;sig=SECRET",
     ]
     KEPT_IMAGE_DESTS = [
         "/api/vimeo/frames/123/93.jpg",
@@ -295,9 +296,34 @@ class TestNormalChunking:
         assert f"![x]({dest})" in results[0]["text"]
         assert "![x]" not in " ".join(c["indexedData"] for c in results[0]["chunks"])
 
-    def test_document_text_image_with_title_is_kept_whole(self, converter, make_doc):
-        results = converter.convert(make_doc(content_texts=['A ![x](img/a.png "Title") B']))
-        assert '![x](img/a.png "Title")' in results[0]["text"]
+    @pytest.mark.parametrize("image", [
+        '![x](img/a.png "Title")',
+        '![x](img/a.png "https://bucket.s3.amazonaws.com/k.png?X-Amz-Signature=SIG&X-Amz-Credential=AKIA")',
+        '![x](img/a.png "data:image/png;base64,AAAABBBB")',
+    ])
+    def test_document_text_image_is_re_emitted_without_its_title(self, converter, make_doc, image):
+        results = converter.convert(make_doc(content_texts=[f"A {image} B"]))
+        assert results[0]["text"].endswith("A ![x](img/a.png) B"), results[0]["text"]
+
+    def test_document_text_angle_bracket_destination_keeps_its_brackets(self, converter, make_doc):
+        results = converter.convert(make_doc(content_texts=['A ![x](<img/a b.png> "T") B']))
+        assert results[0]["text"].endswith("A ![x](<img/a b.png>) B"), results[0]["text"]
+
+    @pytest.mark.parametrize("alt,kept_alt", [
+        ("Slide at 00:01:33", "Slide at 00:01:33"),
+        ("Diagram: the 3-step loop", "Diagram: the 3-step loop"),
+        ("", ""),
+        ("see https://example.com/x", ""),
+        ("data:image/png;base64,AAAABBBB", ""),
+        ("data:text/plain,AAAABBBB", ""),
+        ("javascript:alert", ""),
+        ("https://bucket.s3.amazonaws.com/k.png?X-Amz-Signature=SIG", ""),
+        ("a" * 201, ""),
+        ("a=b", ""),
+    ])
+    def test_document_text_image_alt_is_plain_or_emptied(self, converter, make_doc, alt, kept_alt):
+        results = converter.convert(make_doc(content_texts=[f"A ![{alt}](img/a.png) B"]))
+        assert results[0]["text"].endswith(f"A ![{kept_alt}](img/a.png) B"), results[0]["text"]
 
 class TestHeadingAwareChunking:
     def test_markdown_with_headings_produces_heading_key(self, converter, make_doc):
