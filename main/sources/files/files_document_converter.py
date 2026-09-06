@@ -1,5 +1,6 @@
 import os
 import re
+from urllib.parse import urlsplit
 
 from main.privacy.alias_registry import ALIAS_CHANGED_KEY
 from main.sources.files.markdown_heading_splitter import MarkdownHeadingSplitter
@@ -167,32 +168,52 @@ class FilesDocumentConverter:
     _MD_IMAGE_DEST_RE = re.compile(r'!\[[^\]]*\]\(\s*(?:<([^>]*)>|([^)\s]*))')
     _URL_SCHEME_RE = re.compile(r'^([a-zA-Z][a-zA-Z0-9+.\-]*):')
 
+    #: Query keys that carry a credential: AWS SigV4/V2, CloudFront, Google
+    #: Cloud Storage and Azure SAS. Matched as ``key=`` prefixes after ``?``/``&``.
+    _SIGNED_QUERY_RE = re.compile(r'(?:^|&)(?:x-amz-[^=&]*|signature|sig|x-goog-[^=&]*|key-pair-id)=', re.IGNORECASE)
+
     @classmethod
     def _image_kept_in_document_text(cls, image_markdown):
-        """A WHITELIST over the destination — an image the document-level text
-        keeps is a relative path or a plain http(s) url. Everything else is
-        dropped: a ``data:`` URI (a base64 blob that would ride into every
-        contextual-prefix prompt and sensitivity-sweep window), any other
-        scheme, any ``amazonaws.com`` host in any of S3's addressing forms
-        (virtual-hosted, path-style, global, dualstack, access point, http),
-        and any url whose query carries a signature (``X-Amz-``,
-        ``Signature=``). A hostname blacklist was measured to let 5 of 6 signed
-        S3 forms and every ``<data:…>`` angle-bracket destination through."""
+        """A WHITELIST over the destination — the document-level text keeps an
+        image whose destination is a relative path, or a url on a plain http(s)
+        host, and whose query carries no credential. The state space, enumerated
+        (scheme × authority × host × query), because two blacklists in a row
+        each missed a shape:
+
+        * no scheme, no authority (``img/a.png``, ``/api/x.jpg``) — kept unless
+          the query is signed;
+        * an authority — protocol-relative ``//host/…`` or ``http(s)://host/…``
+          — kept unless the host (trailing dot stripped) is ``amazonaws.com``
+          or under it, or the query is signed;
+        * ``http(s):`` with NO authority (``https:example.com/k.png``, legal
+          RFC 3986) — dropped: not a plain url, and the previous parser crashed
+          on it;
+        * any other scheme (``data:``, ``javascript:``, ``ftp:``) — dropped; a
+          ``data:`` blob would ride into every contextual-prefix prompt and
+          sensitivity-sweep window.
+
+        ``urlsplit`` does the parsing (a ``ValueError`` drops the image), so an
+        angle-bracket ``<dest>``, a userinfo ``@``, a port and a trailing-dot
+        FQDN are handled by it rather than by string splitting."""
         m = cls._MD_IMAGE_DEST_RE.match(image_markdown)
-        if not m:
+        dest = ((m.group(1) if m.group(1) is not None else m.group(2)) if m else "").strip()
+        try:
+            parts = urlsplit(dest)
+        except ValueError:
             return False
-        dest = (m.group(1) if m.group(1) is not None else m.group(2)).strip()
-        scheme = cls._URL_SCHEME_RE.match(dest)
-        if scheme is None:
-            return True
-        if scheme.group(1).lower() not in ("http", "https"):
+        scheme = parts.scheme.lower()
+        if scheme and scheme not in ("http", "https"):
             return False
-        lowered = dest.lower()
-        host = lowered.split("://", 1)[1].split("/", 1)[0].split("?", 1)[0].split("@")[-1].split(":")[0]
-        if host == "amazonaws.com" or host.endswith(".amazonaws.com"):
+        if scheme and not parts.netloc:
             return False
-        query = lowered.split("?", 1)[1] if "?" in lowered else ""
-        return "x-amz-" not in query and "signature=" not in query
+        if parts.netloc:
+            try:
+                host = (parts.hostname or "").rstrip(".").lower()
+            except ValueError:
+                return False
+            if host == "amazonaws.com" or host.endswith(".amazonaws.com"):
+                return False
+        return cls._SIGNED_QUERY_RE.search(parts.query) is None
 
     def _clean_document_text(self, text):
         """The document-level ``text`` — what ``/api/document`` serves and a

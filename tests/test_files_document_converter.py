@@ -257,6 +257,18 @@ class TestNormalChunking:
         "https://ap-1.s3-accesspoint.us-west-2.amazonaws.com/k.png",
         "https://cdn.example.com/k.png?X-Amz-Signature=SIG",
         "https://cdn.example.com/k.png?Signature=SIG&Expires=1",
+        "//bucket.s3.amazonaws.com/k.png",
+        "//cdn.example.com/k.png?Signature=SEC",
+        "/proxy/img?X-Amz-Signature=SIG",
+        "https://bucket.s3.amazonaws.com./k.png",
+        "https://example.com@bucket.s3.amazonaws.com/k.png",
+        "https://bucket.s3.amazonaws.com:443/k.png",
+        "https://cdn.example.com/k.png?sv=1&sig=SECRET",
+        "https://cdn.example.com/k.png?X-Goog-Signature=SIG",
+        "https://cdn.example.com/k.png?Key-Pair-Id=K&Policy=P",
+        "https:example.com/k.png",
+        "http:/k.png",
+        "https:",
     ]
     KEPT_IMAGE_DESTS = [
         "/api/vimeo/frames/123/93.jpg",
@@ -267,6 +279,9 @@ class TestNormalChunking:
         "http://example.com/logo.png",
         "https://example.com/logo.png?v=2",
         "https://notamazonaws.com/k.png",
+        "//cdn.example.com/k.png",
+        "https://example.com/k.png?design=sig",
+        "https://example.com/k.png#Signature=SIG",
     ]
 
     @pytest.mark.parametrize("dest", DROPPED_IMAGE_DESTS)
