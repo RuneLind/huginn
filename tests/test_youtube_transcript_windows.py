@@ -250,6 +250,20 @@ class TestYouTubeTranscriptRoute:
         assert response.status_code == 422
         assert "abc" in response.json()["detail"]
 
+    def test_a_list_shaped_segment_start_is_not_a_422(self, monkeypatch):
+        # The catch is ValueError only. `float([1, 2])` is a TypeError — a
+        # programming error, not bad input — and it propagates (a 500 in
+        # front of a real server) rather than being dressed up as a 422.
+        # Pins the WIDTH of the catch; `except Exception` here turns this
+        # into a 422 and makes the documented contract false.
+        import main.ingest.youtube as yt
+        monkeypatch.setattr(
+            yt, "YouTubeTranscriptDownloader",
+            _fake_downloader([{"start": [1, 2], "duration": 2.0, "text": "hello"}]),
+        )
+        with pytest.raises(TypeError):
+            self._get({"timestamps": "1"})
+
     def test_an_unexpected_download_error_propagates_unchanged(self, monkeypatch):
         # The existing contract for a download that blows up, pinned so the
         # ValueError case below is measured against what this route already

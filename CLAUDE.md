@@ -124,9 +124,11 @@ count is not a conserved quantity.)
   a TypeError and a 500), and an empty or unparseable `timestamps` value is **422**
   — send the parameter only when you mean it (FastAPI's bool parsing:
   `1`/`true`/`yes`/`on` and their negatives). The windowing 422 is raised from a
-  `try` around `format_transcript_windows` alone, so a failure in the download half
-  — a `requests` `JSONDecodeError` is a `ValueError` too — is never dressed up as a
-  windowing failure.
+  `try` around `format_transcript_windows` alone and catches `ValueError` only, so a
+  failure in the download half is never dressed up as a windowing failure (today
+  `download_transcript` catches everything itself and the route answers "No
+  transcript available"; the narrow `try` keeps that true should that catch ever
+  narrow, since a `requests` `JSONDecodeError` is a `ValueError` too).
 
 ## Deleting a document
 

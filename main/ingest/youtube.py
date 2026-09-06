@@ -99,13 +99,17 @@ def fetch_transcript(video_id_or_url: str, timestamps: bool = False) -> str:
         try:
             text = format_transcript_windows(segments)
         except ValueError as exc:
-            # Scoped to this one call. `format_transcript_windows` reads each
-            # segment's `start` as a number and raises when the track carries
-            # something else, which is bad input and answers 422 like every
-            # other bad input on this path. The download half above raises
-            # ValueError too — a `requests` JSONDecodeError is one — and a
-            # `try` wide enough to cover it would report a dead network as a
-            # windowing failure, on the plain path as well as this one.
+            # Scoped to this one call, and to ValueError only: `float()` on a
+            # `start` it cannot read is bad input and answers 422 like every
+            # other bad input on this path, while a `start` of another shape
+            # entirely (a list) is a TypeError — a programming error, left to
+            # propagate. The download half above answers for itself today
+            # (`download_transcript` catches everything and returns None, so
+            # the route says "No transcript available"); the narrow `try` is
+            # what keeps that true if that catch is ever narrowed, since a
+            # `requests` JSONDecodeError is a ValueError and a `try` wide
+            # enough to cover it would report a dead network as a windowing
+            # failure, on the plain path as well as this one.
             raise HTTPException(
                 status_code=422, detail=f"Transcript could not be windowed: {exc}"
             ) from exc

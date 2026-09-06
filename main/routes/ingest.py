@@ -168,9 +168,11 @@ def youtube_transcript(
     The default is unchanged and stays the plain segment-joined string; the
     ``timestamps`` field echoes the mode that was resolved.
 
-    A track whose ``start`` is not a number is a 422; ``fetch_transcript``
-    raises that itself, from a ``try`` around the windowing call alone, so a
-    failure in the download half keeps whatever answer it has always had.
+    A track with a ``start`` that ``float()`` cannot read is a 422 (a ``start``
+    of another shape entirely, a list say, is a TypeError and a 500);
+    ``fetch_transcript`` raises the 422 itself, from a ``try`` around the
+    windowing call alone, so a failure in the download half keeps whatever
+    answer it has always had.
     """
     text = fetch_transcript(video_id, timestamps=timestamps)
     return {
