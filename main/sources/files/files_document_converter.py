@@ -77,7 +77,11 @@ def _coerce_int(value):
         return None
 
 
-#: Unicode categories a stored image destination may not contain.
+#: Unicode categories a stored image destination may not contain. Cc and Cf
+#: are the load-bearing two; Zl/Zp (U+2028/9) and the C1 control U+0085 are
+#: ``\s`` to ``re`` and already truncate the destination in
+#: ``_MD_IMAGE_PARTS_RE`` before this gate runs — listed for the reader, not
+#: for the check.
 _NON_PRINTABLE = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
 
@@ -180,13 +184,13 @@ class FilesDocumentConverter:
     #: set — unicode word characters and caption punctuation — and the whole
     #: alt at most 80; no token is scheme-shaped. No ``/``, ``?``, ``&``,
     #: ``;``, ``=``, ``#``, tab or line break is in the set, so no url or blob
-    #: can be spelled. The RESIDUAL, stated exactly: up to 80 characters of
-    #: that alphabet in words of ≤20 survive — an AWS access key id (20 chars)
-    #: or a 16-hex secret fits in one word, and a longer secret split into
-    #: 20-char words fits in four; a JWT, ``ghp_…`` or ``sk-…`` token (40+
-    #: chars, unsplit) does not. Accepted: a caption is free text and cannot
-    #: be told from a short token by shape. ``Slide at 00:01:33`` and
-    #: ``Diagram: the 3-step loop`` pass.
+    #: can be spelled. The RESIDUAL, stated exactly (separators count toward
+    #: the 80): at most 77 characters of that alphabet survive, as four words
+    #: of 20+20+20+17 — an AWS access key id (20 chars) or a 16-hex secret
+    #: fits one word; a JWT, ``ghp_…`` or ``sk-…`` token (40+ chars, unsplit)
+    #: does not. Accepted: a caption is free text and cannot be told from a
+    #: short token by shape. ``Slide at 00:01:33`` and ``Diagram: the 3-step
+    #: loop`` pass.
     _ALT_TOKEN_RE = re.compile(r"\A(?![a-z][a-z0-9+.\-]*:\S)[\w.,:!'\u2019()\-\u2013\u2014\u2026]{1,20}\Z", re.IGNORECASE)
     _ALT_MAX = 80
     #: IDNA label separators besides ``.`` — a host spelled with one resolves
@@ -261,7 +265,10 @@ class FilesDocumentConverter:
                 return None
             # NFKC folds fullwidth letters. The format characters IDNA ignores
             # (soft hyphen, ZWSP, BOM) never reach here: the printable gate
-            # above drops every Cf character in the destination.
+            # above drops every Cf character in the destination. A percent-
+            # encoded dot (``amazonaws%2ecom``) is NOT folded — urlsplit does
+            # not decode the host — and slips this UNSIGNED-host rule; a signed
+            # url is dropped by the query check whatever the host spelling.
             host = unicodedata.normalize("NFKC", parts.hostname or "").translate(cls._IDNA_DOTS).rstrip(".").lower()
             if host == "amazonaws.com" or host.endswith(".amazonaws.com"):
                 return None
