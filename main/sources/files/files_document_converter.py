@@ -163,12 +163,36 @@ class FilesDocumentConverter:
         text = self._MD_IMAGE_RE.sub('', text)
         return self._S3_URL_RE.sub('[file]', text)
 
-    #: An image the document-level text DROPS even though images are kept
-    #: there: a data: URI (a base64 blob that would ride into every
-    #: contextual-prefix prompt and sensitivity-sweep window) or a signed S3
-    #: url (stripped as an image rather than left as a broken ``![x]([file])``).
-    _MD_DROPPED_IMAGE_RE = re.compile(
-        r'!\[[^\]]*\]\(\s*(?:data:|https://[a-zA-Z0-9._-]+\.s3\.[a-zA-Z0-9-]+\.amazonaws\.com/)', re.IGNORECASE)
+    #: The destination of a markdown image: ``(<dest>)`` or ``(dest "title")``.
+    _MD_IMAGE_DEST_RE = re.compile(r'!\[[^\]]*\]\(\s*(?:<([^>]*)>|([^)\s]*))')
+    _URL_SCHEME_RE = re.compile(r'^([a-zA-Z][a-zA-Z0-9+.\-]*):')
+
+    @classmethod
+    def _image_kept_in_document_text(cls, image_markdown):
+        """A WHITELIST over the destination — an image the document-level text
+        keeps is a relative path or a plain http(s) url. Everything else is
+        dropped: a ``data:`` URI (a base64 blob that would ride into every
+        contextual-prefix prompt and sensitivity-sweep window), any other
+        scheme, any ``amazonaws.com`` host in any of S3's addressing forms
+        (virtual-hosted, path-style, global, dualstack, access point, http),
+        and any url whose query carries a signature (``X-Amz-``,
+        ``Signature=``). A hostname blacklist was measured to let 5 of 6 signed
+        S3 forms and every ``<data:…>`` angle-bracket destination through."""
+        m = cls._MD_IMAGE_DEST_RE.match(image_markdown)
+        if not m:
+            return False
+        dest = (m.group(1) if m.group(1) is not None else m.group(2)).strip()
+        scheme = cls._URL_SCHEME_RE.match(dest)
+        if scheme is None:
+            return True
+        if scheme.group(1).lower() not in ("http", "https"):
+            return False
+        lowered = dest.lower()
+        host = lowered.split("://", 1)[1].split("/", 1)[0].split("?", 1)[0].split("@")[-1].split(":")[0]
+        if host == "amazonaws.com" or host.endswith(".amazonaws.com"):
+            return False
+        query = lowered.split("?", 1)[1] if "?" in lowered else ""
+        return "x-amz-" not in query and "signature=" not in query
 
     def _clean_document_text(self, text):
         """The document-level ``text`` — what ``/api/document`` serves and a
@@ -176,13 +200,14 @@ class FilesDocumentConverter:
         feeds the embeddings drops them. Muninn's Vimeo captures quote slides as
         ``![Slide at HH:MM:SS](/api/vimeo/frames/...)``, and the chunk rule
         erased every one from the stored copy while the source .md still had
-        them (measured 2026-09-06). Fenced code is still dropped here: ``text``
+        them (measured 2026-09-06). Which images: ``_image_kept_in_document_text``,
+        a whitelist. Fenced code is still dropped here: ``text``
         also feeds the contextual-prefix prompt, the sensitivity sweep, the
         search dedup hash and the graph blurb, and widening what those see is a
         separate decision."""
         text = self._CODE_BLOCK_RE.sub('', text)
         text = self._MD_IMAGE_RE.sub(
-            lambda m: '' if self._MD_DROPPED_IMAGE_RE.match(m.group(0)) else m.group(0), text)
+            lambda m: m.group(0) if self._image_kept_in_document_text(m.group(0)) else '', text)
         return self._S3_URL_RE.sub('[file]', text)
 
     def __split_to_chunks(self, document, breadcrumb, fm_metadata=None, is_session=False):

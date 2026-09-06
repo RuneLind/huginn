@@ -242,16 +242,47 @@ class TestNormalChunking:
         assert "/api/vimeo/frames/" not in all_chunk_text
         assert "logo.png" not in all_chunk_text
 
-    def test_document_text_still_drops_data_uri_and_s3_images(self, converter, make_doc):
-        body = (
-            "A ![d](data:image/png;base64,iVBORw0KGgo=) B "
-            "![s](https://prod-files-secure.s3.us-west-2.amazonaws.com/abc/img.png?X-Amz-Sig=xyz) C"
-        )
-        results = converter.convert(make_doc(content_texts=[body]))
-        text = results[0]["text"]
-        assert "base64" not in text
-        assert "![s]" not in text and "amazonaws" not in text
-        assert "A  B  C" in text
+    DROPPED_IMAGE_DESTS = [
+        "data:image/png;base64,iVBORw0KGgo=",
+        "<data:image/png;base64,iVBORw0KGgo=>",
+        "DATA:image/png;base64,iVBORw0KGgo=",
+        "javascript:alert",
+        "ftp://example.com/k.png",
+        "https://prod-files-secure.s3.us-west-2.amazonaws.com/abc/img.png?X-Amz-Sig=xyz",
+        "<https://bucket.s3.us-west-2.amazonaws.com/k.png?X-Amz-Signature=SIG>",
+        "https://bucket.s3.amazonaws.com/k.png?X-Amz-Signature=SIG",
+        "https://s3.us-west-2.amazonaws.com/bucket/k.png?X-Amz-Signature=SIG",
+        "http://bucket.s3.us-west-2.amazonaws.com/k.png?X-Amz-Signature=SIG",
+        "https://bucket.s3.dualstack.us-west-2.amazonaws.com/k.png",
+        "https://ap-1.s3-accesspoint.us-west-2.amazonaws.com/k.png",
+        "https://cdn.example.com/k.png?X-Amz-Signature=SIG",
+        "https://cdn.example.com/k.png?Signature=SIG&Expires=1",
+    ]
+    KEPT_IMAGE_DESTS = [
+        "/api/vimeo/frames/123/93.jpg",
+        "img/shot.png",
+        "../assets/a.png",
+        "<img/with space.png>",
+        "https://example.com/logo.png",
+        "http://example.com/logo.png",
+        "https://example.com/logo.png?v=2",
+        "https://notamazonaws.com/k.png",
+    ]
+
+    @pytest.mark.parametrize("dest", DROPPED_IMAGE_DESTS)
+    def test_document_text_drops_credentialed_and_non_http_images(self, converter, make_doc, dest):
+        results = converter.convert(make_doc(content_texts=[f"A ![x]({dest}) B"]))
+        assert results[0]["text"].endswith("A  B"), results[0]["text"]
+
+    @pytest.mark.parametrize("dest", KEPT_IMAGE_DESTS)
+    def test_document_text_keeps_plain_path_and_http_images(self, converter, make_doc, dest):
+        results = converter.convert(make_doc(content_texts=[f"A ![x]({dest}) B"]))
+        assert f"![x]({dest})" in results[0]["text"]
+        assert "![x]" not in " ".join(c["indexedData"] for c in results[0]["chunks"])
+
+    def test_document_text_image_with_title_is_kept_whole(self, converter, make_doc):
+        results = converter.convert(make_doc(content_texts=['A ![x](img/a.png "Title") B']))
+        assert '![x](img/a.png "Title")' in results[0]["text"]
 
 class TestHeadingAwareChunking:
     def test_markdown_with_headings_produces_heading_key(self, converter, make_doc):
