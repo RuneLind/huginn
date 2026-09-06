@@ -9,7 +9,7 @@ query, self-link exclusion, whether to reindex) lives in the registry config.
 import logging
 from contextlib import contextmanager
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 
 from main.core.search_response_formatter import extract_chunk_text, truncate_snippet
 from main.ingest.registry import INGEST_SOURCES, IngestSource
@@ -151,17 +151,34 @@ for _src in INGEST_SOURCES:
 
 
 @router.get("/api/youtube/transcript/{video_id}")
-def youtube_transcript(video_id: str, timestamps: bool = False):
+def youtube_transcript(
+    video_id: str,
+    timestamps: bool = Query(
+        False,
+        description=(
+            "Return the windowed `### [HH:MM:SS]` two-minute transcript instead of "
+            "the plain joined string."
+        ),
+    ),
+):
     """Fetch raw YouTube transcript without summarizing. Used by muninn to get transcript for its own Claude call.
 
-    ``?timestamps=1`` returns the windowed form instead: ``### [HH:MM:SS]``
-    headings over two-minute windows, the same shape muninn's Vimeo capture
-    ingests. A caller that has to place something at a point in the video — a
-    slide frame, a citation — needs a clock, and the default form has none. The
-    default is unchanged and stays the plain segment-joined string; the
+    ``?timestamps=1`` returns the windowed form instead — shape and rationale in
+    :func:`main.fetchers.youtube.youtube_transcript_downloader.format_transcript_windows`.
+    The default is unchanged and stays the plain segment-joined string; the
     ``timestamps`` field echoes the mode that was resolved.
     """
-    text = fetch_transcript(video_id, timestamps=timestamps)
+    try:
+        text = fetch_transcript(video_id, timestamps=timestamps)
+    except ValueError as exc:
+        # `format_transcript_windows` reads each segment's `start` as a number
+        # and raises when the track carries something else — right of it, but
+        # every other bad input on this route answers 422, and an unhandled
+        # raise here is the one that would be a 500. Only the windowing path
+        # raises ValueError today; the plain formatter never reads `start`.
+        raise HTTPException(
+            status_code=422, detail=f"Transcript could not be windowed: {exc}"
+        ) from exc
     return {
         "video_id": video_id,
         "transcript": text,

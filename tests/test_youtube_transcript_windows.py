@@ -142,6 +142,16 @@ class _FakeDownloader:
         return YouTubeTranscriptDownloader.format_transcript_plain(self, segments)
 
 
+def _fake_downloader(segments):
+    """A ``_FakeDownloader`` subclass serving one specific segment list."""
+
+    class _Fixed(_FakeDownloader):
+        def download_transcript(self, video_id):
+            return {"available": True, "language": "en", "segments": segments}
+
+    return _Fixed
+
+
 PLAIN_EXPECTED = (
     "welcome to the walkthrough we start with the index layout "
     "and that is the layout now the query path finally the evaluation harness"
@@ -185,6 +195,35 @@ class TestYouTubeTranscriptRoute:
 
     def test_unparseable_timestamps_value_is_a_422(self):
         assert self._get({"timestamps": "maybe"}).status_code == 422
+
+    def test_valueless_timestamps_is_a_422(self):
+        # `?timestamps=` is FastAPI's bool_parsing 422, and it stays one: a
+        # valueless flag silently meaning true is the worse answer, since the
+        # windowed body is not what an existing caller parses.
+        response = TestClient(app).get("/api/youtube/transcript/abcdefghijk?timestamps=")
+        assert response.status_code == 422
+        assert response.json()["detail"][0]["type"] == "bool_parsing"
+
+    def test_a_non_numeric_segment_start_is_a_422(self, monkeypatch):
+        # Every other bad input on this route is a 422; a track whose `start`
+        # is not a number must not be the one that is a 500.
+        import main.ingest.youtube as yt
+        monkeypatch.setattr(
+            yt, "YouTubeTranscriptDownloader",
+            _fake_downloader([{"start": "abc", "duration": 2.0, "text": "hello"}]),
+        )
+        response = self._get({"timestamps": "1"})
+        assert response.status_code == 422
+        assert "abc" in response.json()["detail"]
+
+    def test_the_timestamps_parameter_is_documented(self):
+        # The route's only reader is another repo; the OpenAPI description is
+        # where the flag is discoverable, and every other optional flag in
+        # `main/routes/` carries one.
+        schema = TestClient(app).get("/openapi.json").json()
+        params = schema["paths"]["/api/youtube/transcript/{video_id}"]["get"]["parameters"]
+        described = {p["name"]: p.get("description", "") for p in params}
+        assert "windowed" in described["timestamps"].lower()
 
 
 class TestWindowedTranscriptThroughTheSplitter:
