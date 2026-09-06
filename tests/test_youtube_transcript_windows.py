@@ -102,6 +102,24 @@ class TestFormatTranscriptWindows:
         out = self._fmt([_seg(0.0, "first line\nsecond   line")])
         assert out == "### [00:00:00]\nfirst line second line"
 
+    def test_internal_whitespace_runs_and_hard_breaks_collapse(self):
+        # Caption cues carry hard line breaks, double spaces and the occasional
+        # tab; all three are layout. The double space and the tab are where this
+        # parts company with muninn's `parseVttCues` — it trims each of a cue's
+        # lines and joins them with one space, so a line BREAK collapses there
+        # too but a run inside a line does not (measured both ways). A windowed
+        # transcript is therefore SHORTER than the plain one by every such run,
+        # on top of the heading bytes it adds.
+        out = self._fmt([_seg(0.0, "hello  world\tagain\nand\r\nonce more ")])
+        assert out == "### [00:00:00]\nhello world again and once more"
+
+    def test_format_window_timestamp_clamps_a_negative_cue_to_zero(self):
+        # The clamp is what keeps a negative-start track from printing
+        # `[-1:-1:-5]` as a heading; the fold-into-window-0 test above cannot
+        # see it, because the bucket it folds into is already 0.
+        from main.fetchers.youtube.youtube_transcript_downloader import _format_window_timestamp
+        assert _format_window_timestamp(-5) == "00:00:00"
+
     def test_negative_start_folds_into_the_first_window(self):
         out = self._fmt([_seg(-3.0, "before zero"), _seg(1.0, "at zero")])
         assert out == "### [00:00:00]\nbefore zero at zero"
@@ -111,12 +129,16 @@ class TestFormatTranscriptWindows:
         out = self._fmt([_seg(0.0, "a"), _seg(61.0, "b")], window_sec=60)
         assert out == "### [00:00:00]\na\n\n### [00:01:00]\nb"
 
-    @pytest.mark.parametrize("bad", [0, -60, float("inf"), float("nan")])
+    @pytest.mark.parametrize("bad", [0, -60, float("inf"), float("nan"), "120"])
     def test_window_sec_must_be_finite_and_positive(self, bad):
         # `match=` is load-bearing: without the guard, inf and nan still raise a
         # ValueError — from `math.floor(nan)`, several lines later and with a
         # message about float conversion. A bare `raises(ValueError)` therefore
-        # passes on unguarded code and pins nothing for those two.
+        # passes on unguarded code and pins nothing for those two. The string
+        # case is the opposite failure: drop the `isinstance` conjunct and
+        # `"120"` raises TypeError, which `pytest.raises(ValueError)` does not
+        # catch at all — so that parametrization pins the conjunct only because
+        # ValueError is named.
         with pytest.raises(ValueError, match="window_sec must be a finite number"):
             self._fmt(FIXTURE_SEGMENTS, window_sec=bad)
 

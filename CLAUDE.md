@@ -91,9 +91,13 @@ curl "http://127.0.0.1:8321/api/youtube/transcript/<video_id>?timestamps=1"
 # {"video_id":"<video_id>","transcript":"### [00:00:00]\nThis is a 3. It's ...","char_count":18589,"timestamps":true}
 ```
 
-(Both counts measured on one 19-minute video: 10 windows, so +159 characters —
-10 headings of `### [HH:MM:SS]\n` at 15 each, plus 9 of the joining spaces
-widened to a blank line. No transcript text is added or lost.)
+(Both counts measured on one 19-minute video: 10 windows, +159 characters *for that
+track* — 10 headings of `### [HH:MM:SS]\n` at 15 each, plus 9 of the joining spaces
+widened to a blank line. It is not a general formula. The windowed form also
+collapses whitespace runs and drops blank cues, neither of which the plain form
+does, so a track whose cues carry double spaces or tabs comes out shorter than the
+heading bytes alone predict. No transcript WORD is added or dropped; the character
+count is not a conserved quantity.)
 
 - **The default has no clock, deliberately.** `format_transcript_plain` joins the
   segments with spaces, and that is what every existing caller reads. This response
@@ -105,17 +109,20 @@ widened to a blank line. No transcript text is added or lost.)
   (`format_transcript_windows`, `main/fetchers/youtube/youtube_transcript_downloader.py`).
   Boundaries are absolute (0, 120, 240 …), never relative to the first segment, so
   two fetches of one video window identically and a cue names one place.
-- **A `###` heading, not a bare bracketed line, and 120 s, not 60.** The heading is
-  what `MarkdownHeadingSplitter` carries into every chunk, so a hit in the middle of
-  a 50-minute talk still cites to the minute — with bare lines only the chunks that
-  happened to start on a boundary would carry a cue. 120 s is muninn's Vimeo window
-  (`DEFAULT_WINDOW_SEC` in its `src/vimeo/vtt.ts`), so a YouTube talk and a Vimeo
-  talk chunk alike.
-- Windows with no text are not emitted, segment text is whitespace-normalised, and
-  out-of-order or negative-start segments fold into their bucket rather than opening
-  a second window with the same cue.
-- A video with no transcript is **422**, an unparseable `timestamps` value **422**
-  (FastAPI's bool parsing: `1`/`true`/`yes`/`on` and their negatives).
+- **A `###` heading, not a bare bracketed line, and 120 s, not 60** — the reasons
+  live once, beside the code: `format_transcript_windows`'s docstring for the
+  heading, `DEFAULT_WINDOW_SEC`'s comment for the width.
+- Windows with no text are not emitted, each segment's whitespace runs (double
+  spaces, tabs, line breaks) collapse to single spaces, and out-of-order or
+  negative-start segments fold into their bucket rather than opening a second window
+  with the same cue. The collapsing is a deliberate divergence from muninn's
+  `parseVttCues` (`src/vimeo/vtt.ts`), which trims each of a cue's lines and joins
+  them with one space: a line BREAK collapses on both sides, but a run *inside* a
+  line survives there and is collapsed here.
+- A video with no transcript is **422**, a segment whose `start` is not a number is
+  **422**, and an empty or unparseable `timestamps` value is **422** — send the
+  parameter only when you mean it (FastAPI's bool parsing: `1`/`true`/`yes`/`on` and
+  their negatives).
 
 ## Deleting a document
 
