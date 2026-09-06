@@ -1,5 +1,7 @@
 import os
 import re
+import unicodedata
+from urllib.parse import urlsplit
 
 from main.privacy.alias_registry import ALIAS_CHANGED_KEY
 from main.sources.files.markdown_heading_splitter import MarkdownHeadingSplitter
@@ -75,6 +77,14 @@ def _coerce_int(value):
         return None
 
 
+#: Unicode categories a stored image destination may not contain. Cc and Cf
+#: are the load-bearing two; Zl/Zp (U+2028/9) and the C1 control U+0085 are
+#: ``\s`` to ``re`` and already truncate the destination in
+#: ``_MD_IMAGE_PARTS_RE`` before this gate runs — listed for the reader, not
+#: for the check.
+_NON_PRINTABLE = frozenset({"Cc", "Cf", "Zl", "Zp"})
+
+
 class FilesDocumentConverter:
     _MD_IMAGE_RE = re.compile(r'!\[[^\]]*\]\([^)]+\)')
     _S3_URL_RE = re.compile(r'https://[a-zA-Z0-9._-]+\.s3\.[a-zA-Z0-9-]+\.amazonaws\.com/[^\s)]*')
@@ -130,7 +140,7 @@ class FilesDocumentConverter:
     def __build_document_text(self, document, breadcrumb, is_session=False):
         content = self.__convert_to_text(
             [self._strip_frontmatter(content_part['text']) if is_session
-             else self._clean_chunk_text(self._strip_frontmatter(content_part['text']))
+             else self._clean_document_text(self._strip_frontmatter(content_part['text']))
              for content_part in document['content']], "")
         return self.__convert_to_text([breadcrumb, content])
     
@@ -161,6 +171,128 @@ class FilesDocumentConverter:
     def _clean_chunk_text(self, text):
         text = self._CODE_BLOCK_RE.sub('', text)
         text = self._MD_IMAGE_RE.sub('', text)
+        return self._S3_URL_RE.sub('[file]', text)
+
+    #: A markdown image, split: alt text, destination (``<dest>`` or the first
+    #: token), and whatever follows (a title) — which is never re-emitted.
+    _MD_IMAGE_PARTS_RE = re.compile(r'!\[([^\]]*)\]\(\s*(?:<([^>]*)>|([^)\s]*))')
+    #: Query keys that carry a credential: AWS SigV4/V2, CloudFront, Google
+    #: Cloud Storage and Azure SAS. Matched as ``key=`` after ``?``, ``&`` or ``;``.
+    _SIGNED_QUERY_RE = re.compile(r'(?:^|[&;])(?:x-amz-[^=&;]*|signature|sig|x-goog-[^=&;]*|key-pair-id)=', re.IGNORECASE)
+    #: Alt text the document-level text keeps: caption WORDS. Each
+    #: whitespace-separated token is at most 20 characters from an enumerated
+    #: set — unicode word characters and caption punctuation — and the whole
+    #: alt at most 80; no token is scheme-shaped. No ``/``, ``?``, ``&``,
+    #: ``;``, ``=``, ``#``, tab or line break is in the set, so no url or blob
+    #: can be spelled. The RESIDUAL, stated exactly (separators count toward
+    #: the 80): at most 77 characters of that alphabet survive, as four words
+    #: of 20+20+20+17 — an AWS access key id (20 chars) or a 16-hex secret
+    #: fits one word; a JWT, ``ghp_…`` or ``sk-…`` token (40+ chars, unsplit)
+    #: does not. Accepted: a caption is free text and cannot be told from a
+    #: short token by shape. ``Slide at 00:01:33`` and ``Diagram: the 3-step
+    #: loop`` pass.
+    _ALT_TOKEN_RE = re.compile(r"\A(?![a-z][a-z0-9+.\-]*:\S)[\w.,:!'\u2019()\-\u2013\u2014\u2026]{1,20}\Z", re.IGNORECASE)
+    _ALT_MAX = 80
+    #: IDNA label separators besides ``.`` — a host spelled with one resolves
+    #: like the ASCII dot and must be judged as one.
+    _IDNA_DOTS = str.maketrans({"\u3002": ".", "\uff0e": ".", "\uff61": "."})
+    _DEST_MAX = 2048
+
+    @classmethod
+    def _plain_alt(cls, alt):
+        alt = " ".join(alt.split())
+        if len(alt) > cls._ALT_MAX:
+            return ""
+        return alt if all(cls._ALT_TOKEN_RE.match(t) for t in alt.split(" ") if t) else ""
+
+    @classmethod
+    def _document_text_image(cls, image_markdown):
+        """What the document-level text keeps of a markdown image: ``None`` to
+        drop it, else a NORMALIZED ``![alt](dest)`` — the title is never
+        re-emitted, the alt is kept only as caption words (``_plain_alt``:
+        an enumerated charset, tokens ≤20, whole ≤80) so it can spell neither
+        a url nor a token, and
+        the destination must pass a WHITELIST. Every channel of the image is
+        therefore bounded, not just the destination: a round that judged the
+        destination and re-emitted the whole match let a signature ride in
+        through the title and a base64 blob through the alt.
+
+        The destination whitelist, decided over scheme × authority (userinfo
+        ⇒ drop) × host × path-params × query with ``urlsplit`` (a ``ValueError``
+        from it drops the image), over a destination ≤2048 printable chars:
+
+        * no scheme, no authority (``img/a.png``, ``/api/x.jpg``) — kept unless
+          the query is signed;
+        * an authority — protocol-relative ``//host/…`` or ``http(s)://host/…``
+          — dropped when it carries userinfo, or the host (IDNA dots folded,
+          trailing dot stripped) is ``amazonaws.com`` or under it, or the
+          query or path-params are signed;
+        * ``http(s):`` with NO authority (``https:example.com/k.png`` — generic
+          URI syntax, not an http url) — dropped; a previous parser crashed on it;
+        * any other scheme (``data:``, ``javascript:``, ``ftp:``) — dropped; a
+          ``data:`` blob would ride into every contextual-prefix prompt and
+          sensitivity-sweep window.
+
+        A signature in the FRAGMENT is not a credential the server ever sees
+        and is kept."""
+        m = cls._MD_IMAGE_PARTS_RE.match(image_markdown)
+        if not m:
+            return None
+        alt = cls._plain_alt(m.group(1))
+        dest = (m.group(2) if m.group(2) is not None else m.group(3)).strip()
+        # A destination is bounded and printable: a 100 KB base64 path, a NUL
+        # or DEL, a C1 control, a bidi override or a zero-width character
+        # (categories Cc/Cf/Zl/Zp) is dropped, not stored.
+        if len(dest) > cls._DEST_MAX or any(unicodedata.category(c) in _NON_PRINTABLE for c in dest):
+            return None
+        # After the destination only a title or the close may follow: a stray
+        # ``>`` (``<a>b.png>``) or a bare token (``<a.png> extra``) is dropped
+        # rather than re-emitted as a destination the source never named.
+        if not dest or not re.match(r'\s*(?:[")\']|$)', image_markdown[m.end():]):
+            return None
+        try:
+            parts = urlsplit(dest)
+        except ValueError:
+            return None
+        scheme = parts.scheme.lower()
+        if scheme and scheme not in ("http", "https"):
+            return None
+        if scheme and not parts.netloc:
+            return None
+        if parts.netloc:
+            # Userinfo is the authority's credential slot: never re-emitted.
+            if "@" in parts.netloc:
+                return None
+            # NFKC folds fullwidth letters. The format characters IDNA ignores
+            # (soft hyphen, ZWSP, BOM) never reach here: the printable gate
+            # above drops every Cf character in the destination. A percent-
+            # encoded dot (``amazonaws%2ecom``) is NOT folded — urlsplit does
+            # not decode the host — and slips this UNSIGNED-host rule; a signed
+            # url is dropped by the query check whatever the host spelling.
+            host = unicodedata.normalize("NFKC", parts.hostname or "").translate(cls._IDNA_DOTS).rstrip(".").lower()
+            if host == "amazonaws.com" or host.endswith(".amazonaws.com"):
+                return None
+        # ``;params`` ride in the PATH for urlsplit; a credential there counts.
+        if cls._SIGNED_QUERY_RE.search(parts.query) is not None \
+                or cls._SIGNED_QUERY_RE.search(parts.path.partition(";")[2]) is not None:
+            return None
+        # The angle-bracket form is what lets a destination carry a space.
+        return f"![{alt}](<{dest}>)" if m.group(2) is not None else f"![{alt}]({dest})"
+
+    def _clean_document_text(self, text):
+        """The document-level ``text`` — what ``/api/document`` serves and a
+        reader renders — keeps ordinary markdown images; the chunk text that
+        feeds the embeddings drops them. Muninn's Vimeo captures quote slides as
+        ``![Slide at HH:MM:SS](/api/vimeo/frames/...)``, and the chunk rule
+        erased every one from the stored copy while the source .md still had
+        them (measured 2026-09-06). Which images, and re-emitted how:
+        ``_document_text_image``. Fenced code is still dropped here: ``text``
+        also feeds the contextual-prefix prompt, the sensitivity sweep, the
+        search dedup hash and the graph blurb, and widening what those see is a
+        separate decision."""
+        text = self._CODE_BLOCK_RE.sub('', text)
+        text = self._MD_IMAGE_RE.sub(
+            lambda m: self._document_text_image(m.group(0)) or '', text)
         return self._S3_URL_RE.sub('[file]', text)
 
     def __split_to_chunks(self, document, breadcrumb, fm_metadata=None, is_session=False):

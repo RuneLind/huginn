@@ -26,7 +26,7 @@
       }
     ],
     "id": "plain.md",
-    "text": "[plain]\n\n# Plain page\n\nSome intro text mentioning Ada Example and a link to [file] here.\n\n\n\n## Section one\n\nBody of section one. Contact bo.tester or Tester, Bo about Q000124.\n\n\n\n## Section two\n\nMore text. Se også @ada.example og @nav.no og org.springframework.Bean.",
+    "text": "[plain]\n\n# Plain page\n\nSome intro text mentioning Ada Example and a link to [file] here.\n\n![screenshot](img/shot.png)\n\n## Section one\n\nBody of section one. Contact bo.tester or Tester, Bo about Q000124.\n\n\n\n## Section two\n\nMore text. Se også @ada.example og @nav.no og org.springframework.Bean.",
     "url": "file://<BASE>/plain.md"
   },
   "session.md": {

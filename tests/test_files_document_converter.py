@@ -226,6 +226,139 @@ class TestNormalChunking:
         assert "[file]" in text
         assert "Body" in text
 
+    def test_document_text_keeps_plain_images_that_chunks_drop(self, converter, make_doc):
+        body = (
+            "Intro\n\n![Slide at 00:01:33](/api/vimeo/frames/123/93.jpg)\n\n"
+            "![logo](https://example.com/logo.png)\n\n"
+            "```kotlin\nfun x() = 1\n```\n\nOutro"
+        )
+        doc = make_doc(content_texts=[body])
+        results = converter.convert(doc)
+        text = results[0]["text"]
+        assert "![Slide at 00:01:33](/api/vimeo/frames/123/93.jpg)" in text
+        assert "![logo](https://example.com/logo.png)" in text
+        assert "fun x() = 1" not in text
+        all_chunk_text = " ".join(c["indexedData"] for c in results[0]["chunks"])
+        assert "/api/vimeo/frames/" not in all_chunk_text
+        assert "logo.png" not in all_chunk_text
+
+    DROPPED_IMAGE_DESTS = [
+        "data:image/png;base64,iVBORw0KGgo=",
+        "<data:image/png;base64,iVBORw0KGgo=>",
+        "DATA:image/png;base64,iVBORw0KGgo=",
+        "javascript:alert",
+        "ftp://example.com/k.png",
+        "https://prod-files-secure.s3.us-west-2.amazonaws.com/abc/img.png?X-Amz-Sig=xyz",
+        "<https://bucket.s3.us-west-2.amazonaws.com/k.png?X-Amz-Signature=SIG>",
+        "https://bucket.s3.amazonaws.com/k.png?X-Amz-Signature=SIG",
+        "https://s3.us-west-2.amazonaws.com/bucket/k.png?X-Amz-Signature=SIG",
+        "http://bucket.s3.us-west-2.amazonaws.com/k.png?X-Amz-Signature=SIG",
+        "https://bucket.s3.dualstack.us-west-2.amazonaws.com/k.png",
+        "https://ap-1.s3-accesspoint.us-west-2.amazonaws.com/k.png",
+        "https://cdn.example.com/k.png?X-Amz-Signature=SIG",
+        "https://cdn.example.com/k.png?Signature=SIG&Expires=1",
+        "//bucket.s3.amazonaws.com/k.png",
+        "//cdn.example.com/k.png?Signature=SEC",
+        "/proxy/img?X-Amz-Signature=SIG",
+        "https://bucket.s3.amazonaws.com./k.png",
+        "https://example.com@bucket.s3.amazonaws.com/k.png",
+        "https://bucket.s3.amazonaws.com:443/k.png",
+        "https://cdn.example.com/k.png?sv=1&sig=SECRET",
+        "https://cdn.example.com/k.png?X-Goog-Signature=SIG",
+        "https://cdn.example.com/k.png?Key-Pair-Id=K&Policy=P",
+        "https:example.com/k.png",
+        "http:/k.png",
+        "https:",
+        "https://cdn.example.com/k.png?a=1;sig=SECRET",
+        "https://cdn.example.com/k.png;sig=SECRET",
+        "a.png;sig=SECRET",
+        "<a>b.png>",
+        "<a.png> extra",
+        "   ",
+        "https://user:PASSW0RD@example.com/k.png",
+        "//user:PASS@cdn.example.com/k.png",
+        "<https://user:PASSW0RD@example.com/k.png>",
+        "https://svc@intranet.example/k.png",
+        "https://bucket.s3.amazonaws.com\u3002/k.png",
+        "https://bucket\uff0es3\uff0eamazonaws\uff0ecom/k.png",
+        "https://x.com/" + "A" * 2100 + ".png",
+        "https://exa\x00mple.com/k.png",
+        "https://example.com/k\x7f.png",
+        "https://example.com/k\x80.png",
+        "https://example.com/k\x9f.png",
+        "https://example.com/\u202ek.png",
+        "https://example.com/k\u200b.png",
+        "https://bucket.s3.\uff41\uff4d\uff41\uff5a\uff4f\uff4e\uff41\uff57\uff53.com/k.png",
+        "https://bucket.s3.amazon\u00adaws.com/k.png",
+        "https://bucket.s3.ama\u200bzonaws.com/k.png",
+    ]
+    KEPT_IMAGE_DESTS = [
+        "/api/vimeo/frames/123/93.jpg",
+        "img/shot.png",
+        "../assets/a.png",
+        "<img/with space.png>",
+        "https://example.com/logo.png",
+        "http://example.com/logo.png",
+        "https://example.com/logo.png?v=2",
+        "https://notamazonaws.com/k.png",
+        "//cdn.example.com/k.png",
+        "https://example.com/k.png?design=sig",
+        "https://example.com/k.png#Signature=SIG",
+    ]
+
+    @pytest.mark.parametrize("dest", DROPPED_IMAGE_DESTS)
+    def test_document_text_drops_credentialed_and_non_http_images(self, converter, make_doc, dest):
+        results = converter.convert(make_doc(content_texts=[f"A ![x]({dest}) B"]))
+        assert results[0]["text"].endswith("A  B"), results[0]["text"]
+
+    @pytest.mark.parametrize("dest", KEPT_IMAGE_DESTS)
+    def test_document_text_keeps_plain_path_and_http_images(self, converter, make_doc, dest):
+        results = converter.convert(make_doc(content_texts=[f"A ![x]({dest}) B"]))
+        assert f"![x]({dest})" in results[0]["text"]
+        assert "![x]" not in " ".join(c["indexedData"] for c in results[0]["chunks"])
+
+    @pytest.mark.parametrize("image", [
+        '![x](img/a.png "Title")',
+        '![x](img/a.png "https://bucket.s3.amazonaws.com/k.png?X-Amz-Signature=SIG&X-Amz-Credential=AKIA")',
+        '![x](img/a.png "data:image/png;base64,AAAABBBB")',
+    ])
+    def test_document_text_image_is_re_emitted_without_its_title(self, converter, make_doc, image):
+        results = converter.convert(make_doc(content_texts=[f"A {image} B"]))
+        assert results[0]["text"].endswith("A ![x](img/a.png) B"), results[0]["text"]
+
+    def test_document_text_angle_bracket_destination_keeps_its_brackets(self, converter, make_doc):
+        results = converter.convert(make_doc(content_texts=['A ![x](<img/a b.png> "T") B']))
+        assert results[0]["text"].endswith("A ![x](<img/a b.png>) B"), results[0]["text"]
+
+    @pytest.mark.parametrize("alt,kept_alt", [
+        ("Slide at 00:01:33", "Slide at 00:01:33"),
+        ("Diagram: the 3-step loop", "Diagram: the 3-step loop"),
+        ("", ""),
+        ("see https://example.com/x", ""),
+        ("data:image/png;base64,AAAABBBB", ""),
+        ("data:text/plain,AAAABBBB", ""),
+        ("javascript:alert", ""),
+        (" data:text/plain,AAAA", ""),
+        ("\tdata:text/plain,AAAA", ""),
+        ("harmless\nhttps://internal.host/secret", ""),
+        ("note\ndata:text/plain,BLOB", ""),
+        ("  Bilde av økten  ", "Bilde av økten"),
+        ("path/like", ""),
+        ("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk", ""),
+        ("ghp_1234567890abcdefghijklmnopqrstuvwxyzAB", ""),
+        ("internal.corp.example.com", ""),
+        ("Note data:,SECRETTEXT", ""),
+        ("a" * 21, ""),
+        ("a" * 20, "a" * 20),
+        ("many  spaces   collapse", "many spaces collapse"),
+        (" ".join(["word"] * 17), ""),
+        (" ".join(["word"] * 16), " ".join(["word"] * 16)),
+        ("https://bucket.s3.amazonaws.com/k.png?X-Amz-Signature=SIG", ""),
+        ("a=b", ""),
+    ])
+    def test_document_text_image_alt_is_plain_or_emptied(self, converter, make_doc, alt, kept_alt):
+        results = converter.convert(make_doc(content_texts=[f"A ![{alt}](img/a.png) B"]))
+        assert results[0]["text"].endswith(f"A ![{kept_alt}](img/a.png) B"), results[0]["text"]
 
 class TestHeadingAwareChunking:
     def test_markdown_with_headings_produces_heading_key(self, converter, make_doc):
