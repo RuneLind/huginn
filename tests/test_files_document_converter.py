@@ -226,6 +226,20 @@ class TestNormalChunking:
         assert "[file]" in text
         assert "Body" in text
 
+    def test_document_text_keeps_images_and_code_that_chunks_drop(self, converter, make_doc):
+        body = (
+            "Intro\n\n![Slide at 00:01:33](/api/vimeo/frames/123/93.jpg)\n\n"
+            "```kotlin\nfun x() = 1\n```\n\nOutro"
+        )
+        doc = make_doc(content_texts=[body])
+        results = converter.convert(doc)
+        text = results[0]["text"]
+        assert "![Slide at 00:01:33](/api/vimeo/frames/123/93.jpg)" in text
+        assert "fun x() = 1" in text
+        all_chunk_text = " ".join(c["indexedData"] for c in results[0]["chunks"])
+        assert "/api/vimeo/frames/" not in all_chunk_text
+        assert "fun x() = 1" not in all_chunk_text
+
 
 class TestHeadingAwareChunking:
     def test_markdown_with_headings_produces_heading_key(self, converter, make_doc):

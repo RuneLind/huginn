@@ -130,7 +130,7 @@ class FilesDocumentConverter:
     def __build_document_text(self, document, breadcrumb, is_session=False):
         content = self.__convert_to_text(
             [self._strip_frontmatter(content_part['text']) if is_session
-             else self._clean_chunk_text(self._strip_frontmatter(content_part['text']))
+             else self._clean_document_text(self._strip_frontmatter(content_part['text']))
              for content_part in document['content']], "")
         return self.__convert_to_text([breadcrumb, content])
     
@@ -161,6 +161,17 @@ class FilesDocumentConverter:
     def _clean_chunk_text(self, text):
         text = self._CODE_BLOCK_RE.sub('', text)
         text = self._MD_IMAGE_RE.sub('', text)
+        return self._S3_URL_RE.sub('[file]', text)
+
+    def _clean_document_text(self, text):
+        """The document-level ``text`` (what ``/api/document`` serves and a
+        reader renders) keeps its images and fenced code — only the chunk text
+        that feeds the embeddings drops them. Muninn's Vimeo captures quote
+        slides as ``![Slide at HH:MM:SS](/api/vimeo/frames/...)``; cleaning
+        ``text`` with the chunk rule erased every one of them from the stored
+        copy while the source .md still had them (measured 2026-09-06).
+        The signed-S3-url replacement stays: that is about the url, not the
+        markdown."""
         return self._S3_URL_RE.sub('[file]', text)
 
     def __split_to_chunks(self, document, breadcrumb, fm_metadata=None, is_session=False):
