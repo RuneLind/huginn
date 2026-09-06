@@ -95,11 +95,22 @@ def fetch_transcript(video_id_or_url: str, timestamps: bool = False) -> str:
         raise HTTPException(status_code=422, detail=f"No transcript available for video {video_id}")
 
     segments = transcript_data["segments"]
-    text = (
-        format_transcript_windows(segments)
-        if timestamps
-        else downloader.format_transcript_plain(segments)
-    )
+    if timestamps:
+        try:
+            text = format_transcript_windows(segments)
+        except ValueError as exc:
+            # Scoped to this one call. `format_transcript_windows` reads each
+            # segment's `start` as a number and raises when the track carries
+            # something else, which is bad input and answers 422 like every
+            # other bad input on this path. The download half above raises
+            # ValueError too — a `requests` JSONDecodeError is one — and a
+            # `try` wide enough to cover it would report a dead network as a
+            # windowing failure, on the plain path as well as this one.
+            raise HTTPException(
+                status_code=422, detail=f"Transcript could not be windowed: {exc}"
+            ) from exc
+    else:
+        text = downloader.format_transcript_plain(segments)
     if not text.strip():
         raise HTTPException(status_code=422, detail="Transcript is empty")
 

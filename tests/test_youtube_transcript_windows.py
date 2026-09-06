@@ -129,7 +129,9 @@ class TestFormatTranscriptWindows:
         out = self._fmt([_seg(0.0, "a"), _seg(61.0, "b")], window_sec=60)
         assert out == "### [00:00:00]\na\n\n### [00:01:00]\nb"
 
-    @pytest.mark.parametrize("bad", [0, -60, float("inf"), float("nan"), "120"])
+    @pytest.mark.parametrize(
+        "bad", [0, -60, float("inf"), float("nan"), pytest.param("120", id="str-120")]
+    )
     def test_window_sec_must_be_finite_and_positive(self, bad):
         # `match=` is load-bearing: without the guard, inf and nan still raise a
         # ValueError — from `math.floor(nan)`, several lines later and with a
@@ -172,6 +174,16 @@ def _fake_downloader(segments):
             return {"available": True, "language": "en", "segments": segments}
 
     return _Fixed
+
+
+def _raising_downloader(exc):
+    """A downloader whose network half raises ``exc`` instead of returning."""
+
+    class _Raises(_FakeDownloader):
+        def download_transcript(self, video_id):
+            raise exc
+
+    return _Raises
 
 
 PLAIN_EXPECTED = (
@@ -237,6 +249,44 @@ class TestYouTubeTranscriptRoute:
         response = self._get({"timestamps": "1"})
         assert response.status_code == 422
         assert "abc" in response.json()["detail"]
+
+    def test_an_unexpected_download_error_propagates_unchanged(self, monkeypatch):
+        # The existing contract for a download that blows up, pinned so the
+        # ValueError case below is measured against what this route already
+        # does rather than against an invention: nothing translates it, and
+        # TestClient re-raises it (a 500 in front of a real server).
+        import main.ingest.youtube as yt
+        monkeypatch.setattr(
+            yt, "YouTubeTranscriptDownloader",
+            _raising_downloader(RuntimeError("network exploded")),
+        )
+        with pytest.raises(RuntimeError, match="network exploded"):
+            self._get()
+
+    @pytest.mark.parametrize("timestamps", ["0", "1"], ids=["plain", "windowed"])
+    def test_a_download_failure_is_not_reported_as_a_windowing_failure(
+        self, monkeypatch, timestamps
+    ):
+        # `requests`' JSONDecodeError subclasses ValueError, so the download
+        # half can raise one. It is not a windowing failure, and the 422 is
+        # scoped to `format_transcript_windows` so it cannot be dressed up as
+        # one — on either path. The RuntimeError case above is the contract
+        # this asserts against: an unexpected exception from the download half
+        # propagates, it is not translated.
+        import main.ingest.youtube as yt
+        monkeypatch.setattr(
+            yt, "YouTubeTranscriptDownloader", _raising_downloader(ValueError("bad JSON")),
+        )
+        params = {"timestamps": timestamps}
+        with pytest.raises(ValueError, match="bad JSON"):
+            self._get(params)
+        # Said the other way round too, on the response a real server would
+        # send: the thing this must never be is a 422 blaming the windowing.
+        served = TestClient(app, raise_server_exceptions=False).get(
+            "/api/youtube/transcript/abcdefghijk", params=params,
+        )
+        assert served.status_code != 422
+        assert "windowed" not in served.text
 
     def test_the_timestamps_parameter_is_documented(self):
         # The route's only reader is another repo; the OpenAPI description is

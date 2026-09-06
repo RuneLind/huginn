@@ -119,10 +119,14 @@ count is not a conserved quantity.)
   `parseVttCues` (`src/vimeo/vtt.ts`), which trims each of a cue's lines and joins
   them with one space: a line BREAK collapses on both sides, but a run *inside* a
   line survives there and is collapsed here.
-- A video with no transcript is **422**, a segment whose `start` is not a number is
-  **422**, and an empty or unparseable `timestamps` value is **422** — send the
-  parameter only when you mean it (FastAPI's bool parsing: `1`/`true`/`yes`/`on` and
-  their negatives).
+- A video with no transcript is **422**, a segment with a `start` that `float()`
+  cannot read is **422** (a `start` of some other shape entirely — a list, say — is
+  a TypeError and a 500), and an empty or unparseable `timestamps` value is **422**
+  — send the parameter only when you mean it (FastAPI's bool parsing:
+  `1`/`true`/`yes`/`on` and their negatives). The windowing 422 is raised from a
+  `try` around `format_transcript_windows` alone, so a failure in the download half
+  — a `requests` `JSONDecodeError` is a `ValueError` too — is never dressed up as a
+  windowing failure.
 
 ## Deleting a document
 

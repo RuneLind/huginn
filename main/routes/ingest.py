@@ -167,18 +167,12 @@ def youtube_transcript(
     :func:`main.fetchers.youtube.youtube_transcript_downloader.format_transcript_windows`.
     The default is unchanged and stays the plain segment-joined string; the
     ``timestamps`` field echoes the mode that was resolved.
+
+    A track whose ``start`` is not a number is a 422; ``fetch_transcript``
+    raises that itself, from a ``try`` around the windowing call alone, so a
+    failure in the download half keeps whatever answer it has always had.
     """
-    try:
-        text = fetch_transcript(video_id, timestamps=timestamps)
-    except ValueError as exc:
-        # `format_transcript_windows` reads each segment's `start` as a number
-        # and raises when the track carries something else — right of it, but
-        # every other bad input on this route answers 422, and an unhandled
-        # raise here is the one that would be a 500. Only the windowing path
-        # raises ValueError today; the plain formatter never reads `start`.
-        raise HTTPException(
-            status_code=422, detail=f"Transcript could not be windowed: {exc}"
-        ) from exc
+    text = fetch_transcript(video_id, timestamps=timestamps)
     return {
         "video_id": video_id,
         "transcript": text,
