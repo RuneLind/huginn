@@ -170,34 +170,51 @@ class FilesDocumentConverter:
     #: Query keys that carry a credential: AWS SigV4/V2, CloudFront, Google
     #: Cloud Storage and Azure SAS. Matched as ``key=`` after ``?``, ``&`` or ``;``.
     _SIGNED_QUERY_RE = re.compile(r'(?:^|[&;])(?:x-amz-[^=&;]*|signature|sig|x-goog-[^=&;]*|key-pair-id)=', re.IGNORECASE)
-    #: Alt text the document-level text keeps: an ENUMERATED charset — word
-    #: characters (unicode, so Norwegian captions pass), space, and caption
-    #: punctuation — at most 200 of them, and no leading scheme. Nothing url-
-    #: or blob-shaped can be spelled without ``/``, ``?``, ``&``, ``;``, ``=``,
-    #: ``#`` or a line break, none of which is in the set; two rounds of
-    #: lookaheads over a free charset each left a door (a leading space, a
-    #: second line). ``Slide at 00:01:33`` and ``Diagram: the loop`` pass.
-    _PLAIN_ALT_RE = re.compile(r"\A(?![a-z][a-z0-9+.\-]*:\S)[\w .,:!'\u2019()\-\u2013\u2014\u2026]{0,200}\Z", re.IGNORECASE)
+    #: Alt text the document-level text keeps: caption WORDS. Each
+    #: whitespace-separated token is at most 20 characters from an enumerated
+    #: set — unicode word characters and caption punctuation — and the whole
+    #: alt at most 80; no token is scheme-shaped. No ``/``, ``?``, ``&``,
+    #: ``;``, ``=``, ``#``, tab or line break is in the set, so no url or blob
+    #: can be spelled, and the 20-character token bound is shorter than any
+    #: API-token class (a JWT, ``ghp_…``, ``sk-…`` are 40+ characters of that
+    #: alphabet, which a 200-character free bound admitted — measured).
+    #: ``Slide at 00:01:33`` and ``Diagram: the 3-step loop`` pass.
+    _ALT_TOKEN_RE = re.compile(r"\A(?![a-z][a-z0-9+.\-]*:\S)[\w.,:!'\u2019()\-\u2013\u2014\u2026]{1,20}\Z", re.IGNORECASE)
+    _ALT_MAX = 80
+    #: IDNA label separators besides ``.`` — a host spelled with one resolves
+    #: like the ASCII dot and must be judged as one.
+    _IDNA_DOTS = str.maketrans({"\u3002": ".", "\uff0e": ".", "\uff61": "."})
+    _DEST_MAX = 2048
+
+    @classmethod
+    def _plain_alt(cls, alt):
+        alt = " ".join(alt.split())
+        if len(alt) > cls._ALT_MAX:
+            return ""
+        return alt if all(cls._ALT_TOKEN_RE.match(t) for t in alt.split(" ") if t) else ""
 
     @classmethod
     def _document_text_image(cls, image_markdown):
         """What the document-level text keeps of a markdown image: ``None`` to
         drop it, else a NORMALIZED ``![alt](dest)`` — the title is never
-        re-emitted, the alt (stripped) is kept only when ``_PLAIN_ALT_RE``
-        accepts it — an enumerated caption charset, so it cannot spell a url — and
+        re-emitted, the alt is kept only as caption words (``_plain_alt``:
+        an enumerated charset, tokens ≤20, whole ≤80) so it can spell neither
+        a url nor a token, and
         the destination must pass a WHITELIST. Every channel of the image is
         therefore bounded, not just the destination: a round that judged the
         destination and re-emitted the whole match let a signature ride in
         through the title and a base64 blob through the alt.
 
-        The destination whitelist, decided over scheme × authority × host ×
-        query with ``urlsplit`` (a ``ValueError`` from it drops the image):
+        The destination whitelist, decided over scheme × authority (userinfo
+        ⇒ drop) × host × path-params × query with ``urlsplit`` (a ``ValueError``
+        from it drops the image), over a destination ≤2048 printable chars:
 
         * no scheme, no authority (``img/a.png``, ``/api/x.jpg``) — kept unless
           the query is signed;
         * an authority — protocol-relative ``//host/…`` or ``http(s)://host/…``
-          — kept unless the host (trailing dot stripped) is ``amazonaws.com``
-          or under it, or the query is signed;
+          — dropped when it carries userinfo, or the host (IDNA dots folded,
+          trailing dot stripped) is ``amazonaws.com`` or under it, or the
+          query or path-params are signed;
         * ``http(s):`` with NO authority (``https:example.com/k.png`` — generic
           URI syntax, not an http url) — dropped; a previous parser crashed on it;
         * any other scheme (``data:``, ``javascript:``, ``ftp:``) — dropped; a
@@ -209,8 +226,12 @@ class FilesDocumentConverter:
         m = cls._MD_IMAGE_PARTS_RE.match(image_markdown)
         if not m:
             return None
-        alt = m.group(1).strip()
+        alt = cls._plain_alt(m.group(1))
         dest = (m.group(2) if m.group(2) is not None else m.group(3)).strip()
+        # A destination is bounded and printable: a 100 KB base64 path or a
+        # NUL byte is dropped, not stored.
+        if len(dest) > cls._DEST_MAX or any(ord(c) < 0x20 or ord(c) == 0x7f for c in dest):
+            return None
         # After the destination only a title or the close may follow: a stray
         # ``>`` (``<a>b.png>``) or a bare token (``<a.png> extra``) is dropped
         # rather than re-emitted as a destination the source never named.
@@ -226,15 +247,16 @@ class FilesDocumentConverter:
         if scheme and not parts.netloc:
             return None
         if parts.netloc:
-            host = (parts.hostname or "").rstrip(".").lower()
+            # Userinfo is the authority's credential slot: never re-emitted.
+            if "@" in parts.netloc:
+                return None
+            host = (parts.hostname or "").translate(cls._IDNA_DOTS).rstrip(".").lower()
             if host == "amazonaws.com" or host.endswith(".amazonaws.com"):
                 return None
         # ``;params`` ride in the PATH for urlsplit; a credential there counts.
         if cls._SIGNED_QUERY_RE.search(parts.query) is not None \
                 or cls._SIGNED_QUERY_RE.search(parts.path.partition(";")[2]) is not None:
             return None
-        if not cls._PLAIN_ALT_RE.match(alt):
-            alt = ""
         # The angle-bracket form is what lets a destination carry a space.
         return f"![{alt}](<{dest}>)" if m.group(2) is not None else f"![{alt}]({dest})"
 
