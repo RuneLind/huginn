@@ -170,17 +170,21 @@ class FilesDocumentConverter:
     #: Query keys that carry a credential: AWS SigV4/V2, CloudFront, Google
     #: Cloud Storage and Azure SAS. Matched as ``key=`` after ``?``, ``&`` or ``;``.
     _SIGNED_QUERY_RE = re.compile(r'(?:^|[&;])(?:x-amz-[^=&;]*|signature|sig|x-goog-[^=&;]*|key-pair-id)=', re.IGNORECASE)
-    #: Alt text the document-level text keeps verbatim: bounded, no leading
-    #: scheme (``data:…`` — a word, a colon, then a non-space), no ``://`` and no query/fragment character, so
-    #: nothing url-shaped — a ``data:`` blob, a signed url — can ride in
-    #: through the alt channel. A clock (``Slide at 00:01:33``) is fine.
-    _PLAIN_ALT_RE = re.compile(r'^(?![a-z][a-z0-9+.\-]*:\S)(?!.*://)[^?&;=#]{0,200}$', re.IGNORECASE)
+    #: Alt text the document-level text keeps: an ENUMERATED charset — word
+    #: characters (unicode, so Norwegian captions pass), space, and caption
+    #: punctuation — at most 200 of them, and no leading scheme. Nothing url-
+    #: or blob-shaped can be spelled without ``/``, ``?``, ``&``, ``;``, ``=``,
+    #: ``#`` or a line break, none of which is in the set; two rounds of
+    #: lookaheads over a free charset each left a door (a leading space, a
+    #: second line). ``Slide at 00:01:33`` and ``Diagram: the loop`` pass.
+    _PLAIN_ALT_RE = re.compile(r"\A(?![a-z][a-z0-9+.\-]*:\S)[\w .,:!'\u2019()\-\u2013\u2014\u2026]{0,200}\Z", re.IGNORECASE)
 
     @classmethod
     def _document_text_image(cls, image_markdown):
         """What the document-level text keeps of a markdown image: ``None`` to
         drop it, else a NORMALIZED ``![alt](dest)`` — the title is never
-        re-emitted, the alt is kept only when ``_PLAIN_ALT_RE`` accepts it, and
+        re-emitted, the alt (stripped) is kept only when ``_PLAIN_ALT_RE``
+        accepts it — an enumerated caption charset, so it cannot spell a url — and
         the destination must pass a WHITELIST. Every channel of the image is
         therefore bounded, not just the destination: a round that judged the
         destination and re-emitted the whole match let a signature ride in
@@ -205,8 +209,13 @@ class FilesDocumentConverter:
         m = cls._MD_IMAGE_PARTS_RE.match(image_markdown)
         if not m:
             return None
-        alt = m.group(1)
+        alt = m.group(1).strip()
         dest = (m.group(2) if m.group(2) is not None else m.group(3)).strip()
+        # After the destination only a title or the close may follow: a stray
+        # ``>`` (``<a>b.png>``) or a bare token (``<a.png> extra``) is dropped
+        # rather than re-emitted as a destination the source never named.
+        if not dest or not re.match(r'\s*(?:[")\']|$)', image_markdown[m.end():]):
+            return None
         try:
             parts = urlsplit(dest)
         except ValueError:
@@ -220,7 +229,9 @@ class FilesDocumentConverter:
             host = (parts.hostname or "").rstrip(".").lower()
             if host == "amazonaws.com" or host.endswith(".amazonaws.com"):
                 return None
-        if cls._SIGNED_QUERY_RE.search(parts.query) is not None:
+        # ``;params`` ride in the PATH for urlsplit; a credential there counts.
+        if cls._SIGNED_QUERY_RE.search(parts.query) is not None \
+                or cls._SIGNED_QUERY_RE.search(parts.path.partition(";")[2]) is not None:
             return None
         if not cls._PLAIN_ALT_RE.match(alt):
             alt = ""
