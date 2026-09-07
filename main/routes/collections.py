@@ -180,6 +180,10 @@ def list_collection_documents(
         False,
         description="Attach each document's frontmatter thumbnail_url when it has one. Slower — reads every document file.",
     ),
+    include_summary_kinds: bool = Query(
+        False,
+        description="Attach each document's frontmatter summary_kind when it has one. Slower — reads every document file.",
+    ),
     store: KnowledgeStore = Depends(get_store),
 ):
     """List all documents in a collection with their IDs and URLs.
@@ -199,7 +203,13 @@ def list_collection_documents(
     one); absent or non-string is omitted, so "key missing" stays the one
     no-thumbnail signal.
 
-    All three flags read every document file, so they are opt-in to keep the
+    When ``include_summary_kinds`` is set, each entry that has a non-empty
+    string ``summary_kind`` in its frontmatter carries it (the Vimeo and
+    YouTube ingests write one). Same omit rule: a document written before
+    kinds existed has no key rather than an empty or null one, which is what
+    lets a caller tell "summarized as X" from "we do not know".
+
+    All four flags read every document file, so they are opt-in to keep the
     default listing (used by hot paths like duplicate checks) cheap. Setting
     several still reads each file only once.
     """
@@ -223,7 +233,7 @@ def list_collection_documents(
             continue
         seen_ids.add(doc_id)
         doc = {"id": doc_id, "url": doc_url}
-        if include_dates or include_scores or include_thumbnails:
+        if include_dates or include_scores or include_thumbnails or include_summary_kinds:
             parsed = _read_doc(store, entry.get("documentPath", ""))
             # A document JSON that parses to a list/string is still "unreadable"
             # for our purposes — the resolvers below call ``.get``, so anything
@@ -240,6 +250,10 @@ def list_collection_documents(
                 thumbnail = _doc_metadata(raw).get("thumbnail_url")
                 if isinstance(thumbnail, str) and thumbnail:
                     doc["thumbnail_url"] = thumbnail
+            if include_summary_kinds:
+                summary_kind = _doc_metadata(raw).get("summary_kind")
+                if isinstance(summary_kind, str) and summary_kind:
+                    doc["summary_kind"] = summary_kind
         documents.append(doc)
 
     return {"documents": documents}

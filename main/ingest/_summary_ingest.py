@@ -32,6 +32,36 @@ from main.utils.frontmatter import escape_frontmatter_value, frontmatter_scalar
 #: its own — a document between 2000 and 6144 is invisible to that script.
 FRONTMATTER_MAX_CHARS = 6144
 
+#: Cap on ONE frontmatter-bound string of a request model, in bytes. Well above
+#: any real value (a Vimeo CDN thumbnail url is ~80 bytes). It exists so an
+#: oversized field answers a 422 NAMING THE FIELD instead of the 413 above,
+#: which names only the whole head. Shared rather than per-vertical: the Vimeo
+#: and YouTube verticals write the same keys through the same writer, and two
+#: numbers for one bound is how they drift apart. It bounds a VALUE — the head
+#: itself is bounded by `FRONTMATTER_MAX_CHARS`, which is the real bound, since
+#: `url`, a bare numeric field and a tags list of any length reach the head too.
+FRONTMATTER_FIELD_MAX_BYTES = 512
+
+
+def check_frontmatter_field(value: Optional[str]) -> Optional[str]:
+    """Pydantic validator body for a string written verbatim into frontmatter.
+
+    Raised from the request MODEL, so an oversized value is a 422 the route
+    never has to handle. Why a per-field cap at all:
+    ``read_frontmatter_from_path`` reads only the first 8192 characters of a
+    file, so a value that pushes the closing ``---`` past that would make the
+    overwrite check see no url and fork ``Title (2).md`` on every re-ingest,
+    silently. ``FRONTMATTER_MAX_CHARS`` closes that for every field whatever
+    carries it; this one names the culprit.
+
+    Bytes, not characters: the head is bounded in characters, but this is the
+    conservative direction and text in Norwegian or Japanese is well over one
+    byte per character.
+    """
+    if value is not None and len(value.encode("utf-8")) > FRONTMATTER_FIELD_MAX_BYTES:
+        raise ValueError(f"field exceeds {FRONTMATTER_FIELD_MAX_BYTES} bytes")
+    return value
+
 
 def build_summary_tags(category: str, tags: Optional[list[str]]) -> str:
     """Category parts + explicit tags, de-duped, order preserved, comma-joined."""

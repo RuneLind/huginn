@@ -9,14 +9,14 @@ import datetime as dt
 from typing import Optional
 
 from fastapi import HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from main.fetchers.youtube.youtube_transcript_downloader import (
     YouTubeTranscriptDownloader,
     format_transcript_windows,
 )
 from main.ingest.categories import CATEGORIES
-from main.ingest._summary_ingest import write_summary
+from main.ingest._summary_ingest import check_frontmatter_field, write_summary
 from main.utils.claude_cli import call_claude
 
 logger = logging.getLogger(__name__)
@@ -30,6 +30,22 @@ class YouTubeIngestRequest(BaseModel):
     summary: Optional[str] = None  # if provided, skip Claude summarization
     date: Optional[str] = None
     category: Optional[str] = None  # auto-detected if not provided
+    # The SUMMARY's own provenance: which of Muninn's summary kinds wrote the
+    # body ("standard" | "deep" | "talk-notes", an open set — a per-bot preset
+    # id lands here verbatim). Same key, same meaning and the same global
+    # converter allowlist entry as the Vimeo vertical's. Absent means "written
+    # before kinds existed": every document ingested before this field carries
+    # no `summary_kind`, and there is no backfill.
+    summary_kind: Optional[str] = None
+
+    @field_validator("summary_kind")
+    @classmethod
+    def _cap_frontmatter_field(cls, value: Optional[str]) -> Optional[str]:
+        # Written VERBATIM into the frontmatter, so it is capped where Vimeo
+        # caps its own frontmatter-bound strings — a 422 naming the field,
+        # rather than `write_summary`'s 413 about the whole head, which is the
+        # real bound. Shared check: `_summary_ingest.check_frontmatter_field`.
+        return check_frontmatter_field(value)
 
 
 _GENERIC_TITLES = {"youtube", "youtube.com", "(1) youtube", "(2) youtube", "(3) youtube", ""}
@@ -200,6 +216,12 @@ def ingest_youtube(req: YouTubeIngestRequest, *, transcripts_path: str) -> dict:
                 detail=f"Invalid category '{category}'. Must be one of: {', '.join(CATEGORIES)}",
             )
 
+    # Omitted when absent, never written empty: "key missing" is the one signal
+    # for a document written before kinds existed (there is no backfill).
+    extra: dict[str, object] = {}
+    if req.summary_kind:
+        extra["summary_kind"] = req.summary_kind
+
     result = write_summary(
         root=transcripts_path,
         title=title,
@@ -207,6 +229,7 @@ def ingest_youtube(req: YouTubeIngestRequest, *, transcripts_path: str) -> dict:
         summary=summary,
         category=category,
         date=date,
+        extra_frontmatter=extra or None,
     )
     logger.info(f"YouTube ingest: saved {result['file_path']} (category: {result['category']})")
 
