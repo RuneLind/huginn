@@ -6,7 +6,12 @@ from urllib.parse import urlsplit
 from main.privacy.alias_registry import ALIAS_CHANGED_KEY
 from main.sources.files.markdown_heading_splitter import MarkdownHeadingSplitter
 from main.sources.files.session_markdown_splitter import SessionMarkdownSplitter
-from main.utils.frontmatter import parse_tags, read_frontmatter, strip_frontmatter
+from main.utils.frontmatter import (
+    normalize_frontmatter_string,
+    parse_tags,
+    read_frontmatter,
+    strip_frontmatter,
+)
 
 # Frontmatter fields to preserve as document metadata (key in frontmatter -> key in metadata)
 #
@@ -36,12 +41,16 @@ _FRONTMATTER_METADATA_FIELDS = {"wip", "title", "breadcrumb", "space", "page_id"
                                 # body and the language it is written in. Deliberately NOT
                                 # namespaced under vimeo: `write_summary` is shared by six
                                 # verticals, and any of them growing a kind/language picker
-                                # writes these two keys with this meaning. Greped 2026-09-05:
-                                # only the vimeo ingest emits either, and zero of the 809
-                                # markdown files under data/ and the sister wiki tree carry one
-                                # — on the mini; the x/tiktok/article source trees live on the
-                                # laptop and were not in that grep, and their `author:` is the
-                                # one this allowlist now serves.
+                                # writes these two keys with this meaning — which is no
+                                # longer hypothetical: the YOUTUBE ingest emits
+                                # `summary_kind` too (2026-09-07), the second vertical to,
+                                # and it is why the key is not namespaced. `summary_lang`
+                                # is still vimeo-only. The rest of the 2026-09-05 grep
+                                # stands: zero of the 809 markdown files under data/ and
+                                # the sister wiki tree carried either — on the mini; the
+                                # x/tiktok/article source trees live on the laptop and were
+                                # not in that grep, and their `author:` is the one this
+                                # allowlist now serves.
                                 "summary_kind", "summary_lang",
                                 # Vimeo v2 PR 2: what oEmbed knew. `author` is ALREADY
                                 # written by the x_articles/tiktok/articles ingests and
@@ -56,6 +65,23 @@ _FRONTMATTER_METADATA_FIELDS = {"wip", "title", "breadcrumb", "space", "page_id"
 #: not a whole number is OMITTED rather than served as text or as a NaN, so
 #: "key missing" stays the single no-value signal for consumers.
 _FRONTMATTER_INT_FIELDS = {"duration_sec"}
+
+#: Metadata fields normalized through ``normalize_frontmatter_string`` —
+#: stripped, and OMITTED when what is left is empty. The small-vocabulary
+#: provenance keys, whose whole design is that a consumer matches the value
+#: against a known set and reads "key absent" as the one no-value signal; a
+#: padded value matches nothing and a blank one is truthy.
+#:
+#: This reader is the second one that needs it. The documents listing
+#: (``main/routes/collections.py``) applies the same helper to the same keys,
+#: and for the same reason: both read MARKDOWN FILES, so the ingest models'
+#: validation bounds neither. A capture written before that validation existed,
+#: a hand-edit, or another writer's file reaches here untrimmed — and here it
+#: lands on the document AND on every chunk.
+#:
+#: Scoped, not global: a padded ``title`` or ``breadcrumb`` is free text and is
+#: served as the file spells it.
+_FRONTMATTER_NORMALIZED_FIELDS = {"summary_kind", "summary_lang"}
 
 
 def _coerce_int(value):
@@ -158,6 +184,11 @@ class FilesDocumentConverter:
                 metadata = {}
                 for key, value in fm.items():
                     if key not in _FRONTMATTER_METADATA_FIELDS:
+                        continue
+                    if key in _FRONTMATTER_NORMALIZED_FIELDS:
+                        text = normalize_frontmatter_string(value)
+                        if text is not None:
+                            metadata[key] = text
                         continue
                     if key in _FRONTMATTER_INT_FIELDS:
                         number = _coerce_int(value)

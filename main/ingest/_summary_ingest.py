@@ -15,7 +15,11 @@ from fastapi import HTTPException
 
 from main.ingest.categories import CATEGORIES
 from main.ingest._markdown_writer import write_categorized_markdown
-from main.utils.frontmatter import escape_frontmatter_value, frontmatter_scalar
+from main.utils.frontmatter import (
+    escape_frontmatter_value,
+    frontmatter_scalar,
+    normalize_frontmatter_string,
+)
 
 #: The rendered frontmatter's bound, in CHARACTERS: `read_frontmatter_from_path`
 #: parses only the first 8192 characters of a file (`_MAX_HEAD_BYTES` is a
@@ -31,6 +35,66 @@ from main.utils.frontmatter import escape_frontmatter_value, frontmatter_scalar
 #: `scripts/cross_collection_gap_analysis.py` reads a 2000-character head of
 #: its own — a document between 2000 and 6144 is invisible to that script.
 FRONTMATTER_MAX_CHARS = 6144
+
+#: Cap on ONE frontmatter-bound string of a request model, in bytes. Well above
+#: any real value (a Vimeo CDN thumbnail url is ~80 bytes). It exists so an
+#: oversized field answers a 422 NAMING THE FIELD instead of the 413 above,
+#: which names only the whole head. Shared rather than per-vertical: the Vimeo
+#: and YouTube verticals write the same keys through the same writer, and two
+#: numbers for one bound is how they drift apart. It bounds a VALUE — the head
+#: itself is bounded by `FRONTMATTER_MAX_CHARS`, which is the real bound, since
+#: `url`, a bare numeric field and a tags list of any length reach the head too.
+FRONTMATTER_FIELD_MAX_BYTES = 512
+
+
+def check_frontmatter_field(value: Optional[str]) -> Optional[str]:
+    """Pydantic validator body for a string written verbatim into frontmatter.
+
+    NORMALIZES then caps, and both halves are load-bearing.
+
+    The normalization is ``normalize_frontmatter_string`` — a strip, with a
+    stripped-empty value becoming ``None`` — the SAME helper the two disk
+    readers apply (the documents listing to ``summary_kind``/``thumbnail_url``,
+    the files converter to ``summary_kind``/``summary_lang``), so one RULE is
+    shared even though each reader picks its own key set. Every
+    vertical omits such a field with ``if req.<field>:``, and ``"  "`` is
+    TRUTHY — so without this the omit branch never fires and the document
+    carries ``summary_kind: "  "``, which is neither a kind nor the "we do not
+    know" that the MISSING key means. The whole design of these fields is that
+    "key absent" is the one no-value signal, and a truthy blank is the one
+    input that defeats it. A padded value is stored stripped for the other half
+    of the same rule: ``" deep "`` compares unequal to ``"deep"`` for every
+    consumer — the documents listing, the converter metadata, a shelf filter.
+    Callers therefore have to read the value BACK off the model (pydantic
+    replaces the field with what this returns) rather than trusting what they
+    posted.
+
+    LEADING AND TRAILING whitespace only, which is all this does. The writer
+    transforms the value further: ``escape_frontmatter_value`` collapses runs
+    of ``\\r``/``\\n`` to a single space, so ``"de\\nep"`` passes here unchanged
+    and reaches disk as ``de ep``. A caller that must know the stored spelling
+    of an interior-whitespace value has to read the document back, not the
+    model.
+
+    The cap is raised from the request MODEL, so an oversized value is a 422
+    the route never has to handle. Why a per-field cap at all:
+    ``read_frontmatter_from_path`` reads only the first 8192 characters of a
+    file, so a value that pushes the closing ``---`` past that would make the
+    overwrite check see no url and fork ``Title (2).md`` on every re-ingest,
+    silently. ``FRONTMATTER_MAX_CHARS`` closes that for every field whatever
+    carries it; this one names the culprit. It counts the STRIPPED value,
+    which is the one that reaches the head.
+
+    Bytes, not characters: the head is bounded in characters, but this is the
+    conservative direction and text in Norwegian or Japanese is well over one
+    byte per character.
+    """
+    value = normalize_frontmatter_string(value)
+    if value is None:
+        return None
+    if len(value.encode("utf-8")) > FRONTMATTER_FIELD_MAX_BYTES:
+        raise ValueError(f"field exceeds {FRONTMATTER_FIELD_MAX_BYTES} bytes")
+    return value
 
 
 def build_summary_tags(category: str, tags: Optional[list[str]]) -> str:

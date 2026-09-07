@@ -731,17 +731,19 @@ class TestCollectionDocumentThumbnails(_CollectionDocumentsCase):
                 reads.append(ast.unparse(node))
         assert reads == ['doc.get(\'metadata\')'], reads
         calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "_doc_metadata"]
-        assert len(calls) == 3, len(calls)  # the three resolvers
+        assert len(calls) == 4, len(calls)  # the four resolvers
 
     def test_a_non_dict_metadata_document_never_500s_the_listing_whatever_is_asked_for(self):
-        # The three resolvers on the one-read pass share ONE metadata accessor;
+        # The four resolvers on the one-read pass share ONE metadata accessor;
         # this is the enumeration of the flags that reach it.
         client = self._client(self._store())
         for params in (
             {"include_dates": "1"},
             {"include_scores": "1"},
             {"include_thumbnails": "1"},
-            {"include_dates": "1", "include_scores": "1", "include_thumbnails": "1"},
+            {"include_summary_kinds": "1"},
+            {"include_dates": "1", "include_scores": "1", "include_thumbnails": "1",
+             "include_summary_kinds": "1"},
         ):
             res = client.get("/api/collection/vm/documents", params=params)
             assert res.status_code == 200, params
@@ -765,6 +767,139 @@ class TestCollectionDocumentThumbnails(_CollectionDocumentsCase):
         assert by_id["ai/A.md"]["thumbnail_url"] == "https://i.vimeocdn.com/video/a.jpg"
         # One mapping read + one read per document, never two per document.
         assert reads.count("vm/documents/ai/A.md.json") == 1
+
+    def test_an_untrimmed_thumbnail_is_stripped_and_a_blank_one_is_never_served(self):
+        # Same rule, same disk, same helper as the summary kinds below: `" "`
+        # is truthy, so the omit branch missed it and the route served a
+        # whitespace string as a thumbnail url.
+        mapping = {
+            "6": {"documentId": "ai/F.md", "documentUrl": "https://vimeo.com/6",
+                  "documentPath": "vm/documents/ai/F.md.json"},
+            "7": {"documentId": "ai/G.md", "documentUrl": "https://vimeo.com/7",
+                  "documentPath": "vm/documents/ai/G.md.json"},
+        }
+        files = {
+            "vm/indexes/index_document_mapping.json": json.dumps(mapping),
+            "vm/documents/ai/F.md.json": json.dumps({"metadata": {"thumbnail_url": " "}}),
+            "vm/documents/ai/G.md.json": json.dumps(
+                {"metadata": {"thumbnail_url": "  https://i.vimeocdn.com/video/g.jpg  "}}
+            ),
+        }
+        client = self._client(_FakeStore(files, {"vm"}))
+        docs = client.get(
+            "/api/collection/vm/documents", params={"include_thumbnails": "1"}
+        ).json()["documents"]
+        by_id = {d["id"]: d for d in docs}
+        assert "thumbnail_url" not in by_id["ai/F.md"]
+        assert by_id["ai/G.md"]["thumbnail_url"] == "https://i.vimeocdn.com/video/g.jpg"
+
+
+class TestCollectionDocumentSummaryKinds(_CollectionDocumentsCase):
+    """Opt-in ``include_summary_kinds`` — which summary kind wrote a capture's
+    body, off the same one-read-per-document pass the dates use.
+
+    The listing serves a FIXED metadata set, not arbitrary frontmatter, so a
+    key a vertical writes is invisible here until a resolver names it. This is
+    the gate the YouTube kind campaign reads: `summary_kind` off
+    `/api/collection/youtube-summaries/documents`.
+    """
+
+    def _store(self) -> _FakeStore:
+        mapping = {
+            "1": {"documentId": "ai/A.md", "documentUrl": "https://youtu.be/1",
+                  "documentPath": "yt/documents/ai/A.md.json"},
+            "2": {"documentId": "ai/B.md", "documentUrl": "https://youtu.be/2",
+                  "documentPath": "yt/documents/ai/B.md.json"},
+            "3": {"documentId": "ai/C.md", "documentUrl": "https://youtu.be/3",
+                  "documentPath": "yt/documents/ai/C.md.json"},
+            "4": {"documentId": "ai/D.md", "documentUrl": "https://youtu.be/4",
+                  "documentPath": "yt/documents/ai/D.md.json"},
+            "5": {"documentId": "ai/E.md", "documentUrl": "https://youtu.be/5",
+                  "documentPath": "yt/documents/ai/E.md.json"},
+        }
+        files = {
+            "yt/indexes/index_document_mapping.json": json.dumps(mapping),
+            "yt/documents/ai/A.md.json": json.dumps(
+                {"metadata": {"date": "2026-09-07", "summary_kind": "deep"}}
+            ),
+            # Written before kinds existed → the key is OMITTED, not null.
+            "yt/documents/ai/B.md.json": json.dumps({"metadata": {"date": "2026-09-07"}}),
+            # A non-string value is not a kind.
+            "yt/documents/ai/C.md.json": json.dumps({"metadata": {"summary_kind": 7}}),
+            # An EMPTY string is not one either — omitted, never served as "".
+            "yt/documents/ai/D.md.json": json.dumps({"metadata": {"summary_kind": ""}}),
+            # Metadata that is not a dict collapses to the no-op, not a 500.
+            "yt/documents/ai/E.md.json": json.dumps({"metadata": "a string"}),
+        }
+        return _FakeStore(files, {"yt"})
+
+    def test_default_listing_has_no_summary_kind(self):
+        client = self._client(self._store())
+        docs = client.get("/api/collection/yt/documents").json()["documents"]
+        assert all("summary_kind" not in d for d in docs)
+
+    def test_include_summary_kinds_attaches_the_kind_when_present(self):
+        client = self._client(self._store())
+        docs = client.get(
+            "/api/collection/yt/documents", params={"include_summary_kinds": "1"}
+        ).json()["documents"]
+        by_id = {d["id"]: d for d in docs}
+        assert by_id["ai/A.md"]["summary_kind"] == "deep"
+        assert "summary_kind" not in by_id["ai/B.md"]
+        assert "summary_kind" not in by_id["ai/C.md"]
+        assert "summary_kind" not in by_id["ai/D.md"]
+        assert "summary_kind" not in by_id["ai/E.md"]
+        assert len(docs) == 5
+
+    def test_kinds_and_dates_share_one_read(self):
+        store = self._store()
+        reads = []
+        real = store.read_text_file
+        def counting(path):
+            reads.append(path)
+            return real(path)
+        store.read_text_file = counting
+        client = self._client(store)
+        docs = client.get(
+            "/api/collection/yt/documents",
+            params={"include_dates": "1", "include_summary_kinds": "1"},
+        ).json()["documents"]
+        by_id = {d["id"]: d for d in docs}
+        assert by_id["ai/A.md"]["date"] == "2026-09-07"
+        assert by_id["ai/A.md"]["summary_kind"] == "deep"
+        assert reads.count("yt/documents/ai/A.md.json") == 1
+
+    def _store_with_untrimmed_kinds(self) -> _FakeStore:
+        """Frontmatter this route did not write: padded and whitespace-only kinds.
+
+        The ingest now normalizes, but the listing reads FILES ON DISK — every
+        document written before that normalization, and anything a hand-edit
+        or another writer leaves, still reaches this resolver untrimmed.
+        """
+        mapping = {
+            "6": {"documentId": "ai/F.md", "documentUrl": "https://youtu.be/6",
+                  "documentPath": "yt/documents/ai/F.md.json"},
+            "7": {"documentId": "ai/G.md", "documentUrl": "https://youtu.be/7",
+                  "documentPath": "yt/documents/ai/G.md.json"},
+        }
+        files = {
+            "yt/indexes/index_document_mapping.json": json.dumps(mapping),
+            "yt/documents/ai/F.md.json": json.dumps({"metadata": {"summary_kind": "   "}}),
+            "yt/documents/ai/G.md.json": json.dumps({"metadata": {"summary_kind": "  deep  "}}),
+        }
+        return _FakeStore(files, {"yt"})
+
+    def test_an_untrimmed_kind_is_stripped_and_a_blank_one_is_never_served(self):
+        # `"   "` is truthy, so the omit rule ("key missing" is the one no-value
+        # signal) used to leak a kind a caller cannot match against anything,
+        # and `"  deep  "` compared unequal to every real kind.
+        client = self._client(self._store_with_untrimmed_kinds())
+        docs = client.get(
+            "/api/collection/yt/documents", params={"include_summary_kinds": "1"}
+        ).json()["documents"]
+        by_id = {d["id"]: d for d in docs}
+        assert "summary_kind" not in by_id["ai/F.md"]
+        assert by_id["ai/G.md"]["summary_kind"] == "deep"
 
 
 class TestCollectionDocumentScores(_CollectionDocumentsCase):
@@ -2201,8 +2336,10 @@ class TestVimeoIngest:
     _FIELD_CAP = 512
 
     def test_the_field_cap_is_the_number_the_frontmatter_head_allows(self):
-        from main.ingest.vimeo import VIMEO_FIELD_MAX_BYTES
-        assert VIMEO_FIELD_MAX_BYTES == self._FIELD_CAP
+        # The constant moved to `_summary_ingest` when the YouTube vertical
+        # grew a capped field of its own — one number for both verticals.
+        from main.ingest._summary_ingest import FRONTMATTER_FIELD_MAX_BYTES
+        assert FRONTMATTER_FIELD_MAX_BYTES == self._FIELD_CAP
 
     def test_oembed_fields_are_capped_like_the_transcript(self):
         from pydantic import ValidationError
@@ -2254,6 +2391,31 @@ class TestVimeoIngest:
         assert "speaker:" not in written
         assert "thumbnail_url:" not in written
         assert 'vimeo_video_id: "1223358361"' in written
+
+    def test_whitespace_only_frontmatter_fields_write_no_key(self, tmp_path):
+        # The same shared validator the YouTube kind goes through: a
+        # padded-to-nothing value is TRUTHY, so every `if req.<field>:` omit
+        # branch in this vertical missed it and the frontmatter carried
+        # `speaker: "  "`.
+        from main.ingest.vimeo import ingest_vimeo
+        req = self._req(summary_kind="  ", speaker="\t\n ", caption_kind=" ")
+        assert (req.summary_kind, req.speaker, req.caption_kind) == (None, None, None)
+        result = ingest_vimeo(req, sources_path=str(tmp_path))
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert "summary_kind:" not in written
+        assert "speaker:" not in written
+        assert "caption_kind:" not in written
+
+    def test_padded_frontmatter_fields_are_stored_stripped(self, tmp_path):
+        from main.ingest.vimeo import ingest_vimeo
+        result = ingest_vimeo(
+            self._req(summary_kind=" standard ", speaker="  Kari Nordmann  "),
+            sources_path=str(tmp_path),
+        )
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert 'summary_kind: "standard"' in written
+        assert 'speaker: "Kari Nordmann"' in written
+        assert 'summary_kind: " standard "' not in written
 
     def test_the_id_key_is_namespaced_against_the_other_video_sources(self, tmp_path):
         # `video_id` is NOT this vertical's word: the YouTube channel fetcher
@@ -2926,6 +3088,125 @@ class TestYouTubeIngestUnit:
             )
         assert exc.value.status_code == 400
         assert "Invalid category ''" in exc.value.detail
+
+    def test_summary_kind_is_written_to_the_frontmatter(self, tmp_path):
+        from main.ingest.youtube import ingest_youtube
+        result = ingest_youtube(self._req(summary_kind="deep"), transcripts_path=str(tmp_path))
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert 'summary_kind: "deep"' in written
+        # Between url and category, like every other extra_frontmatter key.
+        assert written.index("url:") < written.index("summary_kind:") < written.index("category:")
+
+    def test_a_payload_without_a_kind_writes_no_key(self, tmp_path):
+        # Old-payload compatibility: muninn posts that predate the field (and
+        # every document ingested before it) carry no kind, and absent means
+        # "written before kinds existed" — never an empty or null value.
+        from main.ingest.youtube import ingest_youtube
+        result = ingest_youtube(self._req(), transcripts_path=str(tmp_path))
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert "summary_kind" not in written
+
+    def test_a_blank_kind_writes_no_key(self, tmp_path):
+        from main.ingest.youtube import ingest_youtube
+        result = ingest_youtube(self._req(summary_kind=""), transcripts_path=str(tmp_path))
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert "summary_kind" not in written
+
+    def test_a_whitespace_only_kind_writes_no_key(self, tmp_path):
+        # `"  "` is TRUTHY, so before the shared validator normalized it the
+        # omit branch never fired and the frontmatter carried
+        # `summary_kind: "  "` — a value that is neither a kind nor the
+        # "we do not know" the missing key means.
+        from main.ingest.youtube import ingest_youtube
+        req = self._req(summary_kind="  \t\n ")
+        assert req.summary_kind is None
+        result = ingest_youtube(req, transcripts_path=str(tmp_path))
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert "summary_kind" not in written
+
+    def test_a_padded_kind_is_stored_stripped(self, tmp_path):
+        # Stored verbatim, `" deep "` compares unequal to `"deep"` for every
+        # consumer — the listing, the converter metadata, a shelf filter.
+        from main.ingest.youtube import ingest_youtube
+        req = self._req(summary_kind=" deep ")
+        assert req.summary_kind == "deep"
+        result = ingest_youtube(req, transcripts_path=str(tmp_path))
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert 'summary_kind: "deep"' in written
+        assert 'summary_kind: " deep "' not in written
+
+    #: Spelled out, not imported — the Vimeo suite's rule: a test that builds
+    #: its boundary from the constant cannot notice the constant moving.
+    _FIELD_CAP = 512
+
+    def test_summary_kind_is_capped_like_vimeos_frontmatter_fields(self):
+        # A 422 NAMING THE FIELD, rather than write_summary's 413 about the
+        # whole head. Same cap, same message as the Vimeo vertical's.
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError, match="exceeds") as exc:
+            self._req(summary_kind="x" * (self._FIELD_CAP + 1))
+        assert "summary_kind" in str(exc.value)
+        self._req(summary_kind="x" * self._FIELD_CAP)  # at the cap: fine
+
+    def test_the_cap_is_the_one_the_vimeo_vertical_uses(self):
+        from main.ingest._summary_ingest import FRONTMATTER_FIELD_MAX_BYTES
+        assert FRONTMATTER_FIELD_MAX_BYTES == self._FIELD_CAP
+
+
+class TestYouTubeDocumentThroughTheConverter:
+    """What the INDEX ends up holding for a YouTube capture with slides.
+
+    Two halves the ingest test above cannot see: the kind reaches a consumer
+    only if ``_FRONTMATTER_METADATA_FIELDS`` names it (a key the writer emits
+    and that allowlist does not name is invisible over the API), and a quoted
+    slide survives into the document ``text`` only because the converter keeps
+    ordinary images there.
+    """
+
+    _SLIDE = "![Slide at 00:02:17](/api/frames/youtube/abc123def45/137.jpg)"
+
+    def _convert(self, tmp_path, **over):
+        from main.ingest.youtube import YouTubeIngestRequest, ingest_youtube
+        from main.sources.files.files_document_converter import FilesDocumentConverter
+        base = {
+            "title": "Indexing a corpus end to end",
+            "url": "https://www.youtube.com/watch?v=abc123def45",
+            "summary": f"### Slides\n\n{self._SLIDE}\n\nThe speaker walks through the index build.",
+            "category": "coding",
+            "date": "2026-09-07",
+            "summary_kind": "deep",
+        }
+        base.update(over)
+        result = ingest_youtube(
+            YouTubeIngestRequest(**base), transcripts_path=str(tmp_path)
+        )
+        full_path = tmp_path / result["file_path"]
+        document = {
+            "fileRelativePath": result["file_path"],
+            "fileFullPath": str(full_path),
+            "modifiedTime": "2026-09-07T00:00:00Z",
+            "content": [{"text": full_path.read_text(encoding="utf-8")}],
+        }
+        return FilesDocumentConverter().convert(document)[0]
+
+    def test_summary_kind_reaches_the_document_metadata(self, tmp_path):
+        converted = self._convert(tmp_path)
+        assert converted["metadata"]["summary_kind"] == "deep"
+        for chunk in converted["chunks"]:
+            assert chunk["metadata"]["summary_kind"] == "deep"
+
+    def test_a_capture_without_a_kind_carries_no_key(self, tmp_path):
+        converted = self._convert(tmp_path, summary_kind=None)
+        assert "summary_kind" not in converted["metadata"]
+        for chunk in converted["chunks"]:
+            assert "summary_kind" not in chunk["metadata"]
+
+    def test_a_quoted_slide_survives_into_the_document_text(self, tmp_path):
+        # huginn #128: the document-level `text` keeps ordinary markdown
+        # images (the chunk text still drops them), so the frame a capture
+        # quotes is still in the stored copy a reader renders.
+        converted = self._convert(tmp_path)
+        assert self._SLIDE in converted["text"]
 
 
 class TestJiraIngestUnit:

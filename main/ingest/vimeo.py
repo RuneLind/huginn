@@ -51,7 +51,11 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, field_validator
 
-from main.ingest._summary_ingest import write_summary
+from main.ingest._summary_ingest import (
+    FRONTMATTER_FIELD_MAX_BYTES,
+    check_frontmatter_field,
+    write_summary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,16 +64,6 @@ logger = logging.getLogger(__name__)
 #: a body that size on its own evidence rather than trusting the sender to have
 #: capped it: this string is written to disk whole and then reindexed.
 VIMEO_TRANSCRIPT_MAX_BYTES = 2 * 1024 * 1024
-
-#: Cap on each frontmatter-bound string of the request (see
-#: `_cap_frontmatter_field`). Well above any real value (a Vimeo CDN thumbnail
-#: url is ~80 bytes). It bounds a VALUE and answers a clear 422 naming the
-#: field; the HEAD is bounded where it is rendered — `write_summary` refuses a
-#: frontmatter over `FRONTMATTER_MAX_CHARS` whichever field carries it, url
-#: and the bare numeric `duration_sec` included, which no cap on this model's
-#: string fields could do.
-VIMEO_FIELD_MAX_BYTES = 512
-
 
 #: No leading zero: ``/0123`` and ``/123`` are the same video to Vimeo but two
 #: different keys, and Vimeo never writes the first. Muninn's ``VIDEO_ID_RE``
@@ -235,18 +229,18 @@ class VimeoIngestRequest(BaseModel):
         # `transcript_markdown` are body), but `url`, the bare numeric
         # `duration_sec` and a tags list of any length reach the head too.
         # The head itself is bounded in `write_summary`
-        # (`FRONTMATTER_MAX_CHARS`, a 413), for every vertical.
-        if value is not None and len(value.encode("utf-8")) > VIMEO_FIELD_MAX_BYTES:
-            raise ValueError(f"field exceeds {VIMEO_FIELD_MAX_BYTES} bytes")
-        return value
+        # (`FRONTMATTER_MAX_CHARS`, a 413), for every vertical. The check is
+        # `_summary_ingest.check_frontmatter_field` — shared with the YouTube
+        # vertical, which caps a field of its own by the same rule.
+        return check_frontmatter_field(value)
 
     @field_validator("tags")
     @classmethod
     def _cap_tags(cls, value: Optional[list[str]]) -> Optional[list[str]]:
         if value is not None:
             for tag in value:
-                if len(tag.encode("utf-8")) > VIMEO_FIELD_MAX_BYTES:
-                    raise ValueError(f"tag exceeds {VIMEO_FIELD_MAX_BYTES} bytes")
+                if len(tag.encode("utf-8")) > FRONTMATTER_FIELD_MAX_BYTES:
+                    raise ValueError(f"tag exceeds {FRONTMATTER_FIELD_MAX_BYTES} bytes")
         return value
 
     @field_validator("transcript_markdown")

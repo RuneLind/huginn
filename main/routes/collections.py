@@ -24,6 +24,7 @@ from main.runtime.knowledge_store import (
     maybe_enqueue_reindex,
     run_collection_update,
 )
+from main.utils.frontmatter import normalize_frontmatter_string
 
 logger = logging.getLogger(__name__)
 
@@ -100,9 +101,10 @@ def _doc_metadata(doc: dict) -> dict:
     """The document's frontmatter metadata, or ``{}`` when it is not a dict.
 
     THE one accessor for every resolver on the listing's one-read pass (dates,
-    scores, thumbnails). A document whose ``metadata`` parsed to a string used
-    to 500 the whole listing from whichever resolver touched it first — the
-    class was closed one branch at a time until this, which is the enumeration:
+    scores, thumbnails, summary kinds). A document whose ``metadata`` parsed to
+    a string used to 500 the whole listing from whichever resolver touched it
+    first — the class was closed one branch at a time until this, which is the
+    enumeration:
     a resolver that reads the metadata key any other way re-opens it (pinned by
     a test that counts the read sites in this module).
     """
@@ -180,6 +182,10 @@ def list_collection_documents(
         False,
         description="Attach each document's frontmatter thumbnail_url when it has one. Slower — reads every document file.",
     ),
+    include_summary_kinds: bool = Query(
+        False,
+        description="Attach each document's frontmatter summary_kind when it has one. Slower — reads every document file.",
+    ),
     store: KnowledgeStore = Depends(get_store),
 ):
     """List all documents in a collection with their IDs and URLs.
@@ -199,7 +205,22 @@ def list_collection_documents(
     one); absent or non-string is omitted, so "key missing" stays the one
     no-thumbnail signal.
 
-    All three flags read every document file, so they are opt-in to keep the
+    When ``include_summary_kinds`` is set, each entry that has a non-empty
+    string ``summary_kind`` in its frontmatter carries it, stripped (the Vimeo
+    and YouTube ingests write one). Same omit rule: a document with no kind has
+    no key rather than an empty or null one, which is what lets a caller tell
+    "summarized as X" from "we do not know". "We do not know" covers TWO cases,
+    not one: a document written before kinds existed (there is no backfill),
+    and a document whose LAST ingest sent no kind — a re-ingest under the same
+    path and the same url overwrites the file whole, so the key goes with it
+    (the same path with another url forks ``Title (2).md``; another title or
+    category is a second path — a second document either way).
+    The second case takes a direct POST, an old client, or muninn's ordinary
+    route after a failed duplicate check — its dedup reads this very listing and
+    treats a failed read as not-a-duplicate. The listing cannot tell the two
+    apart.
+
+    All four flags read every document file, so they are opt-in to keep the
     default listing (used by hot paths like duplicate checks) cheap. Setting
     several still reads each file only once.
     """
@@ -223,7 +244,7 @@ def list_collection_documents(
             continue
         seen_ids.add(doc_id)
         doc = {"id": doc_id, "url": doc_url}
-        if include_dates or include_scores or include_thumbnails:
+        if include_dates or include_scores or include_thumbnails or include_summary_kinds:
             parsed = _read_doc(store, entry.get("documentPath", ""))
             # A document JSON that parses to a list/string is still "unreadable"
             # for our purposes — the resolvers below call ``.get``, so anything
@@ -236,10 +257,22 @@ def list_collection_documents(
                     doc["modifiedTime"] = modified_time
             if include_scores:
                 doc.update(_resolve_doc_scores(raw))
+            # Both provenance keys go through `normalize_frontmatter_string`,
+            # not only the ingest models: this route reads FILES ON DISK, so a
+            # document written before that validation existed — or by a
+            # hand-edit, or by another writer — still arrives carrying `"  "`,
+            # which is truthy and would be served as a kind or a thumbnail url,
+            # or `" deep "`, which compares unequal to every real kind. The
+            # helper is shared with the files converter, the other disk reader
+            # of these keys.
             if include_thumbnails:
-                thumbnail = _doc_metadata(raw).get("thumbnail_url")
-                if isinstance(thumbnail, str) and thumbnail:
+                thumbnail = normalize_frontmatter_string(_doc_metadata(raw).get("thumbnail_url"))
+                if thumbnail:
                     doc["thumbnail_url"] = thumbnail
+            if include_summary_kinds:
+                summary_kind = normalize_frontmatter_string(_doc_metadata(raw).get("summary_kind"))
+                if summary_kind:
+                    doc["summary_kind"] = summary_kind
         documents.append(doc)
 
     return {"documents": documents}

@@ -511,6 +511,50 @@ class TestFrontmatterMetadata:
             assert cm.get("combined_score") == "0.34"
 
 
+class TestSummaryProvenanceNormalization:
+    """``summary_kind`` / ``summary_lang`` reach a consumer matchable, or not at all.
+
+    The converter is the SECOND reader of these keys off disk (the documents
+    listing is the first), and it reads the same files: a capture written
+    before the ingest normalized, a hand-edit, or another writer still puts
+    ``"  deep  "`` or ``"   "`` in the frontmatter. Padded, the value compares
+    unequal to every real kind; blank, it is truthy and defeats the rule that
+    "key absent" is the one no-value signal — and this reader puts it on the
+    document AND on every chunk.
+    """
+
+    _BODY = "The speaker walks through the index build, one stage at a time."
+
+    def _convert(self, converter, make_doc, front):
+        doc = make_doc(content_texts=[f"---\ntitle: Indexing a corpus\n{front}\n---\n{self._BODY}"])
+        return converter.convert(doc)[0]
+
+    def test_a_padded_summary_kind_is_stripped_on_the_document_and_every_chunk(self, converter, make_doc):
+        result = self._convert(converter, make_doc, 'summary_kind: "  deep  "')
+        assert result["metadata"]["summary_kind"] == "deep"
+        for chunk in result["chunks"]:
+            assert chunk["metadata"]["summary_kind"] == "deep"
+
+    def test_a_whitespace_only_summary_kind_is_absent_on_the_document_and_every_chunk(self, converter, make_doc):
+        result = self._convert(converter, make_doc, 'summary_kind: "   "')
+        assert "summary_kind" not in result["metadata"]
+        for chunk in result["chunks"]:
+            assert "summary_kind" not in chunk["metadata"]
+
+    def test_summary_lang_is_normalized_by_the_same_rule(self, converter, make_doc):
+        padded = self._convert(converter, make_doc, 'summary_lang: "  nb  "')
+        assert padded["metadata"]["summary_lang"] == "nb"
+        blank = self._convert(converter, make_doc, 'summary_lang: "   "')
+        assert "summary_lang" not in blank["metadata"]
+
+    def test_only_the_two_provenance_keys_are_normalized(self, converter, make_doc):
+        # The scope guard: this is a normalization of two named keys, not a
+        # strip of arbitrary frontmatter. A padded `title` or `breadcrumb` is
+        # what the file says and is served verbatim, as it always was.
+        result = self._convert(converter, make_doc, 'breadcrumb: "  A > B  "')
+        assert result["metadata"]["breadcrumb"] == "  A > B  "
+
+
 class TestSessionChunking:
     """Tests for session-aware chunking (dispatched when session_id is in frontmatter)."""
 
