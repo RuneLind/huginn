@@ -24,6 +24,7 @@ from main.runtime.knowledge_store import (
     maybe_enqueue_reindex,
     run_collection_update,
 )
+from main.utils.frontmatter import normalize_frontmatter_string
 
 logger = logging.getLogger(__name__)
 
@@ -210,10 +211,13 @@ def list_collection_documents(
     no key rather than an empty or null one, which is what lets a caller tell
     "summarized as X" from "we do not know". "We do not know" covers TWO cases,
     not one: a document written before kinds existed (there is no backfill),
-    and a document whose LAST ingest sent no kind — a re-ingest of the same url
-    overwrites the file whole, so the key goes with it. Only a direct POST
-    reaches the second case today (muninn's dedup does not re-ingest a listed
-    video), but the listing cannot tell them apart.
+    and a document whose LAST ingest sent no kind — a re-ingest under the same
+    path and the same url overwrites the file whole, so the key goes with it
+    (under a different title or category it forks ``Title (2).md`` instead).
+    The second case takes a direct POST, an old client, or muninn's ordinary
+    route after a failed duplicate check — its dedup reads this very listing and
+    treats a failed read as not-a-duplicate. The listing cannot tell the two
+    apart.
 
     All four flags read every document file, so they are opt-in to keep the
     default listing (used by hot paths like duplicate checks) cheap. Setting
@@ -252,23 +256,22 @@ def list_collection_documents(
                     doc["modifiedTime"] = modified_time
             if include_scores:
                 doc.update(_resolve_doc_scores(raw))
+            # Both provenance keys go through `normalize_frontmatter_string`,
+            # not only the ingest models: this route reads FILES ON DISK, so a
+            # document written before that validation existed — or by a
+            # hand-edit, or by another writer — still arrives carrying `"  "`,
+            # which is truthy and would be served as a kind or a thumbnail url,
+            # or `" deep "`, which compares unequal to every real kind. The
+            # helper is shared with the files converter, the other disk reader
+            # of these keys.
             if include_thumbnails:
-                thumbnail = _doc_metadata(raw).get("thumbnail_url")
-                if isinstance(thumbnail, str) and thumbnail:
+                thumbnail = normalize_frontmatter_string(_doc_metadata(raw).get("thumbnail_url"))
+                if thumbnail:
                     doc["thumbnail_url"] = thumbnail
             if include_summary_kinds:
-                summary_kind = _doc_metadata(raw).get("summary_kind")
-                if isinstance(summary_kind, str):
-                    # Stripped HERE too, not only at ingest: this reads FILES ON
-                    # DISK, so a document written before the ingest normalized —
-                    # or by a hand-edit, or by another writer — still arrives
-                    # carrying `"  "`, which is truthy and would be served as a
-                    # kind, or `" deep "`, which compares unequal to every real
-                    # kind. Serving the stripped value keeps "key missing" the
-                    # one no-value signal on this route whatever is on disk.
-                    summary_kind = summary_kind.strip()
-                    if summary_kind:
-                        doc["summary_kind"] = summary_kind
+                summary_kind = normalize_frontmatter_string(_doc_metadata(raw).get("summary_kind"))
+                if summary_kind:
+                    doc["summary_kind"] = summary_kind
         documents.append(doc)
 
     return {"documents": documents}

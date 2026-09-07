@@ -15,7 +15,11 @@ from fastapi import HTTPException
 
 from main.ingest.categories import CATEGORIES
 from main.ingest._markdown_writer import write_categorized_markdown
-from main.utils.frontmatter import escape_frontmatter_value, frontmatter_scalar
+from main.utils.frontmatter import (
+    escape_frontmatter_value,
+    frontmatter_scalar,
+    normalize_frontmatter_string,
+)
 
 #: The rendered frontmatter's bound, in CHARACTERS: `read_frontmatter_from_path`
 #: parses only the first 8192 characters of a file (`_MAX_HEAD_BYTES` is a
@@ -48,19 +52,28 @@ def check_frontmatter_field(value: Optional[str]) -> Optional[str]:
 
     NORMALIZES then caps, and both halves are load-bearing.
 
-    The normalization is a strip, with a stripped-empty value becoming
-    ``None``. Every vertical omits such a field with ``if req.<field>:``, and
-    ``"  "`` is TRUTHY — so without this the omit branch never fires and the
-    document carries ``summary_kind: "  "``, which is neither a kind nor the
-    "we do not know" that the MISSING key means. The whole design of these
-    fields is that "key absent" is the one no-value signal, and a truthy blank
-    is the one input that defeats it. A padded value is stored stripped for the
-    other half of the same rule: ``" deep "`` compares unequal to ``"deep"``
-    for every consumer — the documents listing, the converter metadata, a
-    shelf filter — so a value that survives must be the value a caller can
-    match on. Callers therefore have to read the value BACK off the model
-    (pydantic replaces the field with what this returns) rather than trusting
-    what they posted.
+    The normalization is ``normalize_frontmatter_string`` — a strip, with a
+    stripped-empty value becoming ``None`` — the SAME helper the two disk
+    readers of these keys apply (the documents listing and the files
+    converter), so the three of them cannot drift into three rules. Every
+    vertical omits such a field with ``if req.<field>:``, and ``"  "`` is
+    TRUTHY — so without this the omit branch never fires and the document
+    carries ``summary_kind: "  "``, which is neither a kind nor the "we do not
+    know" that the MISSING key means. The whole design of these fields is that
+    "key absent" is the one no-value signal, and a truthy blank is the one
+    input that defeats it. A padded value is stored stripped for the other half
+    of the same rule: ``" deep "`` compares unequal to ``"deep"`` for every
+    consumer — the documents listing, the converter metadata, a shelf filter.
+    Callers therefore have to read the value BACK off the model (pydantic
+    replaces the field with what this returns) rather than trusting what they
+    posted.
+
+    LEADING AND TRAILING whitespace only, which is all this does. The writer
+    transforms the value further: ``escape_frontmatter_value`` collapses runs
+    of ``\\r``/``\\n`` to a single space, so ``"de\\nep"`` passes here unchanged
+    and reaches disk as ``de ep``. A caller that must know the stored spelling
+    of an interior-whitespace value has to read the document back, not the
+    model.
 
     The cap is raised from the request MODEL, so an oversized value is a 422
     the route never has to handle. Why a per-field cap at all:
@@ -75,10 +88,8 @@ def check_frontmatter_field(value: Optional[str]) -> Optional[str]:
     conservative direction and text in Norwegian or Japanese is well over one
     byte per character.
     """
+    value = normalize_frontmatter_string(value)
     if value is None:
-        return None
-    value = value.strip()
-    if not value:
         return None
     if len(value.encode("utf-8")) > FRONTMATTER_FIELD_MAX_BYTES:
         raise ValueError(f"field exceeds {FRONTMATTER_FIELD_MAX_BYTES} bytes")

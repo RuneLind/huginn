@@ -37,14 +37,20 @@ class YouTubeIngestRequest(BaseModel):
     #
     # Absent means one of TWO things, not one. Every document ingested before
     # this field carries no `summary_kind` and there is no backfill — but a
-    # re-ingest of the same url OVERWRITES the file whole (see
-    # `write_categorized_markdown`), so a document also loses its kind when the
-    # LAST poster sent none. That second reading is narrow but reachable: the
-    # kind-less poster would be a pre-PR-2 muninn (the Chrome extension never
-    # posts here), and muninn's own dedup does not re-ingest a video the
-    # listing already names — so it takes a direct POST. The overwrite is the
-    # contract and is deliberately not changed; a reader that must not confuse
-    # the two has to look at the document's own date, not at this key.
+    # re-ingest under the SAME path and the SAME url OVERWRITES the file whole
+    # (`write_categorized_markdown` keys on `<category>/<sanitized title>.md`
+    # and then compares the stored url; a same-url re-ingest under another
+    # title or category forks `Title (2).md` instead), so a document also loses
+    # its kind when the LAST poster sent none.
+    #
+    # That second reading is narrow but reachable. The Chrome extension never
+    # posts here — it posts to muninn — so a kind-less poster is either a
+    # pre-PR-2 muninn, a direct POST, or muninn's own ordinary route: its dedup
+    # asks huginn for the collection listing and treats ANY failure of that read
+    # as not-a-duplicate (`findExistingByVideoId` returns null in its catch), so
+    # a huginn hiccup re-ingests a video that is already indexed. The overwrite
+    # is the contract and is deliberately not changed; a reader that must not
+    # confuse the two has to look at the document's own date, not at this key.
     summary_kind: Optional[str] = None
 
     @field_validator("summary_kind")

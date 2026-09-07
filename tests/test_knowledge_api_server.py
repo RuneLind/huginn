@@ -768,6 +768,31 @@ class TestCollectionDocumentThumbnails(_CollectionDocumentsCase):
         # One mapping read + one read per document, never two per document.
         assert reads.count("vm/documents/ai/A.md.json") == 1
 
+    def test_an_untrimmed_thumbnail_is_stripped_and_a_blank_one_is_never_served(self):
+        # Same rule, same disk, same helper as the summary kinds below: `" "`
+        # is truthy, so the omit branch missed it and the route served a
+        # whitespace string as a thumbnail url.
+        mapping = {
+            "6": {"documentId": "ai/F.md", "documentUrl": "https://vimeo.com/6",
+                  "documentPath": "vm/documents/ai/F.md.json"},
+            "7": {"documentId": "ai/G.md", "documentUrl": "https://vimeo.com/7",
+                  "documentPath": "vm/documents/ai/G.md.json"},
+        }
+        files = {
+            "vm/indexes/index_document_mapping.json": json.dumps(mapping),
+            "vm/documents/ai/F.md.json": json.dumps({"metadata": {"thumbnail_url": " "}}),
+            "vm/documents/ai/G.md.json": json.dumps(
+                {"metadata": {"thumbnail_url": "  https://i.vimeocdn.com/video/g.jpg  "}}
+            ),
+        }
+        client = self._client(_FakeStore(files, {"vm"}))
+        docs = client.get(
+            "/api/collection/vm/documents", params={"include_thumbnails": "1"}
+        ).json()["documents"]
+        by_id = {d["id"]: d for d in docs}
+        assert "thumbnail_url" not in by_id["ai/F.md"]
+        assert by_id["ai/G.md"]["thumbnail_url"] == "https://i.vimeocdn.com/video/g.jpg"
+
 
 class TestCollectionDocumentSummaryKinds(_CollectionDocumentsCase):
     """Opt-in ``include_summary_kinds`` — which summary kind wrote a capture's

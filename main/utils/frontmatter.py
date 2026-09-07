@@ -49,6 +49,35 @@ def frontmatter_scalar(value) -> str:
     return escape_frontmatter_value(value)
 
 
+def normalize_frontmatter_string(value) -> str | None:
+    """A frontmatter string as a consumer can match on it, or ``None``.
+
+    Strips, and turns a stripped-empty (or non-string) value into ``None``.
+    Both halves serve one rule: for the small-vocabulary provenance keys —
+    ``summary_kind``, ``summary_lang``, ``thumbnail_url`` — "key absent" is the
+    single no-value signal, and every consumer omits with a truth test. ``"  "``
+    is TRUTHY, so it survives that test and is served as a value that is
+    neither a kind nor "we do not know"; ``"  deep  "`` survives it too and
+    compares unequal to ``"deep"`` for every consumer.
+
+    It lives here because the ingest writers are not the only writers. THREE
+    readers apply it, two of which read markdown FILES ON DISK — the documents
+    listing (``main/routes/collections.py``) and the files converter
+    (``main/sources/files/files_document_converter.py``) — where a hand-edit, a
+    pre-normalization capture, or another writer's file arrives untrimmed
+    whatever the ingest models validate. The third is the ingest-side validator
+    (``main/ingest/_summary_ingest.check_frontmatter_field``), which normalizes
+    through this and then caps.
+
+    Deliberately NOT applied to frontmatter at large: a padded ``title`` or
+    ``breadcrumb`` is free text and is what the file says.
+    """
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
+
+
 def parse_tags(value: str) -> list[str]:
     """Split a frontmatter ``tags`` scalar into a clean list of tag strings.
 
