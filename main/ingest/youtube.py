@@ -33,9 +33,18 @@ class YouTubeIngestRequest(BaseModel):
     # The SUMMARY's own provenance: which of Muninn's summary kinds wrote the
     # body ("standard" | "deep" | "talk-notes", an open set — a per-bot preset
     # id lands here verbatim). Same key, same meaning and the same global
-    # converter allowlist entry as the Vimeo vertical's. Absent means "written
-    # before kinds existed": every document ingested before this field carries
-    # no `summary_kind`, and there is no backfill.
+    # converter allowlist entry as the Vimeo vertical's.
+    #
+    # Absent means one of TWO things, not one. Every document ingested before
+    # this field carries no `summary_kind` and there is no backfill — but a
+    # re-ingest of the same url OVERWRITES the file whole (see
+    # `write_categorized_markdown`), so a document also loses its kind when the
+    # LAST poster sent none. That second reading is narrow but reachable: the
+    # kind-less poster would be a pre-PR-2 muninn (the Chrome extension never
+    # posts here), and muninn's own dedup does not re-ingest a video the
+    # listing already names — so it takes a direct POST. The overwrite is the
+    # contract and is deliberately not changed; a reader that must not confuse
+    # the two has to look at the document's own date, not at this key.
     summary_kind: Optional[str] = None
 
     @field_validator("summary_kind")

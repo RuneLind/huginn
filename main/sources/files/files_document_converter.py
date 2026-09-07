@@ -36,12 +36,16 @@ _FRONTMATTER_METADATA_FIELDS = {"wip", "title", "breadcrumb", "space", "page_id"
                                 # body and the language it is written in. Deliberately NOT
                                 # namespaced under vimeo: `write_summary` is shared by six
                                 # verticals, and any of them growing a kind/language picker
-                                # writes these two keys with this meaning. Greped 2026-09-05:
-                                # only the vimeo ingest emits either, and zero of the 809
-                                # markdown files under data/ and the sister wiki tree carry one
-                                # — on the mini; the x/tiktok/article source trees live on the
-                                # laptop and were not in that grep, and their `author:` is the
-                                # one this allowlist now serves.
+                                # writes these two keys with this meaning — which is no
+                                # longer hypothetical: the YOUTUBE ingest emits
+                                # `summary_kind` too (2026-09-07), the second vertical to,
+                                # and it is why the key is not namespaced. `summary_lang`
+                                # is still vimeo-only. The rest of the 2026-09-05 grep
+                                # stands: zero of the 809 markdown files under data/ and
+                                # the sister wiki tree carried either — on the mini; the
+                                # x/tiktok/article source trees live on the laptop and were
+                                # not in that grep, and their `author:` is the one this
+                                # allowlist now serves.
                                 "summary_kind", "summary_lang",
                                 # Vimeo v2 PR 2: what oEmbed knew. `author` is ALREADY
                                 # written by the x_articles/tiktok/articles ingests and

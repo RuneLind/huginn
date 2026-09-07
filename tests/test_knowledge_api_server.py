@@ -844,6 +844,38 @@ class TestCollectionDocumentSummaryKinds(_CollectionDocumentsCase):
         assert by_id["ai/A.md"]["summary_kind"] == "deep"
         assert reads.count("yt/documents/ai/A.md.json") == 1
 
+    def _store_with_untrimmed_kinds(self) -> _FakeStore:
+        """Frontmatter this route did not write: padded and whitespace-only kinds.
+
+        The ingest now normalizes, but the listing reads FILES ON DISK — every
+        document written before that normalization, and anything a hand-edit
+        or another writer leaves, still reaches this resolver untrimmed.
+        """
+        mapping = {
+            "6": {"documentId": "ai/F.md", "documentUrl": "https://youtu.be/6",
+                  "documentPath": "yt/documents/ai/F.md.json"},
+            "7": {"documentId": "ai/G.md", "documentUrl": "https://youtu.be/7",
+                  "documentPath": "yt/documents/ai/G.md.json"},
+        }
+        files = {
+            "yt/indexes/index_document_mapping.json": json.dumps(mapping),
+            "yt/documents/ai/F.md.json": json.dumps({"metadata": {"summary_kind": "   "}}),
+            "yt/documents/ai/G.md.json": json.dumps({"metadata": {"summary_kind": "  deep  "}}),
+        }
+        return _FakeStore(files, {"yt"})
+
+    def test_an_untrimmed_kind_is_stripped_and_a_blank_one_is_never_served(self):
+        # `"   "` is truthy, so the omit rule ("key missing" is the one no-value
+        # signal) used to leak a kind a caller cannot match against anything,
+        # and `"  deep  "` compared unequal to every real kind.
+        client = self._client(self._store_with_untrimmed_kinds())
+        docs = client.get(
+            "/api/collection/yt/documents", params={"include_summary_kinds": "1"}
+        ).json()["documents"]
+        by_id = {d["id"]: d for d in docs}
+        assert "summary_kind" not in by_id["ai/F.md"]
+        assert by_id["ai/G.md"]["summary_kind"] == "deep"
+
 
 class TestCollectionDocumentScores(_CollectionDocumentsCase):
     """Opt-in score enrichment on /api/collection/{name}/documents."""
@@ -2335,6 +2367,31 @@ class TestVimeoIngest:
         assert "thumbnail_url:" not in written
         assert 'vimeo_video_id: "1223358361"' in written
 
+    def test_whitespace_only_frontmatter_fields_write_no_key(self, tmp_path):
+        # The same shared validator the YouTube kind goes through: a
+        # padded-to-nothing value is TRUTHY, so every `if req.<field>:` omit
+        # branch in this vertical missed it and the frontmatter carried
+        # `speaker: "  "`.
+        from main.ingest.vimeo import ingest_vimeo
+        req = self._req(summary_kind="  ", speaker="\t\n ", caption_kind=" ")
+        assert (req.summary_kind, req.speaker, req.caption_kind) == (None, None, None)
+        result = ingest_vimeo(req, sources_path=str(tmp_path))
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert "summary_kind:" not in written
+        assert "speaker:" not in written
+        assert "caption_kind:" not in written
+
+    def test_padded_frontmatter_fields_are_stored_stripped(self, tmp_path):
+        from main.ingest.vimeo import ingest_vimeo
+        result = ingest_vimeo(
+            self._req(summary_kind=" standard ", speaker="  Kari Nordmann  "),
+            sources_path=str(tmp_path),
+        )
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert 'summary_kind: "standard"' in written
+        assert 'speaker: "Kari Nordmann"' in written
+        assert 'summary_kind: " standard "' not in written
+
     def test_the_id_key_is_namespaced_against_the_other_video_sources(self, tmp_path):
         # `video_id` is NOT this vertical's word: the YouTube channel fetcher
         # writes a bare `video_id: <11-char YouTube id>` into every file of the
@@ -3029,6 +3086,29 @@ class TestYouTubeIngestUnit:
         result = ingest_youtube(self._req(summary_kind=""), transcripts_path=str(tmp_path))
         written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
         assert "summary_kind" not in written
+
+    def test_a_whitespace_only_kind_writes_no_key(self, tmp_path):
+        # `"  "` is TRUTHY, so before the shared validator normalized it the
+        # omit branch never fired and the frontmatter carried
+        # `summary_kind: "  "` — a value that is neither a kind nor the
+        # "we do not know" the missing key means.
+        from main.ingest.youtube import ingest_youtube
+        req = self._req(summary_kind="  \t\n ")
+        assert req.summary_kind is None
+        result = ingest_youtube(req, transcripts_path=str(tmp_path))
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert "summary_kind" not in written
+
+    def test_a_padded_kind_is_stored_stripped(self, tmp_path):
+        # Stored verbatim, `" deep "` compares unequal to `"deep"` for every
+        # consumer — the listing, the converter metadata, a shelf filter.
+        from main.ingest.youtube import ingest_youtube
+        req = self._req(summary_kind=" deep ")
+        assert req.summary_kind == "deep"
+        result = ingest_youtube(req, transcripts_path=str(tmp_path))
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert 'summary_kind: "deep"' in written
+        assert 'summary_kind: " deep "' not in written
 
     #: Spelled out, not imported — the Vimeo suite's rule: a test that builds
     #: its boundary from the constant cannot notice the constant moving.

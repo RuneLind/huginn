@@ -100,9 +100,10 @@ def _doc_metadata(doc: dict) -> dict:
     """The document's frontmatter metadata, or ``{}`` when it is not a dict.
 
     THE one accessor for every resolver on the listing's one-read pass (dates,
-    scores, thumbnails). A document whose ``metadata`` parsed to a string used
-    to 500 the whole listing from whichever resolver touched it first — the
-    class was closed one branch at a time until this, which is the enumeration:
+    scores, thumbnails, summary kinds). A document whose ``metadata`` parsed to
+    a string used to 500 the whole listing from whichever resolver touched it
+    first — the class was closed one branch at a time until this, which is the
+    enumeration:
     a resolver that reads the metadata key any other way re-opens it (pinned by
     a test that counts the read sites in this module).
     """
@@ -204,10 +205,15 @@ def list_collection_documents(
     no-thumbnail signal.
 
     When ``include_summary_kinds`` is set, each entry that has a non-empty
-    string ``summary_kind`` in its frontmatter carries it (the Vimeo and
-    YouTube ingests write one). Same omit rule: a document written before
-    kinds existed has no key rather than an empty or null one, which is what
-    lets a caller tell "summarized as X" from "we do not know".
+    string ``summary_kind`` in its frontmatter carries it, stripped (the Vimeo
+    and YouTube ingests write one). Same omit rule: a document with no kind has
+    no key rather than an empty or null one, which is what lets a caller tell
+    "summarized as X" from "we do not know". "We do not know" covers TWO cases,
+    not one: a document written before kinds existed (there is no backfill),
+    and a document whose LAST ingest sent no kind — a re-ingest of the same url
+    overwrites the file whole, so the key goes with it. Only a direct POST
+    reaches the second case today (muninn's dedup does not re-ingest a listed
+    video), but the listing cannot tell them apart.
 
     All four flags read every document file, so they are opt-in to keep the
     default listing (used by hot paths like duplicate checks) cheap. Setting
@@ -252,8 +258,17 @@ def list_collection_documents(
                     doc["thumbnail_url"] = thumbnail
             if include_summary_kinds:
                 summary_kind = _doc_metadata(raw).get("summary_kind")
-                if isinstance(summary_kind, str) and summary_kind:
-                    doc["summary_kind"] = summary_kind
+                if isinstance(summary_kind, str):
+                    # Stripped HERE too, not only at ingest: this reads FILES ON
+                    # DISK, so a document written before the ingest normalized —
+                    # or by a hand-edit, or by another writer — still arrives
+                    # carrying `"  "`, which is truthy and would be served as a
+                    # kind, or `" deep "`, which compares unequal to every real
+                    # kind. Serving the stripped value keeps "key missing" the
+                    # one no-value signal on this route whatever is on disk.
+                    summary_kind = summary_kind.strip()
+                    if summary_kind:
+                        doc["summary_kind"] = summary_kind
         documents.append(doc)
 
     return {"documents": documents}

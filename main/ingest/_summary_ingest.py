@@ -46,19 +46,41 @@ FRONTMATTER_FIELD_MAX_BYTES = 512
 def check_frontmatter_field(value: Optional[str]) -> Optional[str]:
     """Pydantic validator body for a string written verbatim into frontmatter.
 
-    Raised from the request MODEL, so an oversized value is a 422 the route
-    never has to handle. Why a per-field cap at all:
+    NORMALIZES then caps, and both halves are load-bearing.
+
+    The normalization is a strip, with a stripped-empty value becoming
+    ``None``. Every vertical omits such a field with ``if req.<field>:``, and
+    ``"  "`` is TRUTHY — so without this the omit branch never fires and the
+    document carries ``summary_kind: "  "``, which is neither a kind nor the
+    "we do not know" that the MISSING key means. The whole design of these
+    fields is that "key absent" is the one no-value signal, and a truthy blank
+    is the one input that defeats it. A padded value is stored stripped for the
+    other half of the same rule: ``" deep "`` compares unequal to ``"deep"``
+    for every consumer — the documents listing, the converter metadata, a
+    shelf filter — so a value that survives must be the value a caller can
+    match on. Callers therefore have to read the value BACK off the model
+    (pydantic replaces the field with what this returns) rather than trusting
+    what they posted.
+
+    The cap is raised from the request MODEL, so an oversized value is a 422
+    the route never has to handle. Why a per-field cap at all:
     ``read_frontmatter_from_path`` reads only the first 8192 characters of a
     file, so a value that pushes the closing ``---`` past that would make the
     overwrite check see no url and fork ``Title (2).md`` on every re-ingest,
     silently. ``FRONTMATTER_MAX_CHARS`` closes that for every field whatever
-    carries it; this one names the culprit.
+    carries it; this one names the culprit. It counts the STRIPPED value,
+    which is the one that reaches the head.
 
     Bytes, not characters: the head is bounded in characters, but this is the
     conservative direction and text in Norwegian or Japanese is well over one
     byte per character.
     """
-    if value is not None and len(value.encode("utf-8")) > FRONTMATTER_FIELD_MAX_BYTES:
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    if len(value.encode("utf-8")) > FRONTMATTER_FIELD_MAX_BYTES:
         raise ValueError(f"field exceeds {FRONTMATTER_FIELD_MAX_BYTES} bytes")
     return value
 
