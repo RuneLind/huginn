@@ -39,8 +39,9 @@ class YouTubeIngestRequest(BaseModel):
     # this field carries no `summary_kind` and there is no backfill — but a
     # re-ingest under the SAME path and the SAME url OVERWRITES the file whole
     # (`write_categorized_markdown` keys on `<category>/<sanitized title>.md`
-    # and then compares the stored url; a same-url re-ingest under another
-    # title or category forks `Title (2).md` instead), so a document also loses
+    # and then compares the stored url; the same path with another url forks
+    # `Title (2).md`, and another title or category is a second path, so
+    # either way a second document is written instead), so a document also loses
     # its kind when the LAST poster sent none.
     #
     # That second reading is narrow but reachable. The Chrome extension never

@@ -213,7 +213,8 @@ def list_collection_documents(
     not one: a document written before kinds existed (there is no backfill),
     and a document whose LAST ingest sent no kind — a re-ingest under the same
     path and the same url overwrites the file whole, so the key goes with it
-    (under a different title or category it forks ``Title (2).md`` instead).
+    (the same path with another url forks ``Title (2).md``; another title or
+    category is a second path — a second document either way).
     The second case takes a direct POST, an old client, or muninn's ordinary
     route after a failed duplicate check — its dedup reads this very listing and
     treats a failed read as not-a-duplicate. The listing cannot tell the two

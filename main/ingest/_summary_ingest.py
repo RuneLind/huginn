@@ -54,8 +54,9 @@ def check_frontmatter_field(value: Optional[str]) -> Optional[str]:
 
     The normalization is ``normalize_frontmatter_string`` — a strip, with a
     stripped-empty value becoming ``None`` — the SAME helper the two disk
-    readers of these keys apply (the documents listing and the files
-    converter), so the three of them cannot drift into three rules. Every
+    readers apply (the documents listing to ``summary_kind``/``thumbnail_url``,
+    the files converter to ``summary_kind``/``summary_lang``), so one RULE is
+    shared even though each reader picks its own key set. Every
     vertical omits such a field with ``if req.<field>:``, and ``"  "`` is
     TRUTHY — so without this the omit branch never fires and the document
     carries ``summary_kind: "  "``, which is neither a kind nor the "we do not

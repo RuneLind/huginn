@@ -60,8 +60,13 @@ def normalize_frontmatter_string(value) -> str | None:
     neither a kind nor "we do not know"; ``"  deep  "`` survives it too and
     compares unequal to ``"deep"`` for every consumer.
 
-    It lives here because the ingest writers are not the only writers. THREE
-    readers apply it, two of which read markdown FILES ON DISK — the documents
+    It lives here because the ingest writers are not the only writers, and the
+    readers apply it to sets of their own: the ingest validator to every capped
+    string field, the documents listing to ``summary_kind`` and
+    ``thumbnail_url``, the files converter to ``summary_kind`` and
+    ``summary_lang`` only (see ``_FRONTMATTER_NORMALIZED_FIELDS`` there — a
+    padded ``caption_lang`` or ``thumbnail_url`` on disk still reaches a chunk
+    verbatim). Two of those readers read markdown FILES ON DISK — the documents
     listing (``main/routes/collections.py``) and the files converter
     (``main/sources/files/files_document_converter.py``) — where a hand-edit, a
     pre-normalization capture, or another writer's file arrives untrimmed
