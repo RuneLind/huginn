@@ -466,15 +466,20 @@ class TestSourcePathHeaderEncoding:
 
         assert Response(content=b"x", headers={"X-Probe": value}).headers["X-Probe"] == value
 
-    def test_the_reader_never_indexes_a_crlf_filename(self, tmp_path, monkeypatch):
-        # Why the encoder is tested through the helper and not the route: such a
-        # file can exist on disk, and the reader still does not make it a
-        # document, so no request can ever put CR/LF into the header.
+    def test_the_reader_indexes_cr_but_never_lf_filenames(self, tmp_path, monkeypatch):
+        # The reader's include pattern is re.fullmatch(".*", …): "." never
+        # matches "\n", so an LF-bearing name is never a document, but it does
+        # match "\r", so a CR-only name IS one and can reach the header. That
+        # is why the encoder is not unreachable defence-in-depth.
         monkeypatch.chdir(tmp_path)
-        _build_fixture_collection({"talk.md": SUMMARY_DOC, CRLF_PATH: SUMMARY_DOC})
+        cr_only = "cr\rname.md"
+        _build_fixture_collection(
+            {"talk.md": SUMMARY_DOC, CRLF_PATH: SUMMARY_DOC, cr_only: SUMMARY_DOC}
+        )
 
-        assert CRLF_PATH in os.listdir(os.path.abspath(SOURCE_REL))
-        assert _indexed_document_ids() == {"talk.md"}
+        on_disk = os.listdir(os.path.abspath(SOURCE_REL))
+        assert CRLF_PATH in on_disk and cr_only in on_disk
+        assert _indexed_document_ids() == {"talk.md", cr_only}
 
 
 class TestRawReadRejections(_RawCase):

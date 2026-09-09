@@ -325,9 +325,11 @@ def _source_path_header_value(rel_path: str) -> str:
       dropped mid-response. The caller sees nothing at all, not injected headers.
 
     So this is not the guard that stops response splitting; it is what turns
-    both of those into a 200. Such an id cannot reach here anyway — the reader
-    never indexes a CR/LF filename (measured), and the membership check runs
-    first — which is why the encoder is tested directly.
+    both of those into a 200. Reachability is asymmetric: the reader's include
+    pattern is ``re.fullmatch(".*", …)`` and ``.`` never matches ``\n``, so an
+    LF-bearing name is never indexed, but ``.`` does match ``\r``, so a CR-only
+    name IS indexed and does reach here (measured). That CR case is what this
+    encoder exists for; the LF case is covered by the reader.
     """
     return quote(rel_path)
 

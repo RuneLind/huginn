@@ -179,8 +179,10 @@ curl "http://127.0.0.1:8321/api/document/x-articles/some-doc.md?raw=1"
   rather than injected headers. What `quote()` buys is that a non-latin-1 name
   (`łódź.md`) does not raise at `Response` construction and a CR/LF-bearing one
   does not become a dropped connection. Both measured in
-  `tests/test_document_raw_read.py`, which also measures that the reader never
-  indexes a CR/LF filename.
+  `tests/test_document_raw_read.py`, which also measures the reader's own
+  asymmetry: its `.*` include pattern never matches `\n`, so an LF-bearing
+  name is never indexed, but it does match `\r`, so a CR-only name is indexed
+  and is the case the encoder exists for.
 - Errors carry no server path: the unreadable-source 500, the two shared
   helpers' 500s (unreadable manifest, unreadable index mapping) and the basePath
   400 all name only the collection or the document, and log the exception. Those
