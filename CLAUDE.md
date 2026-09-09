@@ -146,17 +146,31 @@ pass without this.
 curl "http://127.0.0.1:8321/api/document/x-articles/some-doc.md?raw=1"
 ```
 
-- **`1` or `true`, case-insensitive.** Absent or any other value is the unchanged
-  JSON form — an allowlist rather than FastAPI's bool parsing, which 422s what it
-  cannot read: the JSON response is a cross-repo contract, so an unrecognised
-  value must degrade to it rather than fail a caller who never asked for raw.
+- **`1` or `true` serves the source; `0`, `false` or an empty value serves the
+  JSON; absent serves the JSON.** Anything else — `yes`, `on`, `2` — is a **400**
+  naming the accepted values, and so is `?raw=1&raw=0` (every occurrence is read,
+  not the last one). Falling through to the JSON form would answer a caller who
+  asked for the source with the cleaned copy and no error: the silent loss this
+  endpoint exists to prevent.
 - **localFiles collections only** (400 otherwise): a query-based reader's
   documents have no file on disk.
-- Same guards as the delete route, and for the same reasons: **404** for an id
-  that is not in the collection's index mapping (basePath is not the collection),
-  404 for an indexed id whose file is gone (a stale index), **400** for a
-  traversing id, one that is itself a symlink, one whose target leaves basePath,
-  or one carrying a NUL.
+- **One 404 for every id it will not serve**, detail `Document '<id>' is not
+  available in collection '<c>'`: not indexed, indexed but gone from disk, and
+  excluded all answer identically, and the membership check runs before the file
+  is stat'ed. Separate wordings make an unauthenticated GET an existence oracle
+  for anything under `reader.basePath` — a wiki's basePath is a live git repo
+  root, so `.git/config` answering differently from `.git/nope` reports what is
+  on the disk of a tree the collection does not own. The delete route keeps its
+  own, more specific 404: it is an operator action on a named file.
+- **400** for a traversing id, one that is itself a symlink, one whose target
+  leaves basePath, or one carrying a NUL — the delete route's containment guard,
+  unchanged. A trailing slash is normalized (`talk.md/` reads `talk.md`), also as
+  on the delete route.
+- Response headers: `X-Huginn-Source-Path` (percent-encoded — Starlette emits
+  CR/LF inside a header value verbatim, so an id carrying one would split the
+  response) and `X-Content-Type-Options: nosniff`.
+- A read that fails on the filesystem is a 500 whose detail carries no path; the
+  exception goes to the log.
 - Pure read — nothing moves, nothing reindexes.
 
 ## Deleting a document

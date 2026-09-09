@@ -110,7 +110,7 @@ graph LR
 Endpoints:
 - `GET /api/search?q=...&collection=...&limit=10` — Hybrid search with reranking
 - `GET /api/collections` — List loaded collections
-- `GET /api/document/{collection}/{doc_id}` — Full document; `?raw=1` serves the source file byte for byte instead of the stored (cleaned) JSON, for localFiles collections only
+- `GET /api/document/{collection}/{doc_id}` — Full document; `?raw=1` (or `true`) serves the source file byte for byte instead of the stored (cleaned) JSON, for localFiles collections only. `0`/`false`/empty/absent is the JSON form; any other value is a 400
 - `DELETE /api/document/{collection}/{doc_id}` — Soft-delete a document (localFiles collections): moves the source file to `data/deleted/` and triggers a reindex
 - `GET /api/youtube/transcript/{video_id}?timestamps=1` — A video's transcript, unsummarized; `timestamps=1` returns it collapsed into `### [HH:MM:SS]`-headed two-minute windows instead of one joined string
 - `GET /api/graph/{node_id}` — Knowledge graph node

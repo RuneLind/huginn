@@ -290,28 +290,89 @@ def _is_inside(base_dir: str, resolved: str) -> bool:
     return resolved.startswith(base_dir + os.sep)
 
 
-#: ``?raw=`` values that select the source-file form. A two-value allowlist
-#: rather than FastAPI's bool parsing, which 422s on anything it cannot read:
-#: the JSON form is a cross-repo contract (muninn reads it), so an unrecognised
-#: value has to degrade to that form rather than fail a caller who never asked
-#: for the raw one.
+#: ``?raw=`` spellings, each side of the switch listed explicitly. An
+#: unrecognised value is a 400 rather than a fall-through to the JSON form:
+#: silently answering a caller who asked for the source with the CLEANED copy is
+#: the exact failure this endpoint exists to prevent — it re-ingests a lossy
+#: document and never sees an error. Absent stays the JSON form, so the
+#: cross-repo contract muninn reads is untouched.
 RAW_TRUE_VALUES = frozenset({"1", "true"})
+RAW_FALSE_VALUES = frozenset({"0", "false", ""})
+RAW_VALUES_HELP = (
+    "'1' or 'true' for the source file, '0', 'false' or an empty value for the "
+    "document JSON (case-insensitive)"
+)
 
 #: Where the raw form reports the served file's path, relative to the reader's
-#: basePath. Percent-encoded, because a header value goes out as latin-1 and a
-#: Norwegian wiki page ('småprat.md') would otherwise fail to render at all.
+#: basePath.
 SOURCE_PATH_HEADER = "X-Huginn-Source-Path"
 
 
-@router.get("/api/document/{collection}/{doc_id:path}")
+def _source_path_header_value(rel_path: str) -> str:
+    """``rel_path`` percent-encoded for ``SOURCE_PATH_HEADER``.
+
+    Load-bearing for response splitting: Starlette does NOT reject CR/LF inside
+    a header value — it writes the bytes out verbatim (measured) — so a document
+    id carrying one would inject headers of the caller's choosing into this
+    response. Encoding also keeps a non-latin-1 name ('łódź.md', '日本語.md')
+    from raising at render time, since header values are encoded as latin-1;
+    Norwegian 'å'/'æ'/'ø' ARE latin-1 and would have gone out fine on their own.
+    """
+    return quote(rel_path)
+
+
+def _wants_raw_source(values: list[str] | None) -> bool:
+    """Whether ``?raw=`` selects the source-file form. 400 on anything else.
+
+    Reads EVERY occurrence rather than FastAPI's last-wins single value:
+    ``?raw=1&raw=0`` from a caller that appended the parameter twice would
+    otherwise quietly serve the JSON form to a request that asked for the source.
+    """
+    if not values:
+        return False
+
+    wanted = set()
+    for value in values:
+        lowered = value.lower()
+        if lowered in RAW_TRUE_VALUES:
+            wanted.add(True)
+        elif lowered in RAW_FALSE_VALUES:
+            wanted.add(False)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid 'raw' value '{value}'; accepted values are {RAW_VALUES_HELP}",
+            )
+
+    if len(wanted) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Conflicting 'raw' values in the query string; pass the parameter "
+                "at most once"
+            ),
+        )
+    return wanted.pop()
+
+
+@router.get(
+    "/api/document/{collection}/{doc_id:path}",
+    responses={
+        200: {
+            "description": "The stored document JSON, or the source file with ?raw=1",
+            "content": {"application/json": {}, "text/markdown": {}},
+        }
+    },
+)
 def get_document(
     collection: str,
     doc_id: str,
-    raw: str | None = Query(
+    raw: list[str] | None = Query(
         None,
         description="'1' or 'true' (case-insensitive) serves the source file "
-                    "verbatim instead of the stored document JSON; any other "
-                    "value is the JSON form.",
+                    "verbatim instead of the stored document JSON; '0', 'false' "
+                    "or an empty value is the JSON form. Any other value, or two "
+                    "occurrences that disagree, is a 400.",
     ),
     store: KnowledgeStore = Depends(get_store),
 ):
@@ -325,10 +386,14 @@ def get_document(
     the transcript back) would shrink the file a little on every pass. ``raw=1``
     answers with the bytes on disk instead.
     """
+    # Parsed before anything is read: an unreadable parameter is a request-shape
+    # error, and the answer to it must not depend on the store's contents.
+    want_raw = _wants_raw_source(raw)
+
     if not store.has_collection(collection):
         raise HTTPException(status_code=404, detail=f"Collection '{collection}' not found")
 
-    if raw is not None and raw.lower() in RAW_TRUE_VALUES:
+    if want_raw:
         return _raw_source_response(store, collection, doc_id)
 
     if doc_id.startswith("/"):
@@ -358,7 +423,7 @@ def get_document(
 def _raw_source_response(store: KnowledgeStore, collection: str, doc_id: str) -> Response:
     """The source file backing ``doc_id``, byte for byte.
 
-    Reuses the delete route's three guards verbatim, in its order, because they
+    Reuses the delete route's three guards, in that route's order, because they
     answer the same three questions: is there an enumerable source tree at all
     (400 for a non-localFiles reader — its documents have no file on disk), does
     this id resolve to a path strictly inside it (400 for traversal, an escaping
@@ -368,34 +433,57 @@ def _raw_source_response(store: KnowledgeStore, collection: str, doc_id: str) ->
     there). Without the last one this route would serve ``.git/config`` and
     every excluded page under a wiki's basePath.
 
-    Indexed but gone from disk is a stale index, not a server error: 404, the
-    same answer the delete route gives.
+    That last guard answers with ONE detail for every id it will not serve —
+    missing, present-but-unindexed and excluded alike — and, unlike the delete
+    route, it runs BEFORE the file is stat'ed. Separate wordings (the delete
+    route's, which reports which of the two it was) would make an
+    unauthenticated GET an existence oracle for anything under basePath: a wiki's
+    basePath is a live git repo root, so '.git/config' answering differently from
+    '.git/nope' reports what is on the disk of a tree the collection does not
+    own. Indexed but gone from disk is a stale index, not a server error, and
+    collapses into the same 404.
 
     Pure read — no move, no reindex, nothing written.
     """
+    # ``GET .../talk.md/?raw=1`` reaches the handler with the trailing slash
+    # intact, exactly as the delete route sees it. Normalize so one id means one
+    # file on both routes, rather than 404 on read and 200 on delete.
+    doc_id = doc_id.rstrip("/")
+
     base_dir = _localfiles_base_path(store, collection, operation="raw source reading")
     source_path = _resolve_source_file(base_dir, doc_id)
 
+    unavailable = f"Document '{doc_id}' is not available in collection '{collection}'"
+    _require_indexed_document(store, collection, doc_id, not_indexed_detail=unavailable)
     if not os.path.isfile(source_path):
-        raise HTTPException(
-            status_code=404,
-            detail=f"Source file for document '{doc_id}' not found in collection '{collection}'",
-        )
-    _require_indexed_document(store, collection, doc_id)
+        raise HTTPException(status_code=404, detail=unavailable)
 
     try:
         with open(source_path, "rb") as f:
             body = f.read()
-    except OSError as e:
+    except OSError:
+        # The exception's string carries the absolute path; it belongs in the
+        # server log, not in a response to an untrusted caller.
+        logger.warning(
+            "Could not read source file for %s/%s", collection, doc_id, exc_info=True
+        )
         raise HTTPException(
             status_code=500,
-            detail=f"Could not read the source file for document '{doc_id}': {e}",
+            detail=f"Could not read the source file for document '{doc_id}'",
         )
 
     return Response(
         content=body,
-        media_type="text/markdown; charset=utf-8",
-        headers={SOURCE_PATH_HEADER: quote(os.path.relpath(source_path, base_dir))},
+        # Starlette appends '; charset=utf-8' to any 'text/*' media type, so the
+        # wire value is unchanged from spelling it out here.
+        media_type="text/markdown",
+        headers={
+            SOURCE_PATH_HEADER: _source_path_header_value(
+                os.path.relpath(source_path, base_dir)
+            ),
+            # The body is a file this API did not author. Nothing may re-type it.
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 
@@ -585,7 +673,12 @@ def _collections_sharing_source(store: KnowledgeStore, source_path: str,
     return result
 
 
-def _require_indexed_document(store: KnowledgeStore, collection: str, doc_id: str) -> None:
+def _require_indexed_document(
+    store: KnowledgeStore,
+    collection: str,
+    doc_id: str,
+    not_indexed_detail: str | None = None,
+) -> None:
     """404 unless ``doc_id`` is an actual indexed document of ``collection``.
 
     basePath is not the collection — for several wikis it is a live git repo root
@@ -599,6 +692,12 @@ def _require_indexed_document(store: KnowledgeStore, collection: str, doc_id: st
     Checked against the persisted index mapping rather than a fresh reader
     enumeration: it is a single small JSON read, and it is exactly the set the
     subsequent orphan pruning reconciles against.
+
+    ``not_indexed_detail`` replaces the 404's message. The default is the delete
+    route's, which reports that the file may exist under basePath — true, useful
+    to an operator about to move something, and an existence oracle on a plain
+    read. The raw route passes a detail that says only "not available", the same
+    one it gives for an id with no file at all.
     """
     path = f"{collection}/indexes/reverse_index_document_mapping.json"
     try:
@@ -611,7 +710,8 @@ def _require_indexed_document(store: KnowledgeStore, collection: str, doc_id: st
     if doc_id not in mapping:
         raise HTTPException(
             status_code=404,
-            detail=(
+            detail=not_indexed_detail
+            or (
                 f"Document '{doc_id}' is not indexed in collection '{collection}' "
                 f"(the file may exist under reader.basePath but be excluded from "
                 f"the collection); refusing to move it"

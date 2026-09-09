@@ -340,7 +340,13 @@ class TestDeleteDocumentRejections(_DeleteCase):
         )
 
         assert resp.status_code == 404
-        assert "not indexed" in resp.json()["detail"]
+        # Byte for byte: the raw-read route passes a detail of its own into the
+        # shared helper, and this route's wording must not move with it.
+        assert resp.json()["detail"] == (
+            "Document 'arrived-later.md' is not indexed in collection "
+            f"'{COLLECTION}' (the file may exist under reader.basePath but be "
+            "excluded from the collection); refusing to move it"
+        )
         assert os.path.isfile(os.path.join(SOURCE_REL, "arrived-later.md"))
 
     def test_git_internals_are_not_deletable_404(self, fixture_collection, monkeypatch):
@@ -405,7 +411,14 @@ class TestDeleteDocumentRejections(_DeleteCase):
         )
 
         assert resp.status_code == 400
-        assert "localFiles" in resp.json()["detail"]
+        # Byte for byte: ``_localfiles_base_path`` names its caller here, and the
+        # raw-read route passes a verb of its own. Asserting only that
+        # "localFiles" appears survives any verb, including "raw source reading"
+        # leaking onto the delete route.
+        assert resp.json()["detail"] == (
+            f"Collection '{COLLECTION}' has reader type 'jira'; deletion is only "
+            "supported for 'localFiles' collections"
+        )
         # A query-based reader cannot enumerate its ids, so orphan pruning would
         # never fire — half-deleting it is exactly what the 400 prevents.
         assert os.path.isfile(os.path.join(SOURCE_REL, "junk.md"))
