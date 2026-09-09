@@ -7,8 +7,9 @@ import shutil
 
 from datetime import datetime, timedelta, timezone
 from statistics import median
+from urllib.parse import quote
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
 
 from main.runtime.indexing_run_ledger import (
     INCOMPLETE_AFTER_SECONDS,
@@ -289,10 +290,46 @@ def _is_inside(base_dir: str, resolved: str) -> bool:
     return resolved.startswith(base_dir + os.sep)
 
 
+#: ``?raw=`` values that select the source-file form. A two-value allowlist
+#: rather than FastAPI's bool parsing, which 422s on anything it cannot read:
+#: the JSON form is a cross-repo contract (muninn reads it), so an unrecognised
+#: value has to degrade to that form rather than fail a caller who never asked
+#: for the raw one.
+RAW_TRUE_VALUES = frozenset({"1", "true"})
+
+#: Where the raw form reports the served file's path, relative to the reader's
+#: basePath. Percent-encoded, because a header value goes out as latin-1 and a
+#: Norwegian wiki page ('småprat.md') would otherwise fail to render at all.
+SOURCE_PATH_HEADER = "X-Huginn-Source-Path"
+
+
 @router.get("/api/document/{collection}/{doc_id:path}")
-def get_document(collection: str, doc_id: str, store: KnowledgeStore = Depends(get_store)):
+def get_document(
+    collection: str,
+    doc_id: str,
+    raw: str | None = Query(
+        None,
+        description="'1' or 'true' (case-insensitive) serves the source file "
+                    "verbatim instead of the stored document JSON; any other "
+                    "value is the JSON form.",
+    ),
+    store: KnowledgeStore = Depends(get_store),
+):
+    """The stored document JSON, or with ``?raw=1`` the source file verbatim.
+
+    The stored ``text`` is a CLEANED copy — fenced code removed, images
+    rewritten, a breadcrumb prepended (``FilesDocumentConverter``) — and the
+    source is not persisted beside it, so the JSON form cannot round-trip a
+    document. A caller that reads a document in order to re-ingest it (muninn's
+    capture re-run splits a summary at its ``## Transcript`` heading and posts
+    the transcript back) would shrink the file a little on every pass. ``raw=1``
+    answers with the bytes on disk instead.
+    """
     if not store.has_collection(collection):
         raise HTTPException(status_code=404, detail=f"Collection '{collection}' not found")
+
+    if raw is not None and raw.lower() in RAW_TRUE_VALUES:
+        return _raw_source_response(store, collection, doc_id)
 
     if doc_id.startswith("/"):
         raise HTTPException(status_code=400, detail="Invalid document ID")
@@ -318,6 +355,50 @@ def get_document(collection: str, doc_id: str, store: KnowledgeStore = Depends(g
         raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
 
 
+def _raw_source_response(store: KnowledgeStore, collection: str, doc_id: str) -> Response:
+    """The source file backing ``doc_id``, byte for byte.
+
+    Reuses the delete route's three guards verbatim, in its order, because they
+    answer the same three questions: is there an enumerable source tree at all
+    (400 for a non-localFiles reader — its documents have no file on disk), does
+    this id resolve to a path strictly inside it (400 for traversal, an escaping
+    symlink, or an id that is itself a symlink), and is it a document this
+    collection actually owns (404 otherwise — basePath is not the collection,
+    and several are live repo roots whose reader excludes most of what lives
+    there). Without the last one this route would serve ``.git/config`` and
+    every excluded page under a wiki's basePath.
+
+    Indexed but gone from disk is a stale index, not a server error: 404, the
+    same answer the delete route gives.
+
+    Pure read — no move, no reindex, nothing written.
+    """
+    base_dir = _localfiles_base_path(store, collection, operation="raw source reading")
+    source_path = _resolve_source_file(base_dir, doc_id)
+
+    if not os.path.isfile(source_path):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Source file for document '{doc_id}' not found in collection '{collection}'",
+        )
+    _require_indexed_document(store, collection, doc_id)
+
+    try:
+        with open(source_path, "rb") as f:
+            body = f.read()
+    except OSError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not read the source file for document '{doc_id}': {e}",
+        )
+
+    return Response(
+        content=body,
+        media_type="text/markdown; charset=utf-8",
+        headers={SOURCE_PATH_HEADER: quote(os.path.relpath(source_path, base_dir))},
+    )
+
+
 #: Where soft-deleted source files are parked. Deliberately CWD-relative by
 #: default, exactly like a manifest's relative ``reader.basePath`` — the server's
 #: working directory is the one anchor both already share. ``data/`` is
@@ -331,7 +412,9 @@ def _deleted_root() -> str:
     return os.environ.get(DELETED_DIR_ENV) or DEFAULT_DELETED_DIR
 
 
-def _localfiles_base_path(store: KnowledgeStore, collection: str) -> str:
+def _localfiles_base_path(
+    store: KnowledgeStore, collection: str, operation: str = "deletion"
+) -> str:
     """Resolved, existing ``reader.basePath`` for a localFiles collection.
 
     400 (not 404/500) for every "this collection cannot be deleted from" case, so
@@ -342,6 +425,10 @@ def _localfiles_base_path(store: KnowledgeStore, collection: str) -> str:
     ``get_all_document_ids``). A relative basePath resolves against this process's
     CWD, matching how ``FilesDocumentReader`` and the update factory
     (``DiskPersister(base_path="./data/collections")``) already read it.
+
+    ``operation`` only names the caller in that 400's message — the raw source
+    read needs the same tree for a different reason (a query-based reader's
+    documents have no file to serve), so it gets the same check and its own verb.
     """
     try:
         manifest = json.loads(
@@ -358,7 +445,7 @@ def _localfiles_base_path(store: KnowledgeStore, collection: str) -> str:
             status_code=400,
             detail=(
                 f"Collection '{collection}' has reader type "
-                f"'{reader.get('type')}'; deletion is only supported for "
+                f"'{reader.get('type')}'; {operation} is only supported for "
                 f"'localFiles' collections"
             ),
         )

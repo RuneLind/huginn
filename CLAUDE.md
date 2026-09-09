@@ -130,6 +130,35 @@ count is not a conserved quantity.)
   transcript available"; the narrow `try` keeps that true should that catch ever
   narrow, since a `requests` `JSONDecodeError` is a `ValueError` too).
 
+## Reading a document's source file
+
+`GET /api/document/{collection}/{doc_id}?raw=1` serves the source `.md` byte for
+byte (`text/markdown; charset=utf-8`, plus `X-Huginn-Source-Path` carrying the
+percent-encoded path relative to `reader.basePath`). The stored document JSON
+carries only the CLEANED text — fenced code removed, images rewritten, a
+breadcrumb prepended (`FilesDocumentConverter._clean_document_text`) — and the
+source is not persisted beside it, so a caller that reads a document in order to
+re-ingest it (muninn's capture re-run splits a summary at its `## Transcript`
+heading and posts the transcript back) loses a little more of the file on every
+pass without this.
+
+```sh
+curl "http://127.0.0.1:8321/api/document/x-articles/some-doc.md?raw=1"
+```
+
+- **`1` or `true`, case-insensitive.** Absent or any other value is the unchanged
+  JSON form — an allowlist rather than FastAPI's bool parsing, which 422s what it
+  cannot read: the JSON response is a cross-repo contract, so an unrecognised
+  value must degrade to it rather than fail a caller who never asked for raw.
+- **localFiles collections only** (400 otherwise): a query-based reader's
+  documents have no file on disk.
+- Same guards as the delete route, and for the same reasons: **404** for an id
+  that is not in the collection's index mapping (basePath is not the collection),
+  404 for an indexed id whose file is gone (a stale index), **400** for a
+  traversing id, one that is itself a symlink, one whose target leaves basePath,
+  or one carrying a NUL.
+- Pure read — nothing moves, nothing reindexes.
+
 ## Deleting a document
 
 `DELETE /api/document/{collection}/{doc_id}` (localFiles collections only) removes a
