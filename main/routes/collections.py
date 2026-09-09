@@ -311,12 +311,23 @@ SOURCE_PATH_HEADER = "X-Huginn-Source-Path"
 def _source_path_header_value(rel_path: str) -> str:
     """``rel_path`` percent-encoded for ``SOURCE_PATH_HEADER``.
 
-    Load-bearing for response splitting: Starlette does NOT reject CR/LF inside
-    a header value — it writes the bytes out verbatim (measured) — so a document
-    id carrying one would inject headers of the caller's choosing into this
-    response. Encoding also keeps a non-latin-1 name ('łódź.md', '日本語.md')
-    from raising at render time, since header values are encoded as latin-1;
-    Norwegian 'å'/'æ'/'ø' ARE latin-1 and would have gone out fine on their own.
+    Two measured failures, neither of them header injection (probes in
+    ``tests/test_document_raw_read.py``):
+
+    * A NON-latin-1 name ('łódź.md', '日本語.md') raises ``UnicodeEncodeError``
+      when the ``Response`` is CONSTRUCTED, since header values are encoded as
+      latin-1 — a 500 on an ordinary page. Norwegian 'å'/'æ'/'ø' ARE latin-1 and
+      would have gone out fine on their own.
+    * A CR/LF-bearing name gets no further either, but at a different layer:
+      Starlette does NOT reject it — its ``Response`` carries the bytes verbatim
+      in ``raw_headers`` — while h11, which uvicorn writes through, refuses the
+      value (``LocalProtocolError: Illegal header value``) and the connection is
+      dropped mid-response. The caller sees nothing at all, not injected headers.
+
+    So this is not the guard that stops response splitting; it is what turns
+    both of those into a 200. Such an id cannot reach here anyway — the reader
+    never indexes a CR/LF filename (measured), and the membership check runs
+    first — which is why the encoder is tested directly.
     """
     return quote(rel_path)
 
@@ -390,6 +401,12 @@ def get_document(
     # error, and the answer to it must not depend on the store's contents.
     want_raw = _wants_raw_source(raw)
 
+    # ``GET .../talk.md/`` reaches the handler with the trailing slash intact,
+    # exactly as the delete route sees it. Normalized here, above the branch, so
+    # one id means one document on all three forms — a slash that deletes and
+    # reads raw must not 404 as JSON.
+    doc_id = doc_id.rstrip("/")
+
     if not store.has_collection(collection):
         raise HTTPException(status_code=404, detail=f"Collection '{collection}' not found")
 
@@ -423,38 +440,40 @@ def get_document(
 def _raw_source_response(store: KnowledgeStore, collection: str, doc_id: str) -> Response:
     """The source file backing ``doc_id``, byte for byte.
 
-    Reuses the delete route's three guards, in that route's order, because they
-    answer the same three questions: is there an enumerable source tree at all
-    (400 for a non-localFiles reader — its documents have no file on disk), does
-    this id resolve to a path strictly inside it (400 for traversal, an escaping
-    symlink, or an id that is itself a symlink), and is it a document this
-    collection actually owns (404 otherwise — basePath is not the collection,
-    and several are live repo roots whose reader excludes most of what lives
-    there). Without the last one this route would serve ``.git/config`` and
-    every excluded page under a wiki's basePath.
+    Reuses the delete route's three guards, but in a DIFFERENT order, and the
+    order is the security property. Membership first (404 — is this a document
+    the collection actually owns?), then containment (400 — does the id resolve
+    strictly inside basePath?), then the stat (404 — is the file still there?).
+    The delete route resolves first; on a read that leaks.
 
-    That last guard answers with ONE detail for every id it will not serve —
-    missing, present-but-unindexed and excluded alike — and, unlike the delete
-    route, it runs BEFORE the file is stat'ed. Separate wordings (the delete
-    route's, which reports which of the two it was) would make an
-    unauthenticated GET an existence oracle for anything under basePath: a wiki's
-    basePath is a live git repo root, so '.git/config' answering differently from
-    '.git/nope' reports what is on the disk of a tree the collection does not
-    own. Indexed but gone from disk is a stale index, not a server error, and
-    collapses into the same 404.
+    Membership has to come first because every id-dependent step after it is an
+    existence probe on a tree the collection does not own. basePath is not the
+    collection — for several wikis it is a live git repo root whose reader
+    excludes most of what lives there — so an unauthenticated GET that answered
+    400 for a symlink or a traversing id and 404 for a missing one would report
+    what is on that disk. With membership first, every id the route will not
+    serve gets ONE reply: not indexed, indexed but gone from disk, excluded,
+    traversing, symlinked, NUL-bearing — all the same 404, differing only in the
+    id echoed back. Indexed but gone from disk is a stale index, not a server
+    error, and collapses into it too.
+
+    ``_localfiles_base_path`` still runs before all of them: its 400 is a
+    property of the COLLECTION (a query-based reader has no files to serve), the
+    same answer for every id, so it tells a caller nothing about a path.
+
+    The one 400 an id can still draw is an INDEXED document that is itself a
+    symlink — the containment guard refuses it rather than serving another
+    document's bytes under this id. That distinguishes nothing: membership
+    already answered, so the caller knows the id is a document.
 
     Pure read — no move, no reindex, nothing written.
     """
-    # ``GET .../talk.md/?raw=1`` reaches the handler with the trailing slash
-    # intact, exactly as the delete route sees it. Normalize so one id means one
-    # file on both routes, rather than 404 on read and 200 on delete.
-    doc_id = doc_id.rstrip("/")
-
     base_dir = _localfiles_base_path(store, collection, operation="raw source reading")
-    source_path = _resolve_source_file(base_dir, doc_id)
 
     unavailable = f"Document '{doc_id}' is not available in collection '{collection}'"
     _require_indexed_document(store, collection, doc_id, not_indexed_detail=unavailable)
+
+    source_path = _resolve_source_file(base_dir, doc_id)
     if not os.path.isfile(source_path):
         raise HTTPException(status_code=404, detail=unavailable)
 
@@ -522,9 +541,13 @@ def _localfiles_base_path(
         manifest = json.loads(
             store.disk_persister.read_text_file(f"{collection}/manifest.json")
         )
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError):
+        # The exception's string carries the manifest's path, and this helper is
+        # reached by an unauthenticated GET (the raw read). Log it, don't echo it.
+        logger.warning("Could not read manifest for %s", collection, exc_info=True)
         raise HTTPException(
-            status_code=500, detail=f"Could not read manifest for '{collection}': {e}"
+            status_code=500,
+            detail=f"Could not read the manifest for collection '{collection}'",
         )
 
     reader = manifest.get("reader") or {}
@@ -547,11 +570,17 @@ def _localfiles_base_path(
 
     resolved = os.path.realpath(base_path)
     if not os.path.isdir(resolved):
+        # Both the declared and the resolved path are server-filesystem paths;
+        # the operator needs them, the caller must not have them.
+        logger.warning(
+            "reader.basePath %r for collection %s does not resolve to an existing "
+            "directory (resolved: %s)", base_path, collection, resolved
+        )
         raise HTTPException(
             status_code=400,
             detail=(
-                f"reader.basePath '{base_path}' for collection '{collection}' "
-                f"does not resolve to an existing directory (resolved: {resolved})"
+                f"reader.basePath for collection '{collection}' does not resolve "
+                f"to an existing directory"
             ),
         )
     return resolved
@@ -702,10 +731,14 @@ def _require_indexed_document(
     path = f"{collection}/indexes/reverse_index_document_mapping.json"
     try:
         mapping = json.loads(store.disk_persister.read_text_file(path))
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError):
+        # Same as the manifest read: the exception names the file it failed on.
+        logger.warning(
+            "Could not read the index mapping for %s", collection, exc_info=True
+        )
         raise HTTPException(
             status_code=500,
-            detail=f"Could not read the index mapping for '{collection}': {e}",
+            detail=f"Could not read the index mapping for collection '{collection}'",
         )
     if doc_id not in mapping:
         raise HTTPException(

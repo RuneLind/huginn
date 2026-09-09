@@ -13,8 +13,11 @@ containment and index-membership helpers, so it inherits the same rejections.
 """
 import json
 import os
+import socket
+import threading
 
 import pytest
+import uvicorn
 from fastapi.testclient import TestClient
 
 from knowledge_api_server import app
@@ -108,6 +111,19 @@ def _unavailable(doc_id: str, collection: str = COLLECTION) -> str:
 def _source_bytes(rel: str, source_rel: str = SOURCE_REL) -> bytes:
     with open(os.path.join(source_rel, rel), "rb") as f:
         return f.read()
+
+
+def _assert_path_free(detail: str, tmp_root) -> None:
+    """No server-filesystem path in an error the raw route hands an outsider.
+
+    Both shared helpers used to interpolate the caught exception, whose string
+    carries the file it failed on ("[Errno 13] … /private/var/…"), and the
+    basePath 400 spelled out its resolved absolute path.
+    """
+    assert str(tmp_root) not in detail
+    assert "Errno" not in detail
+    assert COLLECTIONS_REL.lstrip("./") not in detail
+    assert SOURCE_REL.lstrip("./") not in detail
 
 
 class _RawCase:
@@ -237,14 +253,34 @@ class TestRawReadServesTheSourceFile(_RawCase):
         assert resp.content == baseline.content
         assert "fenced-code-canary" not in resp.json()["text"]
 
-    def test_trailing_slash_in_document_id_is_normalized(self, fixture_collection):
-        # ``GET .../talk.md/?raw=1`` reaches the handler with the slash intact.
-        # The delete route normalizes it, so an id that deletes must also read.
-        resp = self._client().get(f"/api/document/{COLLECTION}/talk.md/?raw=1")
+    @pytest.mark.parametrize("query", ["?raw=1", "?raw=0", ""])
+    def test_a_trailing_slash_reads_the_same_document_on_every_form(
+        self, fixture_collection, query
+    ):
+        # ``GET .../talk.md/`` reaches the handler with the slash intact. The
+        # delete route normalizes it; so must BOTH forms of the read, or one id
+        # deletes, reads raw, and 404s as JSON.
+        client = self._client()
+        baseline = client.get(f"/api/document/{COLLECTION}/talk.md{query}")
+
+        resp = client.get(f"/api/document/{COLLECTION}/talk.md/{query}")
+
+        assert baseline.status_code == 200
+        assert resp.status_code == 200
+        assert resp.content == baseline.content
+        assert resp.headers["content-type"] == baseline.headers["content-type"]
+
+    def test_the_trailing_slash_json_form_is_the_document_not_an_empty_shell(
+        self, fixture_collection
+    ):
+        # The widening this normalization brings: on main ``talk.md/`` was a 404
+        # for the JSON form. It must now be the SAME document, not some other
+        # row the store happened to answer with.
+        resp = self._client().get(f"/api/document/{COLLECTION}/talk.md/")
 
         assert resp.status_code == 200
-        assert resp.content == _source_bytes("talk.md")
-        assert resp.headers["x-huginn-source-path"] == "talk.md"
+        assert resp.json()["id"] == "talk.md"
+        assert "transcript-canary" in resp.json()["text"]
 
     def test_raw_response_forbids_content_type_sniffing(self, fixture_collection):
         # The body is caller-supplied file content served under this API's
@@ -265,13 +301,18 @@ class TestRawParameterIsExplicit(_RawCase):
 
     @pytest.mark.parametrize("value", ["yes", "on", "2", "y", "TrUthy", " 1"])
     def test_unrecognized_raw_value_400(self, fixture_collection, value):
+        from main.routes.collections import RAW_VALUES_HELP
+
         resp = self._client().get(f"/api/document/{COLLECTION}/talk.md?raw={value}")
 
         assert resp.status_code == 400
-        detail = resp.json()["detail"]
-        # The 400 has to name what IS accepted, or the caller has to read source.
-        assert "raw" in detail
-        assert "true" in detail and "false" in detail
+        # Byte for byte, against the constant the route builds it from: the 400
+        # has to name the value it rejected AND what is accepted, or the caller
+        # has to go read the source to find out.
+        assert resp.json()["detail"] == (
+            f"Invalid 'raw' value '{value}'; accepted values are {RAW_VALUES_HELP}"
+        )
+        assert "'1' or 'true'" in RAW_VALUES_HELP and "'0', 'false'" in RAW_VALUES_HELP
 
     def test_repeated_raw_values_that_disagree_400(self, fixture_collection):
         # Last-wins would make ``?raw=1&raw=0`` silently serve the JSON form to a
@@ -279,6 +320,10 @@ class TestRawParameterIsExplicit(_RawCase):
         resp = self._client().get(f"/api/document/{COLLECTION}/talk.md?raw=1&raw=0")
 
         assert resp.status_code == 400
+        assert resp.json()["detail"] == (
+            "Conflicting 'raw' values in the query string; pass the parameter "
+            "at most once"
+        )
 
     def test_repeated_raw_values_that_agree_are_that_value(self, fixture_collection):
         resp = self._client().get(f"/api/document/{COLLECTION}/talk.md?raw=1&raw=true")
@@ -296,35 +341,140 @@ class TestRawParameterIsExplicit(_RawCase):
         assert resp.status_code == 400
 
 
-class TestSourcePathHeaderEncoding:
-    """``X-Huginn-Source-Path`` is percent-encoded, and why.
+#: A source path shaped like a response-splitting attempt. Used by the encoder
+#: probes below; never reachable through the route (see the reader probe).
+CRLF_PATH = "a\r\nX-Injected: 1.md"
 
-    Driven through the helper rather than the route: the reader's walk drops a
-    filename containing CR/LF outright (measured — such a file is never indexed),
-    so a CRLF-bearing id cannot reach the header over HTTP at all. The encoder is
-    still the thing that has to hold, since the reader is not this route's guard.
+
+def _http_get_over_a_real_server(app_under_test, path: str) -> bytes:
+    """Everything a real uvicorn writes for ``GET path``, or ``b""``.
+
+    The whole point of driving a REAL server rather than ``TestClient``: the
+    ASGI transport TestClient uses never runs h11, and h11 is the layer that
+    decides what a CR/LF header value does on the wire.
+    """
+    config = uvicorn.Config(
+        app_under_test, host="127.0.0.1", port=0, log_level="critical"
+    )
+    server = uvicorn.Server(config)
+    sock = config.bind_socket()
+    port = sock.getsockname()[1]
+    thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]}, daemon=True)
+    thread.start()
+    try:
+        for _ in range(200):
+            if server.started:
+                break
+            threading.Event().wait(0.02)
+        assert server.started, "uvicorn did not start"
+
+        conn = socket.create_connection(("127.0.0.1", port), timeout=10)
+        conn.settimeout(10)
+        try:
+            conn.sendall(
+                f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                f"Connection: close\r\n\r\n".encode()
+            )
+            chunks = []
+            while True:
+                block = conn.recv(65536)
+                if not block:
+                    break
+                chunks.append(block)
+        finally:
+            conn.close()
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+    return b"".join(chunks)
+
+
+class TestSourcePathHeaderEncoding:
+    """``X-Huginn-Source-Path`` is percent-encoded, and what that actually buys.
+
+    Two layers, measured here rather than asserted about: Starlette does NOT
+    reject CR/LF in a header value — its ``Response`` constructs and carries the
+    bytes verbatim — while h11, the protocol layer uvicorn writes through,
+    refuses the value outright and the caller gets a dropped connection instead
+    of a response. So the encoding is not what stops header injection at the
+    wire; it is what keeps a CR/LF-bearing name from turning the read into a
+    dropped connection, and what keeps a NON-latin-1 name (``łódź.md``,
+    ``日本語.md``) from raising at ``Response`` construction.
+
+    Driven through the helper rather than the route: the reader never indexes a
+    CR/LF-bearing filename (measured below), and the membership check now runs
+    before anything else, so such an id cannot reach the header over HTTP.
     """
 
-    def test_crlf_in_a_path_cannot_inject_a_header(self):
+    def test_crlf_in_a_path_is_percent_encoded(self):
         from main.routes.collections import _source_path_header_value as encode
 
-        value = encode("a\r\nX-Injected: 1.md")
+        value = encode(CRLF_PATH)
 
         assert "\r" not in value and "\n" not in value
         assert value == "a%0D%0AX-Injected%3A%201.md"
 
-    def test_non_latin1_path_survives_the_latin1_header_encoding(self):
+    def test_starlette_does_not_reject_crlf_in_a_header_value(self):
+        from starlette.responses import Response
+
+        # The measurement that corrects this PR's first-round claim: no
+        # exception, and the raw bytes go into the header list unchanged.
+        response = Response(content=b"x", headers={"X-Probe": CRLF_PATH})
+
+        assert (b"x-probe", CRLF_PATH.encode("latin-1")) in response.raw_headers
+
+    def test_a_real_server_drops_the_crlf_value_and_serves_the_encoded_one(self):
+        from starlette.applications import Starlette
+        from starlette.responses import Response
+        from starlette.routing import Route
+
+        from main.routes.collections import _source_path_header_value as encode
+
+        async def unencoded(request):
+            return Response(content=b"body\n", headers={"X-Probe": CRLF_PATH})
+
+        async def encoded(request):
+            return Response(content=b"body\n", headers={"X-Probe": encode(CRLF_PATH)})
+
+        probe_app = Starlette(routes=[
+            Route("/unencoded", unencoded),
+            Route("/encoded", encoded),
+        ])
+
+        # h11 raises ``LocalProtocolError: Illegal header value`` and uvicorn
+        # closes the connection: the client gets nothing at all — no injected
+        # header, and no response either.
+        assert _http_get_over_a_real_server(probe_app, "/unencoded") == b""
+
+        served = _http_get_over_a_real_server(probe_app, "/encoded")
+        assert served.startswith(b"HTTP/1.1 200 OK\r\n")
+        assert b"\r\nx-probe: a%0D%0AX-Injected%3A%201.md\r\n" in served
+        assert b"X-Injected" not in served.split(b"\r\n\r\n", 1)[0].replace(
+            b"a%0D%0AX-Injected%3A%201.md", b""
+        )
+
+    def test_non_latin1_path_raises_at_response_construction_unless_encoded(self):
         from main.routes.collections import _source_path_header_value as encode
         from starlette.responses import Response
 
-        # 'ł' is NOT latin-1: an unencoded value raises when the response
-        # renders. ('å'/'æ'/'ø' are latin-1 and would have gone out fine.)
+        # 'ł' is NOT latin-1: an unencoded value raises before any server sees
+        # it. ('å'/'æ'/'ø' are latin-1 and would have gone out fine.)
         with pytest.raises(UnicodeEncodeError):
             Response(content=b"x", headers={"X-Probe": "łódź.md"})
 
         value = encode("łódź.md")
 
         assert Response(content=b"x", headers={"X-Probe": value}).headers["X-Probe"] == value
+
+    def test_the_reader_never_indexes_a_crlf_filename(self, tmp_path, monkeypatch):
+        # Why the encoder is tested through the helper and not the route: such a
+        # file can exist on disk, and the reader still does not make it a
+        # document, so no request can ever put CR/LF into the header.
+        monkeypatch.chdir(tmp_path)
+        _build_fixture_collection({"talk.md": SUMMARY_DOC, CRLF_PATH: SUMMARY_DOC})
+
+        assert CRLF_PATH in os.listdir(os.path.abspath(SOURCE_REL))
+        assert _indexed_document_ids() == {"talk.md"}
 
 
 class TestRawReadRejections(_RawCase):
@@ -444,6 +594,63 @@ class TestRawReadRejections(_RawCase):
         # An errno string carries the path too ("[Errno 13] … /private/var/…").
         assert "Errno" not in detail
 
+    @pytest.mark.skipif(
+        os.name != "posix" or os.geteuid() == 0,
+        reason="needs POSIX permissions and a non-root user to make a file unreadable",
+    )
+    def test_unreadable_manifest_500_does_not_leak_the_server_path(
+        self, fixture_collection
+    ):
+        manifest_path = os.path.join(COLLECTIONS_REL, COLLECTION, "manifest.json")
+        os.chmod(manifest_path, 0o000)
+        try:
+            resp = self._client().get(f"/api/document/{COLLECTION}/talk.md?raw=1")
+        finally:
+            os.chmod(manifest_path, 0o644)
+
+        assert resp.status_code == 500
+        _assert_path_free(resp.json()["detail"], fixture_collection)
+
+    def test_unresolvable_base_path_400_does_not_leak_the_server_path(
+        self, fixture_collection
+    ):
+        # The resolved absolute basePath is a server-filesystem path, and this
+        # 400 is reachable by any caller of either route.
+        manifest_path = os.path.join(COLLECTIONS_REL, COLLECTION, "manifest.json")
+        with open(manifest_path, encoding="utf-8") as f:
+            manifest = json.load(f)
+        manifest["reader"]["basePath"] = "./data/sources/gone-missing"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+
+        resp = self._client().get(f"/api/document/{COLLECTION}/talk.md?raw=1")
+
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "does not resolve to an existing directory" in detail
+        assert "gone-missing" not in detail
+        _assert_path_free(detail, fixture_collection)
+
+    @pytest.mark.skipif(
+        os.name != "posix" or os.geteuid() == 0,
+        reason="needs POSIX permissions and a non-root user to make a file unreadable",
+    )
+    def test_unreadable_index_mapping_500_does_not_leak_the_server_path(
+        self, fixture_collection
+    ):
+        mapping_path = os.path.join(
+            COLLECTIONS_REL, COLLECTION, "indexes",
+            "reverse_index_document_mapping.json",
+        )
+        os.chmod(mapping_path, 0o000)
+        try:
+            resp = self._client().get(f"/api/document/{COLLECTION}/talk.md?raw=1")
+        finally:
+            os.chmod(mapping_path, 0o644)
+
+        assert resp.status_code == 500
+        _assert_path_free(resp.json()["detail"], fixture_collection)
+
     def test_non_localfiles_collection_400(self, fixture_collection):
         manifest_path = os.path.join(COLLECTIONS_REL, COLLECTION, "manifest.json")
         with open(manifest_path, encoding="utf-8") as f:
@@ -457,46 +664,158 @@ class TestRawReadRejections(_RawCase):
         assert resp.status_code == 400
         assert "localFiles" in resp.json()["detail"]
 
-    def test_traversal_document_id_400(self, fixture_collection):
+    def test_traversal_document_id_404_like_every_other_unindexed_id(
+        self, fixture_collection
+    ):
+        # A traversing id is not a document of the collection, so it is answered
+        # by the membership check and never reaches the resolver: the delete
+        # route's "Invalid document ID" 400 would tell a caller which shape of
+        # rejection it hit, which is a bit of the oracle back.
         outside = fixture_collection / "outside.md"
         outside.write_text("secret-outside-canary", encoding="utf-8")
 
         # Percent-encoded: an HTTP client collapses a literal ``../`` in the URL
         # before it is sent, so only the encoded form reaches the handler.
-        resp = self._client().get(
-            f"/api/document/{COLLECTION}/%2E%2E%2F%2E%2E%2F%2E%2E%2Foutside.md?raw=1"
-        )
+        traversal = "%2E%2E%2F%2E%2E%2F%2E%2E%2Foutside.md"
+        resp = self._client().get(f"/api/document/{COLLECTION}/{traversal}?raw=1")
 
-        assert resp.status_code == 400
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == _unavailable("../../../outside.md")
         assert b"secret-outside-canary" not in resp.content
 
-    def test_symlink_escaping_base_path_400(self, fixture_collection):
+    def test_symlink_escaping_base_path_404(self, fixture_collection):
         outside = fixture_collection / "outside.md"
         outside.write_text("secret-outside-canary", encoding="utf-8")
         os.symlink(outside, os.path.join(SOURCE_REL, "escape.md"))
 
         resp = self._client().get(f"/api/document/{COLLECTION}/escape.md?raw=1")
 
-        assert resp.status_code == 400
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == _unavailable("escape.md")
         assert b"secret-outside-canary" not in resp.content
 
-    def test_symlinked_document_id_pointing_inside_base_path_400(
+    def test_unindexed_symlink_is_indistinguishable_from_a_missing_id(
         self, fixture_collection
     ):
-        # Refused even though the target is inside basePath: realpath would
-        # serve talk.md under an id the collection does not own.
+        # The residual oracle this reorder closes: the resolver refuses a
+        # symlinked id with a 400, so "there is a symlink here" used to be
+        # distinguishable from "there is nothing here" — for a path under
+        # basePath that the collection does not own.
+        client = self._client()
         os.symlink(
             os.path.abspath(os.path.join(SOURCE_REL, "talk.md")),
-            os.path.join(SOURCE_REL, "alias.md"),
+            os.path.join(SOURCE_REL, "postlink.md"),
         )
+
+        symlinked = client.get(f"/api/document/{COLLECTION}/postlink.md?raw=1")
+        missing = client.get(f"/api/document/{COLLECTION}/never-indexed.md?raw=1")
+
+        assert symlinked.status_code == missing.status_code == 404
+        assert symlinked.json()["detail"] == _unavailable("postlink.md")
+        assert missing.json()["detail"] == _unavailable("never-indexed.md")
+        assert b"fenced-code-canary" not in symlinked.content
+
+    def test_indexed_symlink_document_400(self, tmp_path, monkeypatch):
+        # Landed as-is: a symlink that was present when the collection was built
+        # IS a document of it (measured — the reader indexes it), so it passes
+        # the membership check and then hits the resolver's refusal. That 400
+        # reveals nothing the caller did not already know: the id is indexed.
+        monkeypatch.chdir(tmp_path)
+        _write_sources({"talk.md": SUMMARY_DOC})
+        os.symlink(
+            os.path.abspath(os.path.join(SOURCE_REL, "talk.md")),
+            os.path.join(os.path.abspath(SOURCE_REL), "alias.md"),
+        )
+        _build_fixture_collection({})
+        assert "alias.md" in _indexed_document_ids()
 
         resp = self._client().get(f"/api/document/{COLLECTION}/alias.md?raw=1")
 
         assert resp.status_code == 400
+        assert resp.json()["detail"] == "Invalid document ID"
         assert b"fenced-code-canary" not in resp.content
 
-    def test_nul_byte_document_id_400(self, fixture_collection):
+    def test_nul_byte_document_id_404(self, fixture_collection):
+        # Also answered by the membership check now: an id carrying a NUL is not
+        # in the mapping, so it collapses with everything else unserved.
         resp = self._client().get(f"/api/document/{COLLECTION}/a%00b?raw=1")
 
-        assert resp.status_code == 400
-        assert resp.json()["detail"] == "Invalid document ID"
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == _unavailable("a\x00b")
+
+    def test_membership_check_runs_before_the_resolver_and_the_stat(
+        self, fixture_collection, monkeypatch
+    ):
+        """The collapse is an ORDER, and only a call-order assertion pins it.
+
+        Over HTTP the two orders are indistinguishable for an ordinary id — both
+        answer the same 404 — so a response-only test passes against a build
+        that resolves and stats a path the collection does not own first, which
+        is where the symlink and traversal 400s came back from.
+        """
+        import main.routes.collections as mod
+
+        client = self._client()
+        _write_sources({"probe.md": "# Probe\n\nUnder basePath, not a document.\n"})
+
+        resolved: list[str] = []
+        stated: list[str] = []
+        real_resolve = mod._resolve_source_file
+        real_isfile = os.path.isfile
+
+        def spy_resolve(base_dir, doc_id):
+            resolved.append(doc_id)
+            return real_resolve(base_dir, doc_id)
+
+        def spy_isfile(path):
+            stated.append(path)
+            return real_isfile(path)
+
+        monkeypatch.setattr(mod, "_resolve_source_file", spy_resolve)
+        monkeypatch.setattr(os.path, "isfile", spy_isfile)
+
+        unindexed = client.get(f"/api/document/{COLLECTION}/probe.md?raw=1")
+        assert unindexed.status_code == 404
+        assert unindexed.json()["detail"] == _unavailable("probe.md")
+        assert resolved == []
+        assert [p for p in stated if p.endswith("probe.md")] == []
+
+        # Positive control, so neither emptiness above can be a dead spy: an
+        # INDEXED id goes through both.
+        resolved.clear()
+        stated.clear()
+        served = client.get(f"/api/document/{COLLECTION}/talk.md?raw=1")
+        assert served.status_code == 200
+        assert resolved == ["talk.md"]
+        assert [p for p in stated if p.endswith("talk.md")] != []
+
+
+class TestRawFormIsDeclaredInTheSchema:
+    """``text/markdown`` is part of the endpoint's published contract.
+
+    The route declares it in ``responses=``; nothing else in the app would fail
+    if that declaration were dropped, so the generated schema is pinned here.
+    Consumers (muninn's client, anyone reading ``/docs``) learn the raw form
+    exists from this and nothing else.
+    """
+
+    def test_openapi_declares_both_response_content_types(self):
+        content = (
+            app.openapi()["paths"]["/api/document/{collection}/{doc_id}"]["get"]
+            ["responses"]["200"]["content"]
+        )
+
+        assert set(content) == {"application/json", "text/markdown"}
+
+    def test_openapi_declares_raw_as_a_repeatable_string_parameter(self):
+        params = (
+            app.openapi()["paths"]["/api/document/{collection}/{doc_id}"]["get"]
+            ["parameters"]
+        )
+        raw = next(p for p in params if p["name"] == "raw")
+
+        # An array, because the route reads every occurrence rather than the
+        # last one — a single-valued declaration would tell a generated client
+        # the opposite of what the route does with ``?raw=1&raw=0``.
+        assert {"type": "array", "items": {"type": "string"}} in raw["schema"]["anyOf"]
+        assert raw["in"] == "query"

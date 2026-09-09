@@ -155,22 +155,36 @@ curl "http://127.0.0.1:8321/api/document/x-articles/some-doc.md?raw=1"
 - **localFiles collections only** (400 otherwise): a query-based reader's
   documents have no file on disk.
 - **One 404 for every id it will not serve**, detail `Document '<id>' is not
-  available in collection '<c>'`: not indexed, indexed but gone from disk, and
-  excluded all answer identically, and the membership check runs before the file
-  is stat'ed. Separate wordings make an unauthenticated GET an existence oracle
+  available in collection '<c>'`: not indexed, indexed but gone from disk,
+  excluded, traversing, symlinked and NUL-bearing all answer identically,
+  differing only in the id echoed back. That holds because of the ORDER —
+  index membership is checked FIRST, before the path is resolved and before it
+  is stat'ed, so no id-dependent step touches the disk for something the
+  collection does not own. The delete route resolves first and keeps its own,
+  more specific 404: it is an operator action on a named file. Any wording (or
+  status) that separated these makes an unauthenticated GET an existence oracle
   for anything under `reader.basePath` — a wiki's basePath is a live git repo
   root, so `.git/config` answering differently from `.git/nope` reports what is
-  on the disk of a tree the collection does not own. The delete route keeps its
-  own, more specific 404: it is an operator action on a named file.
-- **400** for a traversing id, one that is itself a symlink, one whose target
-  leaves basePath, or one carrying a NUL — the delete route's containment guard,
-  unchanged. A trailing slash is normalized (`talk.md/` reads `talk.md`), also as
-  on the delete route.
-- Response headers: `X-Huginn-Source-Path` (percent-encoded — Starlette emits
-  CR/LF inside a header value verbatim, so an id carrying one would split the
-  response) and `X-Content-Type-Options: nosniff`.
-- A read that fails on the filesystem is a 500 whose detail carries no path; the
-  exception goes to the log.
+  on the disk of a tree the collection does not own.
+- The one **400** an id can still draw is an INDEXED document that is itself a
+  symlink: the containment guard refuses to serve another document's bytes under
+  this id. It distinguishes nothing — membership already answered. A trailing
+  slash is normalized (`talk.md/` reads `talk.md`) for the JSON form as well as
+  the raw one, matching the delete route.
+- Response headers: `X-Huginn-Source-Path` (percent-encoded) and
+  `X-Content-Type-Options: nosniff`. The encoding is **not** a response-splitting
+  guard: Starlette does not reject CR/LF in a header value (its `Response`
+  carries the bytes verbatim), but h11 — which uvicorn writes through — does,
+  by refusing the value and dropping the connection, so a caller gets nothing
+  rather than injected headers. What `quote()` buys is that a non-latin-1 name
+  (`łódź.md`) does not raise at `Response` construction and a CR/LF-bearing one
+  does not become a dropped connection. Both measured in
+  `tests/test_document_raw_read.py`, which also measures that the reader never
+  indexes a CR/LF filename.
+- Errors carry no server path: the unreadable-source 500, the two shared
+  helpers' 500s (unreadable manifest, unreadable index mapping) and the basePath
+  400 all name only the collection or the document, and log the exception. Those
+  helpers are shared with the delete route, so both routes gained this.
 - Pure read — nothing moves, nothing reindexes.
 
 ## Deleting a document
