@@ -130,6 +130,65 @@ count is not a conserved quantity.)
   transcript available"; the narrow `try` keeps that true should that catch ever
   narrow, since a `requests` `JSONDecodeError` is a `ValueError` too).
 
+## Reading a document's source file
+
+`GET /api/document/{collection}/{doc_id}?raw=1` serves the source `.md` byte for
+byte (`text/markdown; charset=utf-8`, plus `X-Huginn-Source-Path` carrying the
+percent-encoded path relative to `reader.basePath`). The stored document JSON
+carries only the CLEANED text — fenced code removed, images rewritten, a
+breadcrumb prepended (`FilesDocumentConverter._clean_document_text`) — and the
+source is not persisted beside it, so a caller that reads a document in order to
+re-ingest it (muninn's capture re-run splits a summary at its `## Transcript`
+heading and posts the transcript back) loses a little more of the file on every
+pass without this.
+
+```sh
+curl "http://127.0.0.1:8321/api/document/x-articles/some-doc.md?raw=1"
+```
+
+- **`1` or `true` serves the source; `0`, `false` or an empty value serves the
+  JSON; absent serves the JSON.** Anything else — `yes`, `on`, `2` — is a **400**
+  naming the accepted values, and so is `?raw=1&raw=0` (every occurrence is read,
+  not the last one). Falling through to the JSON form would answer a caller who
+  asked for the source with the cleaned copy and no error: the silent loss this
+  endpoint exists to prevent.
+- **localFiles collections only** (400 otherwise): a query-based reader's
+  documents have no file on disk.
+- **One 404 for every id it will not serve**, detail `Document '<id>' is not
+  available in collection '<c>'`: not indexed, indexed but gone from disk,
+  excluded, traversing, symlinked and NUL-bearing all answer identically,
+  differing only in the id echoed back. That holds because of the ORDER —
+  index membership is checked FIRST, before the path is resolved and before it
+  is stat'ed, so no id-dependent step touches the disk for something the
+  collection does not own. The delete route resolves first and keeps its own,
+  more specific 404: it is an operator action on a named file. Any wording (or
+  status) that separated these makes an unauthenticated GET an existence oracle
+  for anything under `reader.basePath` — a wiki's basePath is a live git repo
+  root, so `.git/config` answering differently from `.git/nope` reports what is
+  on the disk of a tree the collection does not own.
+- The one **400** an id can still draw is an INDEXED document that is itself a
+  symlink: the containment guard refuses to serve another document's bytes under
+  this id. It distinguishes nothing — membership already answered. A trailing
+  slash is normalized (`talk.md/` reads `talk.md`) for the JSON form as well as
+  the raw one, matching the delete route.
+- Response headers: `X-Huginn-Source-Path` (percent-encoded) and
+  `X-Content-Type-Options: nosniff`. The encoding is **not** a response-splitting
+  guard: Starlette does not reject CR/LF in a header value (its `Response`
+  carries the bytes verbatim), but h11 — which uvicorn writes through — does,
+  by refusing the value and dropping the connection, so a caller gets nothing
+  rather than injected headers. What `quote()` buys is that a non-latin-1 name
+  (`łódź.md`) does not raise at `Response` construction and a CR/LF-bearing one
+  does not become a dropped connection. Both measured in
+  `tests/test_document_raw_read.py`, which also measures the reader's own
+  asymmetry: its `.*` include pattern never matches `\n`, so an LF-bearing
+  name is never indexed, but it does match `\r`, so a CR-only name is indexed
+  and is the case the encoder exists for.
+- Errors carry no server path: the unreadable-source 500, the two shared
+  helpers' 500s (unreadable manifest, unreadable index mapping) and the basePath
+  400 all name only the collection or the document, and log the exception. Those
+  helpers are shared with the delete route, so both routes gained this.
+- Pure read — nothing moves, nothing reindexes.
+
 ## Deleting a document
 
 `DELETE /api/document/{collection}/{doc_id}` (localFiles collections only) removes a

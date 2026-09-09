@@ -7,8 +7,9 @@ import shutil
 
 from datetime import datetime, timedelta, timezone
 from statistics import median
+from urllib.parse import quote
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
 
 from main.runtime.indexing_run_ledger import (
     INCOMPLETE_AFTER_SECONDS,
@@ -289,10 +290,130 @@ def _is_inside(base_dir: str, resolved: str) -> bool:
     return resolved.startswith(base_dir + os.sep)
 
 
-@router.get("/api/document/{collection}/{doc_id:path}")
-def get_document(collection: str, doc_id: str, store: KnowledgeStore = Depends(get_store)):
+#: ``?raw=`` spellings, each side of the switch listed explicitly. An
+#: unrecognised value is a 400 rather than a fall-through to the JSON form:
+#: silently answering a caller who asked for the source with the CLEANED copy is
+#: the exact failure this endpoint exists to prevent — it re-ingests a lossy
+#: document and never sees an error. Absent stays the JSON form, so the
+#: cross-repo contract muninn reads is untouched.
+RAW_TRUE_VALUES = frozenset({"1", "true"})
+RAW_FALSE_VALUES = frozenset({"0", "false", ""})
+RAW_VALUES_HELP = (
+    "'1' or 'true' for the source file, '0', 'false' or an empty value for the "
+    "document JSON (case-insensitive)"
+)
+
+#: Where the raw form reports the served file's path, relative to the reader's
+#: basePath.
+SOURCE_PATH_HEADER = "X-Huginn-Source-Path"
+
+
+def _source_path_header_value(rel_path: str) -> str:
+    """``rel_path`` percent-encoded for ``SOURCE_PATH_HEADER``.
+
+    Two measured failures, neither of them header injection (probes in
+    ``tests/test_document_raw_read.py``):
+
+    * A NON-latin-1 name ('łódź.md', '日本語.md') raises ``UnicodeEncodeError``
+      when the ``Response`` is CONSTRUCTED, since header values are encoded as
+      latin-1 — a 500 on an ordinary page. Norwegian 'å'/'æ'/'ø' ARE latin-1 and
+      would have gone out fine on their own.
+    * A CR/LF-bearing name gets no further either, but at a different layer:
+      Starlette does NOT reject it — its ``Response`` carries the bytes verbatim
+      in ``raw_headers`` — while h11, which uvicorn writes through, refuses the
+      value (``LocalProtocolError: Illegal header value``) and the connection is
+      dropped mid-response. The caller sees nothing at all, not injected headers.
+
+    So this is not the guard that stops response splitting; it is what turns
+    both of those into a 200. Reachability is asymmetric: the reader's include
+    pattern is ``re.fullmatch(".*", …)`` and ``.`` never matches ``\n``, so an
+    LF-bearing name is never indexed, but ``.`` does match ``\r``, so a CR-only
+    name IS indexed and does reach here (measured). That CR case is what this
+    encoder exists for; the LF case is covered by the reader.
+    """
+    return quote(rel_path)
+
+
+def _wants_raw_source(values: list[str] | None) -> bool:
+    """Whether ``?raw=`` selects the source-file form. 400 on anything else.
+
+    Reads EVERY occurrence rather than FastAPI's last-wins single value:
+    ``?raw=1&raw=0`` from a caller that appended the parameter twice would
+    otherwise quietly serve the JSON form to a request that asked for the source.
+    """
+    if not values:
+        return False
+
+    wanted = set()
+    for value in values:
+        lowered = value.lower()
+        if lowered in RAW_TRUE_VALUES:
+            wanted.add(True)
+        elif lowered in RAW_FALSE_VALUES:
+            wanted.add(False)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid 'raw' value '{value}'; accepted values are {RAW_VALUES_HELP}",
+            )
+
+    if len(wanted) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Conflicting 'raw' values in the query string; pass the parameter "
+                "at most once"
+            ),
+        )
+    return wanted.pop()
+
+
+@router.get(
+    "/api/document/{collection}/{doc_id:path}",
+    responses={
+        200: {
+            "description": "The stored document JSON, or the source file with ?raw=1",
+            "content": {"application/json": {}, "text/markdown": {}},
+        }
+    },
+)
+def get_document(
+    collection: str,
+    doc_id: str,
+    raw: list[str] | None = Query(
+        None,
+        description="'1' or 'true' (case-insensitive) serves the source file "
+                    "verbatim instead of the stored document JSON; '0', 'false' "
+                    "or an empty value is the JSON form. Any other value, or two "
+                    "occurrences that disagree, is a 400.",
+    ),
+    store: KnowledgeStore = Depends(get_store),
+):
+    """The stored document JSON, or with ``?raw=1`` the source file verbatim.
+
+    The stored ``text`` is a CLEANED copy — fenced code removed, images
+    rewritten, a breadcrumb prepended (``FilesDocumentConverter``) — and the
+    source is not persisted beside it, so the JSON form cannot round-trip a
+    document. A caller that reads a document in order to re-ingest it (muninn's
+    capture re-run splits a summary at its ``## Transcript`` heading and posts
+    the transcript back) would shrink the file a little on every pass. ``raw=1``
+    answers with the bytes on disk instead.
+    """
+    # Parsed before anything is read: an unreadable parameter is a request-shape
+    # error, and the answer to it must not depend on the store's contents.
+    want_raw = _wants_raw_source(raw)
+
+    # ``GET .../talk.md/`` reaches the handler with the trailing slash intact,
+    # exactly as the delete route sees it. Normalized here, above the branch, so
+    # one id means one document on all three forms — a slash that deletes and
+    # reads raw must not 404 as JSON.
+    doc_id = doc_id.rstrip("/")
+
     if not store.has_collection(collection):
         raise HTTPException(status_code=404, detail=f"Collection '{collection}' not found")
+
+    if want_raw:
+        return _raw_source_response(store, collection, doc_id)
 
     if doc_id.startswith("/"):
         raise HTTPException(status_code=400, detail="Invalid document ID")
@@ -318,6 +439,75 @@ def get_document(collection: str, doc_id: str, store: KnowledgeStore = Depends(g
         raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
 
 
+def _raw_source_response(store: KnowledgeStore, collection: str, doc_id: str) -> Response:
+    """The source file backing ``doc_id``, byte for byte.
+
+    Reuses the delete route's three guards, but in a DIFFERENT order, and the
+    order is the security property. Membership first (404 — is this a document
+    the collection actually owns?), then containment (400 — does the id resolve
+    strictly inside basePath?), then the stat (404 — is the file still there?).
+    The delete route resolves first; on a read that leaks.
+
+    Membership has to come first because every id-dependent step after it is an
+    existence probe on a tree the collection does not own. basePath is not the
+    collection — for several wikis it is a live git repo root whose reader
+    excludes most of what lives there — so an unauthenticated GET that answered
+    400 for a symlink or a traversing id and 404 for a missing one would report
+    what is on that disk. With membership first, every id the route will not
+    serve gets ONE reply: not indexed, indexed but gone from disk, excluded,
+    traversing, symlinked, NUL-bearing — all the same 404, differing only in the
+    id echoed back. Indexed but gone from disk is a stale index, not a server
+    error, and collapses into it too.
+
+    ``_localfiles_base_path`` still runs before all of them: its 400 is a
+    property of the COLLECTION (a query-based reader has no files to serve), the
+    same answer for every id, so it tells a caller nothing about a path.
+
+    The one 400 an id can still draw is an INDEXED document that is itself a
+    symlink — the containment guard refuses it rather than serving another
+    document's bytes under this id. That distinguishes nothing: membership
+    already answered, so the caller knows the id is a document.
+
+    Pure read — no move, no reindex, nothing written.
+    """
+    base_dir = _localfiles_base_path(store, collection, operation="raw source reading")
+
+    unavailable = f"Document '{doc_id}' is not available in collection '{collection}'"
+    _require_indexed_document(store, collection, doc_id, not_indexed_detail=unavailable)
+
+    source_path = _resolve_source_file(base_dir, doc_id)
+    if not os.path.isfile(source_path):
+        raise HTTPException(status_code=404, detail=unavailable)
+
+    try:
+        with open(source_path, "rb") as f:
+            body = f.read()
+    except OSError:
+        # The exception's string carries the absolute path; it belongs in the
+        # server log, not in a response to an untrusted caller.
+        logger.warning(
+            "Could not read source file for %s/%s", collection, doc_id, exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not read the source file for document '{doc_id}'",
+        )
+
+    return Response(
+        content=body,
+        # Starlette appends '; charset=utf-8' to any 'text/*' media type, so the
+        # wire value is unchanged from spelling it out here.
+        media_type="text/markdown",
+        headers={
+            SOURCE_PATH_HEADER: _source_path_header_value(
+                os.path.relpath(source_path, base_dir)
+            ),
+            # The body is a file this API did not author. Nothing may re-type it.
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 #: Where soft-deleted source files are parked. Deliberately CWD-relative by
 #: default, exactly like a manifest's relative ``reader.basePath`` — the server's
 #: working directory is the one anchor both already share. ``data/`` is
@@ -331,7 +521,9 @@ def _deleted_root() -> str:
     return os.environ.get(DELETED_DIR_ENV) or DEFAULT_DELETED_DIR
 
 
-def _localfiles_base_path(store: KnowledgeStore, collection: str) -> str:
+def _localfiles_base_path(
+    store: KnowledgeStore, collection: str, operation: str = "deletion"
+) -> str:
     """Resolved, existing ``reader.basePath`` for a localFiles collection.
 
     400 (not 404/500) for every "this collection cannot be deleted from" case, so
@@ -342,14 +534,22 @@ def _localfiles_base_path(store: KnowledgeStore, collection: str) -> str:
     ``get_all_document_ids``). A relative basePath resolves against this process's
     CWD, matching how ``FilesDocumentReader`` and the update factory
     (``DiskPersister(base_path="./data/collections")``) already read it.
+
+    ``operation`` only names the caller in that 400's message — the raw source
+    read needs the same tree for a different reason (a query-based reader's
+    documents have no file to serve), so it gets the same check and its own verb.
     """
     try:
         manifest = json.loads(
             store.disk_persister.read_text_file(f"{collection}/manifest.json")
         )
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError):
+        # The exception's string carries the manifest's path, and this helper is
+        # reached by an unauthenticated GET (the raw read). Log it, don't echo it.
+        logger.warning("Could not read manifest for %s", collection, exc_info=True)
         raise HTTPException(
-            status_code=500, detail=f"Could not read manifest for '{collection}': {e}"
+            status_code=500,
+            detail=f"Could not read the manifest for collection '{collection}'",
         )
 
     reader = manifest.get("reader") or {}
@@ -358,7 +558,7 @@ def _localfiles_base_path(store: KnowledgeStore, collection: str) -> str:
             status_code=400,
             detail=(
                 f"Collection '{collection}' has reader type "
-                f"'{reader.get('type')}'; deletion is only supported for "
+                f"'{reader.get('type')}'; {operation} is only supported for "
                 f"'localFiles' collections"
             ),
         )
@@ -372,11 +572,17 @@ def _localfiles_base_path(store: KnowledgeStore, collection: str) -> str:
 
     resolved = os.path.realpath(base_path)
     if not os.path.isdir(resolved):
+        # Both the declared and the resolved path are server-filesystem paths;
+        # the operator needs them, the caller must not have them.
+        logger.warning(
+            "reader.basePath %r for collection %s does not resolve to an existing "
+            "directory (resolved: %s)", base_path, collection, resolved
+        )
         raise HTTPException(
             status_code=400,
             detail=(
-                f"reader.basePath '{base_path}' for collection '{collection}' "
-                f"does not resolve to an existing directory (resolved: {resolved})"
+                f"reader.basePath for collection '{collection}' does not resolve "
+                f"to an existing directory"
             ),
         )
     return resolved
@@ -498,7 +704,12 @@ def _collections_sharing_source(store: KnowledgeStore, source_path: str,
     return result
 
 
-def _require_indexed_document(store: KnowledgeStore, collection: str, doc_id: str) -> None:
+def _require_indexed_document(
+    store: KnowledgeStore,
+    collection: str,
+    doc_id: str,
+    not_indexed_detail: str | None = None,
+) -> None:
     """404 unless ``doc_id`` is an actual indexed document of ``collection``.
 
     basePath is not the collection — for several wikis it is a live git repo root
@@ -512,19 +723,30 @@ def _require_indexed_document(store: KnowledgeStore, collection: str, doc_id: st
     Checked against the persisted index mapping rather than a fresh reader
     enumeration: it is a single small JSON read, and it is exactly the set the
     subsequent orphan pruning reconciles against.
+
+    ``not_indexed_detail`` replaces the 404's message. The default is the delete
+    route's, which reports that the file may exist under basePath — true, useful
+    to an operator about to move something, and an existence oracle on a plain
+    read. The raw route passes a detail that says only "not available", the same
+    one it gives for an id with no file at all.
     """
     path = f"{collection}/indexes/reverse_index_document_mapping.json"
     try:
         mapping = json.loads(store.disk_persister.read_text_file(path))
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError):
+        # Same as the manifest read: the exception names the file it failed on.
+        logger.warning(
+            "Could not read the index mapping for %s", collection, exc_info=True
+        )
         raise HTTPException(
             status_code=500,
-            detail=f"Could not read the index mapping for '{collection}': {e}",
+            detail=f"Could not read the index mapping for collection '{collection}'",
         )
     if doc_id not in mapping:
         raise HTTPException(
             status_code=404,
-            detail=(
+            detail=not_indexed_detail
+            or (
                 f"Document '{doc_id}' is not indexed in collection '{collection}' "
                 f"(the file may exist under reader.basePath but be excluded from "
                 f"the collection); refusing to move it"
