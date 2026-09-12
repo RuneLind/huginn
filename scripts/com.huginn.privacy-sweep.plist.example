@@ -4,8 +4,8 @@
 
   A baseline sweep re-asks the local model about EVERY document in every
   in-scope collection. Measured on this corpus: 48-51 min for a 681-window
-  collection, 56-77 min for a 428-window one, 148-180 min for a 2430-window one
-  — 4.3 to 5.1 hours for the three together. 01:00 puts all of that ahead of the
+  collection, 53-77 min for a 428-window one, 148-180 min for a 2430-window one
+  — 4.2 to 5.1 hours for the three together. 01:00 puts all of that ahead of the
   installed index jobs, the earliest of which is 08:00 local.
 
   ONE-SHOT BY CONSTRUCTION. The script is passed the "once" flag below, so it
@@ -31,9 +31,12 @@
   is a distributor fingerprint, the same shape main/privacy/index_scan.py check 10
   blocks and alias_registry rewrites. PATH must include the uv install dir
   (/opt/homebrew/bin): launchd runs with a minimal environment, so uv and python3
-  will not resolve without it. caffeinate -s keeps the machine awake for the
-  duration — it cannot wake a sleeping machine to start the job, but it stops a
-  five-hour sweep from being suspended halfway through.
+  will not resolve without it. caffeinate keeps the machine awake for the duration
+  — it cannot wake a sleeping machine to start the job, but it stops a five-hour
+  sweep from being suspended halfway through. All three flags are needed: -s
+  alone is documented as valid only on AC power, and passing any assertion flag
+  suppresses the idle-sleep assertion caffeinate would otherwise add by default,
+  so -s on its own lets a laptop on battery idle-sleep mid-sweep.
 -->
 <plist version="1.0">
 <dict>
@@ -43,6 +46,8 @@
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/caffeinate</string>
+        <string>-i</string>
+        <string>-m</string>
         <string>-s</string>
         <string>/bin/bash</string>
         <string>__HUGINN__/scripts/overnight_privacy_sweep.sh</string>

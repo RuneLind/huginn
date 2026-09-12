@@ -64,20 +64,38 @@ TRIGGER="${TRIGGER:-scheduled}"
 # Its own ledger key, not `sensitivity-audit`: each sweep CLI call already writes
 # a run under that key with the swept collection in its detail, and a second
 # writer on the same key would double every row. This key is the JOB — one run,
-# one phase per collection — the way `sensitivity-audit` is the audit. It is
-# routed in scripts/schedule_routing.json so the ledger knows this job's cadence;
-# without that the fold uses the flat 6 h incomplete threshold, and a slow night
-# (the measured jira-issues baseline range alone is 148-180 min) folds a healthy
-# run to `incomplete`.
+# one phase per collection — the way `sensitivity-audit` is the audit.
+#
+# Deliberately NOT routed in a schedule_routing.json. Routing would buy a
+# `nextRunAt` on the dashboard and a cadence-derived `incomplete` threshold of
+# 48 h — for a job that disarms itself after one night, that is a next run that
+# will never happen and a two-day window in which a killed run still reads as
+# `running`. The flat 6 h threshold is the better fit: the measured range is
+# 4.2-5.1 h, so a run still open at 6 h IS incomplete.
 LEDGER_KEY="${LEDGER_KEY:-privacy-baseline}"
 LAUNCHD_LABEL="${LAUNCHD_LABEL:-com.huginn.privacy-sweep}"
 LOG_DIR="${LOG_DIR:-${PROJECT_DIR}/logs}"   # overridable so the contract tests do not write here
 # ------------------------------------------------------------------------------
 
 cd "$PROJECT_DIR"
-mkdir -p "$LOG_DIR"
+# Both tolerate failure: an unwritable log directory is a reason to lose the log,
+# never a reason to lose the night — and least of all a reason to exit under
+# `set -e` before the ledger row that says the night happened.
+mkdir -p "$LOG_DIR" 2>/dev/null || true
 LOG_FILE="${LOG_DIR}/overnight_privacy_sweep_$(date +%Y-%m-%d_%H%M%S).log"
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
+# Every sweep redirects its own output here with `>> "$LOG_FILE"`, and a
+# redirection bash cannot open fails the command before it starts — so an
+# unwritable log directory does not cost the log, it costs every sweep in the
+# night. Fall back to /dev/null and say so on stdout, which launchd captures.
+if ! (: >> "$LOG_FILE") 2>/dev/null; then
+    echo "Log directory ${LOG_DIR} is not writable — the run continues without a log file"
+    LOG_FILE="/dev/null"
+fi
+log() {
+    line="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+    echo "$line"
+    printf '%s\n' "$line" >> "$LOG_FILE" 2>/dev/null || true
+}
 
 # --- Run-ledger helpers (observational only) ----------------------------------
 # Stubbed to no-ops when the helper is missing, so a missing observability file
@@ -142,9 +160,13 @@ from main.privacy.alias_registry import load_scope, path_in_scope
 names, _ = load_scope()
 swept, skipped = [], []
 root = Path("data/collections")
+built = set()
 for directory in sorted(root.iterdir() if root.is_dir() else []):
+    built.add(directory.name)
     manifest_path = directory / "manifest.json"
     if not manifest_path.exists():
+        if directory.name in names:
+            skipped.append((directory.name, "named in scope but has no built index"))
         continue
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -162,6 +184,9 @@ for directory in sorted(root.iterdir() if root.is_dir() else []):
         continue
     documents = manifest.get("numberOfDocuments")
     swept.append((documents if isinstance(documents, int) else 0, directory.name))
+for name in sorted(names - built):
+    # In scope by name with no directory at all — invisible to the loop above.
+    skipped.append((name, "named in scope but has no built index"))
 for _, name in sorted(swept):
     print("sweep\t%s" % name)
 for name, reason in skipped:
@@ -186,6 +211,7 @@ EOF
 fi
 
 FAILED=0
+PRODUCED=0
 if [ "${#COLLECTIONS[@]}" -eq 0 ]; then
     # A degraded phase rather than a silent exit: "nothing in scope" is a claim
     # about this machine, and it should have to show up somewhere.
@@ -210,8 +236,9 @@ else
         detail="$(phase_detail "$collection" "$MODE" "${rc:-0}")"
         phase_end "$rc" "$detail" || true
         case "$rc" in
-            0)   log "--- ${collection}: clean" ;;
-            2)   log "--- ${collection}: UNKNOWN PERSON(S) — triage the report in privacy/"; FAILED=1 ;;
+            0)   log "--- ${collection}: clean"; PRODUCED=$((PRODUCED + 1)) ;;
+            2)   log "--- ${collection}: UNKNOWN PERSON(S) — triage the report in privacy/"
+                 PRODUCED=$((PRODUCED + 1)); FAILED=1 ;;
             1)   log "--- ${collection}: exited 1 — no collection, no map, no Ollama, or a crash (see the log)"; FAILED=1 ;;
             127) log "--- ${collection}: exited 127 — uv not found on PATH"; FAILED=1 ;;
             *)   log "--- ${collection}: exited ${rc} — see the log"; FAILED=1 ;;
@@ -225,18 +252,29 @@ log "=== Overnight privacy sweep finished (degraded=${FAILED}) ==="
 
 # A baseline is a night you decide to spend, not a recurring cost: at ~5 h of
 # local-model time it is the most expensive thing this repo schedules. `--once`
-# is what makes the installed job genuinely one-shot — the plist template passes
-# it — so forgetting to unload by hand cannot turn tonight into every night.
-# Unloading terminates this process, so it is the last thing that happens; the
-# ledger row and the log are already written.
-if [ "$ONCE" = true ]; then
+# is what makes the installed job genuinely one-shot, so forgetting to unload by
+# hand cannot turn tonight into every night.
+#
+# THE FILE GOES FIRST. `launchctl unload` leaves the plist in
+# ~/Library/LaunchAgents, and every agent there is loaded again at the next
+# login — so an unloaded one-shot re-arms itself at the next reboot, which is
+# the same recurring 5-hour job by a slower route. Removing the file and then
+# booting the label out by name disarms it in both senses; bootout needs no
+# file, which is why the order works at all.
+#
+# Only after a night that produced something. A discovery failure that swept
+# nothing would otherwise cancel the night it was scheduled for AND remove the
+# schedule, leaving nothing to re-run and nobody told.
+if [ "$ONCE" = true ] && [ "$PRODUCED" -gt 0 ]; then
     PLIST="${HOME}/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
-    if [ -f "$PLIST" ]; then
-        log "Disarming the one-shot schedule: ${LAUNCHD_LABEL}"
-        launchctl unload "$PLIST" >/dev/null 2>&1 || true
-    else
-        log "No installed plist for ${LAUNCHD_LABEL} — nothing to disarm"
-    fi
+    log "Disarming the one-shot schedule: ${LAUNCHD_LABEL}"
+    rm -f "$PLIST" 2>/dev/null || log "Could not remove ${PLIST} — it will re-arm at the next login"
+    # Terminates this process when it succeeds, so anything logged after it is a
+    # failure report by construction.
+    launchctl bootout "gui/$(id -u)/${LAUNCHD_LABEL}" >/dev/null 2>&1 || true
+    log "Job ${LAUNCHD_LABEL} was not booted out (already unloaded, or launchctl refused) — the plist is gone, so it will not return"
+elif [ "$ONCE" = true ]; then
+    log "Not disarming: this run produced no verdict, so the schedule stays for the next attempt"
 fi
 
 # Exit 0 even when a collection reported someone: the finding lives in the report

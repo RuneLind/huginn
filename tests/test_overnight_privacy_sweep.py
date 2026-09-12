@@ -64,7 +64,7 @@ def run(tmp_path):
     runs = tmp_path / "runs"
     runs.mkdir()
 
-    def _run(*args, exit_codes=None, script=SCRIPT, home=None, label=None):
+    def _run(*args, exit_codes=None, script=SCRIPT, home=None, label=None, log_dir=None):
         # Truncated per invocation: a test that runs the script twice reads the
         # SECOND run's arguments, not a file still holding the first run's.
         calls.write_text("", encoding="utf-8")
@@ -83,6 +83,8 @@ def run(tmp_path):
         })
         if home:
             environment["HOME"] = home
+        if log_dir:
+            environment["LOG_DIR"] = log_dir
         if label:
             environment["LAUNCHD_LABEL"] = label
         for collection, code in (exit_codes or {}).items():
@@ -187,8 +189,7 @@ def test_the_launchd_template_is_readable_by_the_ledgers_own_parser():
     schedule by reading the installed plist with `plistlib`, which is stricter:
     a double hyphen inside an XML comment (writing out the `--once` flag, say)
     parses for launchd and raises here, and the job then silently has no
-    schedule — which costs it the cadence-aware `incomplete` threshold and gives
-    it the flat 6 h one, under a sweep whose measured worst case is 5.1 h."""
+    schedule, so the dashboard cannot say when it last ran or is due."""
     import plistlib
     template = os.path.join(REPO_ROOT, "scripts", "com.huginn.privacy-sweep.plist.example")
     with open(template, "rb") as handle:
@@ -199,10 +200,7 @@ def test_the_launchd_template_is_readable_by_the_ledgers_own_parser():
     assert scripts == ["overnight_privacy_sweep.sh"]
     assert "--once" in data["ProgramArguments"], "the installed job must disarm itself"
 
-    routing = os.path.join(REPO_ROOT, "scripts", "schedule_routing.json")
-    with open(routing, encoding="utf-8") as handle:
-        entries = json.load(handle)["scriptCollections"]
-    assert entries[scripts[0]], "the job needs a routing entry or the ledger cannot date it"
+    assert "-i" in data["ProgramArguments"], "caffeinate -s alone is AC-power only"
 
 
 def test_no_absolute_home_path_reaches_the_public_template():
@@ -230,6 +228,44 @@ def test_a_night_that_discovers_nothing_still_leaves_a_row(run, tmp_path, monkey
     assert [phase["name"] for phase in closing["phases"]] == ["discover", "sweep"]
 
 
+def test_a_collection_named_in_scope_with_no_built_index_says_so(run, tmp_path):
+    """The most alarming skip of the three, and the one that used to be silent: a
+    collection privacy scope NAMES, that nobody has built here. The unstamped
+    backups get a line; this must not be the case that does not."""
+    bare = tmp_path / "bare"
+    (bare / "data" / "collections").mkdir(parents=True)
+    for path in ("scripts", "main", ".venv"):
+        os.symlink(os.path.join(REPO_ROOT, path), bare / path)
+
+    completed, called, _ = run(script=str(bare / "scripts" / "overnight_privacy_sweep.sh"))
+    assert called == []
+    unbuilt = [line for line in completed.stdout.splitlines()
+               if "Not swept:" in line and "has no built index" in line]
+    assert unbuilt, completed.stdout
+    named = [line.split("Not swept: ")[1].split(" —")[0] for line in unbuilt]
+
+    # Half-built is the other shape, and it takes the other code path: the
+    # DIRECTORY exists, so the scan above cannot see it missing — only the
+    # manifest is absent, which is what an interrupted build leaves behind.
+    (bare / "data" / "collections" / named[0]).mkdir()
+    again, _, _ = run(script=str(bare / "scripts" / "overnight_privacy_sweep.sh"))
+    still = [line for line in again.stdout.splitlines()
+             if f"Not swept: {named[0]}" in line and "has no built index" in line]
+    assert still, again.stdout
+
+
+def test_an_unwritable_log_directory_costs_the_log_not_the_night(run, tmp_path):
+    """`set -e` plus a logging call that cannot write is how an observability
+    detail takes down the thing it was observing. The ledger row is what the
+    night is for; the log file is a convenience."""
+    completed, called, records = run("--collection", "alpha",
+                                     log_dir="/dev/null/cannot-exist")
+    assert completed.returncode == 0
+    assert [call.split()[3] for call in called] == ["alpha"]
+    closing = [record for record in records if record.get("stage") == "end"][-1]
+    assert closing["phases"][0]["status"] == "succeeded"
+
+
 def test_an_armed_but_unstamped_collection_is_skipped_with_its_reason(run):
     """A pre-alias backup shares an in-scope basePath and reports its own people
     by construction. Sweeping it would spend hours to rediscover that; dropping it
@@ -237,8 +273,10 @@ def test_an_armed_but_unstamped_collection_is_skipped_with_its_reason(run):
     with the reason instead."""
     completed, _, _ = run()
     skipped = [line for line in completed.stdout.splitlines() if "Not swept:" in line]
-    assert skipped, "expected at least one armed-but-unstamped collection on this machine"
-    assert all("no privacy stamp" in line or "unreadable manifest" in line for line in skipped)
+    if not skipped:
+        pytest.skip("no armed-but-unstamped collection built on this machine")
+    reasons = ("no privacy stamp", "unreadable manifest", "has no built index")
+    assert all(any(reason in line for reason in reasons) for line in skipped), skipped
 
 
 def test_a_quote_in_a_collection_name_still_produces_structured_detail(run):
@@ -251,9 +289,11 @@ def test_a_quote_in_a_collection_name_still_produces_structured_detail(run):
         "collection": 'we"ird', "mode": "baseline", "exit": 0}
 
 
-def test_once_disarms_the_installed_job_after_the_sweep(run, tmp_path):
-    """`--once` is what makes the schedule genuinely one-shot. Without it, an
-    unattended five-hour local-model job quietly becomes nightly."""
+def test_once_removes_the_plist_as_well_as_unloading_it(run, tmp_path):
+    """`--once` is what makes the schedule genuinely one-shot. Unloading ALONE is
+    not enough: the file stays in ~/Library/LaunchAgents and every agent there is
+    loaded again at the next login, so an unloaded one-shot re-arms itself at the
+    next reboot — the same recurring five-hour job by a slower route."""
     agents = tmp_path / "home" / "Library" / "LaunchAgents"
     agents.mkdir(parents=True)
     plist = agents / "com.huginn.test-sweep.plist"
@@ -261,11 +301,43 @@ def test_once_disarms_the_installed_job_after_the_sweep(run, tmp_path):
 
     completed, _, _ = run("--collection", "alpha", "--once",
                           home=str(tmp_path / "home"), label="com.huginn.test-sweep")
-    assert completed.launchctl == [f"unload {plist}"]
+    assert not plist.exists(), "the plist must be gone, or login re-arms the job"
+    assert completed.launchctl == [f"bootout gui/{os.getuid()}/com.huginn.test-sweep"]
 
+    plist.write_text("<plist/>", encoding="utf-8")
     without, _, _ = run("--collection", "alpha",
                         home=str(tmp_path / "home"), label="com.huginn.test-sweep")
     assert without.launchctl == []
+    assert plist.exists(), "a run without --once must leave the schedule alone"
+
+
+def test_a_night_that_produced_no_verdict_keeps_its_schedule(run, tmp_path):
+    """A discovery failure that swept nothing must not cancel the night it was
+    scheduled for. Disarming there removes the schedule too, so there is nothing
+    left to re-run and nobody is told."""
+    agents = tmp_path / "home" / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    plist = agents / "com.huginn.test-sweep.plist"
+    plist.write_text("<plist/>", encoding="utf-8")
+
+    completed, _, _ = run("--collection", "alpha", "--once", exit_codes={"alpha": 127},
+                          home=str(tmp_path / "home"), label="com.huginn.test-sweep")
+    assert plist.exists(), "a night that produced nothing must leave the schedule armed"
+    assert completed.launchctl == []
+    assert "Not disarming" in completed.stdout
+
+
+def test_a_finding_still_counts_as_a_verdict_for_the_disarm(run, tmp_path):
+    """Exit 2 is the night working, not failing: it found someone. The schedule
+    has done its job and must not stay armed for another five hours tomorrow."""
+    agents = tmp_path / "home" / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    plist = agents / "com.huginn.test-sweep.plist"
+    plist.write_text("<plist/>", encoding="utf-8")
+
+    run("--collection", "alpha", "--once", exit_codes={"alpha": 2},
+        home=str(tmp_path / "home"), label="com.huginn.test-sweep")
+    assert not plist.exists()
 
 
 @pytest.mark.parametrize("argument", ["--collection", "--limit"])
@@ -288,7 +360,10 @@ def test_targets_are_discovered_from_the_privacy_scope_not_a_list(run):
 
     _, called, _ = run()
     swept = [call.split()[3] for call in called]
-    assert swept, "expected at least one in-scope collection with a built index"
+    if not swept:
+        # A clone of the public repo has no private sub-repo and no built
+        # collections. That is a machine without the data, not a broken script.
+        pytest.skip("no in-scope collection built on this machine")
 
     sizes = []
     for name in swept:

@@ -1,7 +1,0 @@
-{
-  "_comment": "Public half of the job -> collections routing read by main/runtime/indexing_schedule.py. Private deployments add their own huginn-*/scripts/schedule_routing.json for the job names and collection names that are not public; those are read FIRST, so nothing here can shadow them unless it repeats a script basename. Only names that carry nothing private belong in this file.",
-  "version": 1,
-  "scriptCollections": {
-    "overnight_privacy_sweep.sh": ["privacy-baseline"]
-  }
-}
