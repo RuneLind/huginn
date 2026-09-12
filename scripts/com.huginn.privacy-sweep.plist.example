@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd template for the overnight privacy baseline sweep.
+
+  A baseline sweep re-asks the local model about EVERY document in every
+  in-scope collection — hours, not minutes (measured: ~50 min for a 681-window
+  collection, ~150 min for a 2430-window one). 01:00 leaves it clear of the
+  07:30 index jobs, which would otherwise contend for the same GPU.
+
+  This is deliberately a template, not an installed job. The nightly sweeps are
+  incremental and that is the right default; a baseline is something you decide
+  to spend a night on — before a map bump, or after a change to what the sweep
+  can read. Install it for that night, then unload it:
+
+    cp scripts/com.huginn.privacy-sweep.plist.example \
+       ~/Library/LaunchAgents/com.huginn.privacy-sweep.plist
+    launchctl load ~/Library/LaunchAgents/com.huginn.privacy-sweep.plist
+    # afterwards:
+    launchctl unload ~/Library/LaunchAgents/com.huginn.privacy-sweep.plist
+    rm ~/Library/LaunchAgents/com.huginn.privacy-sweep.plist
+
+  Adjust the absolute paths if the huginn checkout lives elsewhere. PATH must
+  include the uv install dir (/opt/homebrew/bin) — launchd runs with a minimal
+  environment, so uv/python3/curl will not resolve without it.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.huginn.privacy-sweep</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/rune/source/private/huginn/scripts/overnight_privacy_sweep.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/rune/source/private/huginn</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/Users/rune/.pyenv/shims:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <!-- 01:00 local time: ~4.5 h of sweeping ends well before the 07:30 jobs. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>1</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/rune/source/private/huginn/logs/launchd_privacy_sweep.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/rune/source/private/huginn/logs/launchd_privacy_sweep.err</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
