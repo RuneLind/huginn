@@ -87,6 +87,11 @@ LOG_FILE="${LOG_DIR}/overnight_privacy_sweep_$(date +%Y-%m-%d_%H%M%S).log"
 # redirection bash cannot open fails the command before it starts — so an
 # unwritable log directory does not cost the log, it costs every sweep in the
 # night. Fall back to /dev/null and say so on stdout, which launchd captures.
+#
+# This check is a pre-flight, not a guarantee: a volume with room for one append
+# passes it and then fails on the next write (measured on a nearly-full ramdisk,
+# ENOSPC after 845 lines). That is why the `|| true` on the append below stays —
+# it is the only guard against a disk that fills during a five-hour run.
 if ! (: >> "$LOG_FILE") 2>/dev/null; then
     echo "Log directory ${LOG_DIR} is not writable — the run continues without a log file"
     LOG_FILE="/dev/null"
@@ -262,19 +267,38 @@ log "=== Overnight privacy sweep finished (degraded=${FAILED}) ==="
 # booting the label out by name disarms it in both senses; bootout needs no
 # file, which is why the order works at all.
 #
-# Only after a night that produced something. A discovery failure that swept
-# nothing would otherwise cancel the night it was scheduled for AND remove the
-# schedule, leaving nothing to re-run and nobody told.
-if [ "$ONCE" = true ] && [ "$PRODUCED" -gt 0 ]; then
-    PLIST="${HOME}/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
-    log "Disarming the one-shot schedule: ${LAUNCHD_LABEL}"
-    rm -f "$PLIST" 2>/dev/null || log "Could not remove ${PLIST} — it will re-arm at the next login"
-    # Terminates this process when it succeeds, so anything logged after it is a
-    # failure report by construction.
-    launchctl bootout "gui/$(id -u)/${LAUNCHD_LABEL}" >/dev/null 2>&1 || true
-    log "Job ${LAUNCHD_LABEL} was not booted out (already unloaded, or launchctl refused) — the plist is gone, so it will not return"
+# Only after a night where EVERY discovered collection produced a verdict. One
+# verdict out of three is the dangerous case, not the safe one: discovery orders
+# smallest first, so the cheapest collection is exactly the one likeliest to
+# finish before a model dies — disarming on it would leave the expensive two
+# unswept with no schedule to retry them.
+if [ "$ONCE" = true ] && [ "$PRODUCED" -eq "${#COLLECTIONS[@]}" ] && [ "$PRODUCED" -gt 0 ]; then
+    # Both guards are about aiming the `rm` below. An empty HOME would point it
+    # at /Library/LaunchAgents (a system path), and the label is interpolated
+    # into a path, so a traversing one would delete somewhere else entirely.
+    if [ -z "${HOME:-}" ]; then
+        log "Not disarming: HOME is unset, so the plist path cannot be resolved"
+    elif ! printf '%s' "$LAUNCHD_LABEL" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
+        log "Not disarming: LAUNCHD_LABEL '${LAUNCHD_LABEL}' is not a plain launchd label"
+    else
+        PLIST="${HOME}/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
+        log "Disarming the one-shot schedule: ${LAUNCHD_LABEL}"
+        rm -f "$PLIST" 2>/dev/null || true
+        if [ -e "$PLIST" ]; then
+            log "Could not remove ${PLIST} — the job will re-arm at the next login"
+        fi
+        # Under launchd this kills the process mid-call, so the success branch is
+        # only ever reached by a hand-run. Both branches report what happened
+        # rather than asserting it: the previous version logged a failure
+        # unconditionally, which was a false report on every manual run.
+        if launchctl bootout "gui/$(id -u)/${LAUNCHD_LABEL}" >/dev/null 2>&1; then
+            log "Job ${LAUNCHD_LABEL} booted out"
+        else
+            log "Job ${LAUNCHD_LABEL} was not booted out (already unloaded, or launchctl refused)"
+        fi
+    fi
 elif [ "$ONCE" = true ]; then
-    log "Not disarming: this run produced no verdict, so the schedule stays for the next attempt"
+    log "Not disarming: ${PRODUCED} of ${#COLLECTIONS[@]} collections produced a verdict, so the schedule stays for the next attempt"
 fi
 
 # Exit 0 even when a collection reported someone: the finding lives in the report

@@ -81,7 +81,9 @@ def run(tmp_path):
             "JOB_LABEL": "test_overnight",
             "TRIGGER": "manual",
         })
-        if home:
+        if home is not None:
+            # Explicitly `is not None`: an EMPTY home is a case under test (it
+            # aims the plist path at a system directory), not an absent one.
             environment["HOME"] = home
         if log_dir:
             environment["LOG_DIR"] = log_dir
@@ -309,6 +311,60 @@ def test_once_removes_the_plist_as_well_as_unloading_it(run, tmp_path):
                         home=str(tmp_path / "home"), label="com.huginn.test-sweep")
     assert without.launchctl == []
     assert plist.exists(), "a run without --once must leave the schedule alone"
+
+
+def test_a_partial_night_keeps_its_schedule(run, tmp_path):
+    """One verdict out of three is the dangerous case, not the safe one.
+    Discovery orders smallest first, so the cheapest collection is the one
+    likeliest to finish before a model dies — disarming on it leaves the
+    expensive two unswept with no schedule left to retry them."""
+    agents = tmp_path / "home" / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    plist = agents / "com.huginn.test-sweep.plist"
+    plist.write_text("<plist/>", encoding="utf-8")
+
+    completed, _, _ = run("--collection", "alpha", "--collection", "beta",
+                          "--collection", "gamma", "--once",
+                          exit_codes={"beta": 1, "gamma": 1},
+                          home=str(tmp_path / "home"), label="com.huginn.test-sweep")
+    assert plist.exists(), "two collections never got a verdict; the night must be retryable"
+    assert "1 of 3 collections produced a verdict" in completed.stdout
+
+
+@pytest.mark.parametrize("home,label,reason", [
+    ("", "com.huginn.test-sweep", "HOME is unset"),
+    (None, "../../../etc/passwd", "not a plain launchd label"),
+])
+def test_the_disarm_refuses_a_path_it_cannot_aim(run, tmp_path, home, label, reason):
+    """The `rm` is pointed at a path built from two env vars. An empty HOME aims
+    it at /Library/LaunchAgents, and the label is interpolated into the path, so
+    a traversing one aims it anywhere at all."""
+    real_home = tmp_path / "home"
+    agents = real_home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    plist = agents / "com.huginn.test-sweep.plist"
+    plist.write_text("<plist/>", encoding="utf-8")
+
+    completed, _, _ = run("--collection", "alpha", "--once",
+                          home=real_home.as_posix() if home is None else home,
+                          label=label)
+    assert plist.exists()
+    assert completed.launchctl == []
+    assert reason in completed.stdout
+
+
+def test_a_hand_run_that_disarms_does_not_report_a_failure(run, tmp_path):
+    """Under launchd the bootout kills this process mid-call, so the success
+    branch is only ever reached by a hand-run — where the previous version
+    logged a failure unconditionally, which was false every time."""
+    agents = tmp_path / "home" / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    (agents / "com.huginn.test-sweep.plist").write_text("<plist/>", encoding="utf-8")
+
+    completed, _, _ = run("--collection", "alpha", "--once",
+                          home=str(tmp_path / "home"), label="com.huginn.test-sweep")
+    assert "booted out" in completed.stdout
+    assert "was not booted out" not in completed.stdout
 
 
 def test_a_night_that_produced_no_verdict_keeps_its_schedule(run, tmp_path):
