@@ -171,6 +171,52 @@ class TestParseReferences:
         assert sweep.parse_references(raw) == [
             {"text": "Kari Ukjent", "kind": "full_name"}]
 
+    def test_an_answer_that_quotes_a_reasoning_tag_is_still_read(self):
+        """The model quotes verbatim substrings, and the corpus is full of
+        markup. A reply that IS valid JSON has no reasoning in it — the tags are
+        prose — so scanning its own text for them would truncate the answer at a
+        tag the document merely contains."""
+        assert sweep.parse_references('{"references": [{"text": "<think>"}]}') == [
+            {"text": "<think>", "kind": "other"}]
+
+    def test_a_mismatched_bracket_does_not_hide_the_answer_after_it(self):
+        """Bracket types are matched so the scanner RESYNCS: a `{`…`]` pair in
+        the prose is abandoned rather than left holding the stack open, and the
+        real answer after it is still found. Without this the answer — and any
+        name in it — is simply never seen."""
+        assert sweep.parse_references('{[} {"references": []}') == []
+        assert sweep.parse_references(
+            '[{] {"references": [{"text": "Kari Ukjent", "kind": "full_name"}]}') == [
+                {"text": "Kari Ukjent", "kind": "full_name"}]
+
+    def test_a_reply_that_is_nothing_but_a_fence_is_the_whole_answer(self):
+        """The fence strip on the whole-reply path: a reply that is ONLY a fenced
+        answer is judged by the contract for a whole reply, which has always
+        accepted a bare list. One word of prose in front of it and the same list
+        is refused — embedded, only an object counts."""
+        assert sweep.parse_references('```json\n["Kari Ukjent"]\n```') == [
+            {"text": "Kari Ukjent", "kind": "other"}]
+        assert sweep.parse_references('Answer:\n```json\n["Kari Ukjent"]\n```') is None
+
+    def test_two_candidates_differing_only_in_a_coerced_field_are_one_answer(self):
+        """`kind` is a hint the parser coerces to `other`, so two candidates that
+        normalise to the same answer are not a disagreement. Refusing them would
+        spend a re-ask on a reply that said one thing twice."""
+        raw = ('{"references": [{"text": "Kari Ukjent", "kind": "bogus"}]} '
+               'and {"references": [{"text": "Kari Ukjent", "kind": "weird"}]}')
+        assert sweep.parse_references(raw) == [{"text": "Kari Ukjent", "kind": "other"}]
+
+    def test_a_finding_named_only_in_prose_is_not_pinned(self):
+        """DECLARED LIMIT, not an accident. A reply that names someone in prose
+        and carries one answer-shaped object reads as that object. It is
+        indistinguishable from the legitimate shape — the model listing candidate
+        strings and then correctly answering that none is a person — which is the
+        shape this parser exists to read. Written down so a later reader meets it
+        as a decision rather than as a surprise."""
+        raw = ('The byline names Kari Ukjent. Per the instructions, if it named '
+               'no one I would return {"references": []}.')
+        assert sweep.parse_references(raw) == []
+
     def test_a_reasoning_block_is_not_read_as_the_answer(self):
         """The answer is what the model said AFTER it stopped thinking. Reading
         inside the block would promote a draft it talked itself out of.
@@ -238,9 +284,10 @@ class TestParseReferences:
         assert sweep.parse_references(raw) is None
 
     def test_a_repetition_loop_is_one_unread_window_not_a_dead_sweep(self):
-        """`json.loads` raises RecursionError, not a decode error, past about
-        20k of nesting. `sweep_document` only guards the transport call, so an
-        uncaught one would abort the whole run over a single window."""
+        """`json.loads` raises RecursionError, not a decode error, past a
+        nesting depth of 9998 on this interpreter. `sweep_document` only guards
+        the transport call, so an uncaught one would abort the whole run over a
+        single window."""
         assert sweep.parse_references("[" * 20000 + "]" * 20000) is None
 
     def test_a_list_of_things_that_are_not_references_is_not_an_empty_answer(self):
@@ -248,6 +295,11 @@ class TestParseReferences:
         named here". Shaping it to `[]` would cache the document clean."""
         assert sweep.parse_references('[0]') is None
         assert sweep.parse_references('{"references": ["   "]}') is None
+        assert sweep.parse_references('Prose.\n{"references": ["   "]}') is None
+        # And it fails the reply rather than being passed over for a later
+        # candidate: an answer nobody can read is not a vote for the other one.
+        assert sweep.parse_references(
+            '{"references": ["   "]} then {"references": [{"text": "Kari Ukjent"}]}') is None
         assert sweep.parse_references('{"references": []}') == []
 
     @pytest.mark.parametrize("raw", [

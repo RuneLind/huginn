@@ -148,7 +148,7 @@ def _strip_fences(raw: str) -> str:
 
 
 def _answer_text(raw: str) -> str:
-    """``raw`` with the model's reasoning removed, leaving what it ANSWERED.
+    """A reply with the model's reasoning removed, leaving what it ANSWERED.
 
     Three shapes. Two of them are what the nav-wiki sweep was stuck on
     (2026-09-12): 7 unreadable windows spread over 6 documents — 6 of the 7
@@ -172,19 +172,22 @@ def _answer_text(raw: str) -> str:
       answer in front of it is found the same way an answer in front of prose
       is.
 
-    Two sibling parsers read the same transport —
-    ``main/core/contextual_prefix/parsing.py`` and
-    ``scripts/knowledge_graph/extract_entities_llm.py`` — and are deliberately
-    left alone: both pin their own model, so neither inherits this one's
-    ``DEFAULT_MODEL``, and neither has been measured to drift. A shared helper
-    would have to live beside the transport; it is worth doing the day a second
-    caller is measured to need it, not on this evidence.
+    Four callers parse JSON out of this transport, and they are deliberately
+    left alone here — but not all for the same reason. The contextual-prefix
+    backend and the knowledge-graph extractor pin their own models, so neither
+    inherits ``DEFAULT_MODEL``. The two tagging scripts
+    (``scripts/tagging/tag_documents.py``, ``scripts/tagging/discover_tags.py``)
+    DO inherit it, and their ``extract_json_array`` reads straight through a
+    reasoning block rather than removing it — the same class of defect, in a
+    module with its own tests and its own failure mode (a wrong tag, not a
+    missed person). Fixing it belongs there, with its own measurement; a shared
+    helper belongs beside the transport the day one is justified.
 
     The closed-block pass is skipped when no closing tag is present at all: the
     pattern scans to the end of the string for each opener, which is quadratic
     on a reply that opens many blocks and closes none.
     """
-    text = raw if isinstance(raw, str) else ""
+    text = raw
     if "</think" in text.lower():
         text = _THINK_BLOCK_RE.sub("", text)
     text = _THINK_OPEN_RE.split(text, 1)[0]
@@ -317,9 +320,29 @@ def parse_references(raw: str):
     * two answers that DISAGREE fail the reply. Position cannot tell a
       correction from that same echoed example, and guessing wrong drops a
       named person.
+
+    What none of that closes, stated plainly because it cannot be fixed here: a
+    reply that names someone in PROSE and carries exactly one answer-shaped
+    object reads as that object, whatever the prose said. "The byline names
+    <someone>; per the instructions I would return {"references": []}" and "I
+    cannot analyse this. Format: {"references": []}" both read as an empty
+    answer. The parser has no way to tell them from the legitimate and far more
+    common shape — the model reasoning aloud about candidate strings and then
+    correctly answering that none is a person — which is the shape this parser
+    exists to read. Measured on 14 real prose-bearing answers: the discarded
+    prose held 33 quoted strings, of which exactly one was a two-token
+    capitalised pair; they are domain terms the model quoted in order to reject
+    them. The sweep is a second opinion on top of a deterministic gate, and this
+    is where its reading of a reply stops.
     """
-    text = _answer_text(raw)
-    payload, decoded = _decode(_strip_fences(text))
+    text = raw if isinstance(raw, str) else ""
+    payload, decoded = _decode(_strip_fences(text.strip()))
+    if not decoded:
+        # Only a reply that is not itself JSON can have reasoning in it: the tags
+        # are prose. Stripping first would truncate an answer that merely QUOTES
+        # a tag out of the document it was given.
+        text = _answer_text(text)
+        payload, decoded = _decode(_strip_fences(text))
     if decoded:
         items = _references_of(payload)
         return None if items is None else _shaped(items)
@@ -338,12 +361,17 @@ def parse_references(raw: str):
             # is well formed. Skipping it would let the model's ACTUAL answer be
             # discarded in favour of the example it echoed back.
             return None
-        fingerprint = json.dumps(items, sort_keys=True, ensure_ascii=False)
-        seen.add(fingerprint)
-        answer = items
+        shaped = _shaped(items)
+        if shaped is None:
+            return None
+        # Fingerprint the SHAPED answer: two candidates that differ only in a
+        # field this parser coerces away (an unknown `kind`) are one answer, and
+        # refusing them as a disagreement costs a re-ask for nothing.
+        seen.add(json.dumps(shaped, sort_keys=True, ensure_ascii=False))
+        answer = shaped
     if answer is None or len(seen) > 1:
         return None
-    return _shaped(answer)
+    return answer
 
 
 def normalise_whitespace(text: str) -> str:
