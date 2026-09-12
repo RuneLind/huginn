@@ -3,25 +3,37 @@
   launchd template for the overnight privacy baseline sweep.
 
   A baseline sweep re-asks the local model about EVERY document in every
-  in-scope collection — hours, not minutes (measured: ~50 min for a 681-window
-  collection, ~150 min for a 2430-window one). 01:00 leaves it clear of the
-  07:30 index jobs, which would otherwise contend for the same GPU.
+  in-scope collection. Measured on this corpus: 48-51 min for a 681-window
+  collection, 56-77 min for a 428-window one, 148-180 min for a 2430-window one
+  — 4.3 to 5.1 hours for the three together. 01:00 puts all of that ahead of the
+  installed index jobs, the earliest of which is 08:00 local.
 
-  This is deliberately a template, not an installed job. The nightly sweeps are
-  incremental and that is the right default; a baseline is something you decide
-  to spend a night on — before a map bump, or after a change to what the sweep
-  can read. Install it for that night, then unload it:
+  ONE-SHOT BY CONSTRUCTION. The script is passed the "once" flag below, so it
+  unloads this job when it finishes: a baseline is a night you decide to spend,
+  and an unattended 5-hour local-model job that quietly became nightly is the
+  failure this avoids. Re-arm it by loading the plist again.
 
-    cp scripts/com.huginn.privacy-sweep.plist.example \
-       ~/Library/LaunchAgents/com.huginn.privacy-sweep.plist
+  (The flag is spelled out in ProgramArguments rather than named here because a
+  double hyphen cannot appear inside an XML comment. launchd's own parser
+  tolerates one; plistlib does not, and plistlib is what reads this file in
+  main/runtime/indexing_schedule.py to report the job's schedule.)
+
+    sed 's|__HUGINN__|'"$PWD"'|g' scripts/com.huginn.privacy-sweep.plist.example \
+      > ~/Library/LaunchAgents/com.huginn.privacy-sweep.plist   # run from the huginn root
     launchctl load ~/Library/LaunchAgents/com.huginn.privacy-sweep.plist
-    # afterwards:
-    launchctl unload ~/Library/LaunchAgents/com.huginn.privacy-sweep.plist
-    rm ~/Library/LaunchAgents/com.huginn.privacy-sweep.plist
 
-  Adjust the absolute paths if the huginn checkout lives elsewhere. PATH must
-  include the uv install dir (/opt/homebrew/bin) — launchd runs with a minimal
-  environment, so uv/python3/curl will not resolve without it.
+  To disarm before it fires, or to re-check that it disarmed itself:
+
+    launchctl list | grep com.huginn.privacy-sweep
+    launchctl unload ~/Library/LaunchAgents/com.huginn.privacy-sweep.plist
+
+  The paths are placeholders on purpose — an absolute home path in a public repo
+  is a distributor fingerprint, the same shape main/privacy/index_scan.py check 10
+  blocks and alias_registry rewrites. PATH must include the uv install dir
+  (/opt/homebrew/bin): launchd runs with a minimal environment, so uv and python3
+  will not resolve without it. caffeinate -s keeps the machine awake for the
+  duration — it cannot wake a sleeping machine to start the job, but it stops a
+  five-hour sweep from being suspended halfway through.
 -->
 <plist version="1.0">
 <dict>
@@ -30,20 +42,23 @@
 
     <key>ProgramArguments</key>
     <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-s</string>
         <string>/bin/bash</string>
-        <string>/Users/rune/source/private/huginn/scripts/overnight_privacy_sweep.sh</string>
+        <string>__HUGINN__/scripts/overnight_privacy_sweep.sh</string>
+        <string>--once</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/rune/source/private/huginn</string>
+    <string>__HUGINN__</string>
 
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/opt/homebrew/bin:/Users/rune/.pyenv/shims:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
 
-    <!-- 01:00 local time: ~4.5 h of sweeping ends well before the 07:30 jobs. -->
+    <!-- 01:00 local time: ~5 h of sweeping still ends well before the 08:00 job. -->
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
@@ -53,9 +68,9 @@
     </dict>
 
     <key>StandardOutPath</key>
-    <string>/Users/rune/source/private/huginn/logs/launchd_privacy_sweep.out</string>
+    <string>__HUGINN__/logs/launchd_privacy_sweep.out</string>
     <key>StandardErrorPath</key>
-    <string>/Users/rune/source/private/huginn/logs/launchd_privacy_sweep.err</string>
+    <string>__HUGINN__/logs/launchd_privacy_sweep.err</string>
 
     <key>RunAtLoad</key>
     <false/>
