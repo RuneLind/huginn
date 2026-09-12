@@ -92,88 +92,184 @@ class TestParseReferences:
         raw = '{"references": [{"kind": "full_name"}, {"text": "Kari Ukjent"}]}'
         assert sweep.parse_references(raw) == [{"text": "Kari Ukjent", "kind": "other"}]
 
-    # The two shapes measured on the stuck nav-wiki documents, 2026-09-12: seven
-    # of twenty windows unreadable, every one of them carrying `{"references": []}`.
+    # The shapes measured on the stuck nav-wiki documents, 2026-09-12: seven of
+    # twenty windows unreadable across six documents, every one of them carrying
+    # `{"references": []}` the parser could not reach. Six of the seven were a
+    # stray `</think>`; the seventh was prose with the JSON fenced at the end.
 
     def test_a_stray_closing_think_tag_does_not_hide_the_answer(self):
-        """`think:false` is set on the transport and qwen3.8 emits the closing tag
-        anyway — six of the seven failures were exactly this."""
+        """`think:false` is set on the transport and qwen3.8 closes the tag
+        anyway — six of the seven measured failures were exactly this."""
         assert sweep.parse_references('{"references": []}\n</think>') == []
 
-    def test_a_reasoning_block_is_not_read_as_the_answer(self):
-        """The answer is what the model said AFTER it stopped thinking. Reading
-        inside the block would promote a rejected candidate to the verdict."""
-        raw = ('<think>{"references": [{"text": "Kari Ukjent"}]}</think>\n'
-               '{"references": []}')
-        assert sweep.parse_references(raw) == []
-
     def test_a_trailing_fenced_answer_after_prose_is_read(self):
-        """The seventh failure: the model narrates its reasoning, then fences the
-        JSON at the END, so the fence is not at the start of the string."""
+        """The seventh: the model narrates, then fences the JSON at the END, so
+        the fence is not at the start of the string."""
         raw = ('I have analyzed the text for references to specific human beings.\n\n'
                '1. **@navikt/ds-react**: a package name, not a person.\n\n'
                'Therefore, there are no person references to list.\n\n'
                '```json\n{"references": []}\n```')
         assert sweep.parse_references(raw) == []
 
-    def test_a_fenced_answer_survives_an_unbalanced_brace_in_the_prose(self):
-        """What the fence pass is for. A `{` left open in the narration swallows
-        every brace span after it, so the fence is the only delimiter left."""
-        raw = ('The snippet {"partial\n\n'
+    def test_a_fenced_finding_after_prose_is_read(self):
+        """Reading the prose case must not cost the finding it wraps."""
+        raw = ('One name is still in the clear here:\n\n'
                '```json\n{"references": [{"text": "Kari Ukjent", "kind": "full_name"}]}\n```')
         assert sweep.parse_references(raw) == [
             {"text": "Kari Ukjent", "kind": "full_name"}]
 
-    def test_the_last_fenced_block_is_the_answer(self):
-        """Same rule as the brace spans: a model that fences the schema, an
-        example, or a first draft before its answer means the LAST block."""
-        raw = ('The shape I was asked for:\n```json\n{"references": [{"text": "Example"}]}\n```\n'
-               'Applying it to this document:\n```json\n{"references": []}\n```')
+    def test_a_trailing_unfenced_answer_after_prose_is_read(self):
+        """The shape 13 of 14 sampled jira-issues / melosys-confluence-v3
+        failures had: the model analyses in prose, then states the JSON with no
+        fence around it."""
+        raw = ('The text mentions a package name and a role noun, neither of '
+               'which is a person.\n\n{"references": []}')
         assert sweep.parse_references(raw) == []
 
-    def test_a_brace_inside_a_quoted_reference_does_not_end_the_span(self):
-        """The model quotes verbatim substrings of a code-heavy corpus, so a
-        `}` inside a "text" value is not exotic. A span scanner that counted it
-        would cut the answer short and lose the finding it contains."""
+    def test_an_echoed_example_after_the_answer_does_not_replace_it(self):
+        """The system prompt hands the model `{"references": []}` to echo, so an
+        answer followed by the echo is the shape that turns a real finding into a
+        clean cached verdict. Two answers that disagree are unreadable."""
+        raw = ('{"references": [{"text": "Kari Ukjent", "kind": "full_name"}]}\n\n'
+               'Per the instructions I would return {"references": []} if the text '
+               'named no one.')
+        assert sweep.parse_references(raw) is None
+
+    def test_a_trailing_list_in_prose_does_not_become_the_answer(self):
+        """A bare list in prose is a footnote, a checkbox or the prompt's own
+        list of kinds. Reading one as the answer both erases the real finding and
+        invents references out of the kind names."""
+        raw = ('{"references": [{"text": "Ola Nordmann", "kind": "full_name"}]}\n'
+               'Allowed kinds: ["full_name", "given_name"]')
+        assert sweep.parse_references(raw) == [
+            {"text": "Ola Nordmann", "kind": "full_name"}]
+
+    def test_a_brace_inside_a_quoted_reference_does_not_end_the_answer(self):
+        """The model quotes verbatim substrings of a code-heavy corpus, so a `}`
+        inside a "text" value is not exotic. Counting it would cut the answer
+        short, and a truncated answer is no answer — the finding is lost."""
         raw = ('Found one:\n'
                '{"references": [{"text": "Kari } Ukjent", "kind": "full_name"}]}')
         assert sweep.parse_references(raw) == [
             {"text": "Kari } Ukjent", "kind": "full_name"}]
 
-    def test_an_escaped_quote_does_not_reopen_the_span(self):
-        """The compound of the case above: an escaped quote INSIDE the value,
-        then a brace. Read the escape wrong and the string is thought to end
-        early, so the brace counts and the answer is cut in half."""
+    def test_an_escaped_quote_does_not_reopen_the_answer(self):
+        """The compound case: an escaped quote inside the value, then a brace.
+        Read the escape wrong and the string is thought to end early, so the
+        brace counts and the answer is cut in half."""
         raw = ('Found one:\n'
                r'{"references": [{"text": "Kari \" } Ukjent", "kind": "full_name"}]}')
         assert sweep.parse_references(raw) == [
             {"text": 'Kari " } Ukjent', "kind": "full_name"}]
 
-    def test_a_finding_survives_a_prose_preamble(self):
-        """Tolerating the preamble must not cost the finding it wraps."""
-        raw = ('Here is what I found:\n\n'
-               '{"references": [{"text": "Kari Ukjent", "kind": "full_name"}]}')
+    def test_a_fenced_answer_survives_an_unbalanced_brace_in_the_prose(self):
+        """What the fence pass is for, and the only thing that is: a `{` left
+        open in the narration swallows the answer that follows it, and the fence
+        is then the only delimiter left."""
+        raw = ('The snippet {"partial\n\n'
+               '```json\n{"references": [{"text": "Kari Ukjent", "kind": "full_name"}]}\n```')
         assert sweep.parse_references(raw) == [
             {"text": "Kari Ukjent", "kind": "full_name"}]
 
-    def test_the_last_answer_wins_when_the_model_restates_it(self):
-        """A model that corrects itself means the correction, not the draft."""
-        raw = ('First pass: {"references": [{"text": "Kari Ukjent"}]}\n'
-               'On reflection that is a place name.\n'
+    def test_a_reasoning_block_is_not_read_as_the_answer(self):
+        """The answer is what the model said AFTER it stopped thinking. Reading
+        inside the block would promote a draft it talked itself out of.
+
+        Multi-line, mixed-case and two blocks on purpose: real qwen3 reasoning
+        spans paragraphs, and a one-line lowercase fixture leaves the pattern's
+        DOTALL, IGNORECASE and non-greediness unexercised."""
+        raw = ('<think>\nThe text mentions Kari Ukjent.\n\n'
+               'Or is that a place? Draft: {"references": [{"text": "Kari Ukjent"}]}\n'
+               '</think>\n'
+               '<THINK>\nSecond thoughts: it is a place.\n</think>\n'
                '{"references": []}')
         assert sweep.parse_references(raw) == []
 
+    def test_an_unclosed_reasoning_block_swallows_what_follows_it(self):
+        """`num_predict` is capped at 1200, so a reply truncated mid-thought is a
+        live failure mode. Everything from an unclosed opener on is reasoning the
+        model never finished — reading a draft out of it is how a rejected
+        candidate becomes the verdict, in both directions.
+
+        The fenced cases are the ones that matter: a draft the model fenced
+        inside its reasoning is otherwise indistinguishable from an answer."""
+        assert sweep.parse_references('<think>Nobody here.\n{"references": []}') is None
+        assert sweep.parse_references(
+            '<think>{"references": [{"text": "Kari Ukjent"}]}') is None
+        assert sweep.parse_references(
+            '<think>Draft:\n```json\n{"references": []}\n```') is None
+        assert sweep.parse_references(
+            '<think>Draft:\n```json\n{"references": [{"text": "Kari Ukjent"}]}\n```') is None
+
+    def test_two_fenced_answers_that_disagree_are_unreadable(self):
+        """"The last one wins" cannot tell a correction from the prompt's own
+        example echoed back, and the prompt hands the model both shapes to echo.
+        Guessing wrong drops a named person AND caches the document clean, so an
+        ambiguous reply is a parse failure: it costs one re-ask, not a name."""
+        raw = ('```json\n{"references": [{"text": "Kari Ukjent", "kind": "full_name"}]}\n```\n'
+               'The shape I was asked for is:\n```json\n{"references": []}\n```')
+        assert sweep.parse_references(raw) is None
+
+    def test_the_same_answer_fenced_twice_is_not_ambiguous(self):
+        """Restating the identical answer is not a disagreement."""
+        raw = ('```json\n{"references": []}\n```\n'
+               'To be explicit:\n```json\n{"references": []}\n```')
+        assert sweep.parse_references(raw) == []
+
+    def test_a_fenced_answer_is_normalised_like_any_other(self):
+        """The fence is a wrapper, not a second contract: bare strings and
+        unknown kinds are shaped there too, or a caller downstream reads a raw
+        string where it expects a reference."""
+        raw = 'Answer:\n```json\n{"references": ["Kari Ukjent"]}\n```'
+        assert sweep.parse_references(raw) == [{"text": "Kari Ukjent", "kind": "other"}]
+
+    def test_drift_in_the_whole_reply_is_not_rescued_by_a_fence_inside_it(self):
+        """Drift is decided by the reply the model actually sent. Once it parses
+        as JSON, a fenced example QUOTED inside one of its values is not a second
+        chance at a clean verdict."""
+        assert sweep.parse_references('{"people": ["```json []```"]}') is None
+
+    def test_drift_inside_a_fence_is_a_parse_failure(self):
+        """Drift is a failure wherever else the reply is well formed. Falling
+        back to a well-shaped earlier block would let the model's ACTUAL answer
+        be discarded in favour of an echoed example — the vacuous pass again."""
+        raw = ('The shape asked for is:\n```json\n{"references": []}\n```\n'
+               'My answer:\n```json\n{"people": [{"text": "Kari Ukjent"}]}\n```')
+        assert sweep.parse_references(raw) is None
+
+    def test_a_repetition_loop_is_one_unread_window_not_a_dead_sweep(self):
+        """`json.loads` raises RecursionError, not a decode error, past about
+        20k of nesting. `sweep_document` only guards the transport call, so an
+        uncaught one would abort the whole run over a single window."""
+        assert sweep.parse_references("[" * 20000 + "]" * 20000) is None
+
+    def test_a_list_of_things_that_are_not_references_is_not_an_empty_answer(self):
+        """`[0]` is a list of something this parser cannot name, not "no one is
+        named here". Shaping it to `[]` would cache the document clean."""
+        assert sweep.parse_references('[0]') is None
+        assert sweep.parse_references('{"references": ["   "]}') is None
+        assert sweep.parse_references('{"references": []}') == []
+
     @pytest.mark.parametrize("raw", [
+        'Kari Ukjent appears at [0].',
+        'See section [4].',
+        'People: [1] Kari Ukjent [2] Ola Nordmann',
+        'Here:\n```python\nx = []\n```\nNo persons found.',
         '{"references": [{"text": "Kari Ukjent"',
         'There are no person references in this text.',
         '</think>',
         '<think>{"references": []}</think>',
+        123,
+        None,
     ])
     def test_tolerance_stops_at_the_readability_line(self, raw):
-        """Truncated JSON, prose with no JSON at all, a bare tag, and an answer
-        that never left the reasoning block are all still UNREADABLE. The point
-        of the tolerance is to read answers the model did give, never to invent
-        one it did not."""
+        """The tolerance reads answers the model DID give; it never invents one.
+
+        A bracketed token in prose is not an empty references list — reading it
+        as one would turn a reply that names someone in prose into a clean,
+        cached verdict, which is the vacuous pass this counter exists to catch.
+        Truncated JSON, prose with no JSON, a bare tag, an answer that never left
+        its reasoning block and a non-string reply are unreadable too."""
         assert sweep.parse_references(raw) is None
 
 
