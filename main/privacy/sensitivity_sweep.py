@@ -135,6 +135,8 @@ List the person references still in the clear in the text above."""
 
 _FENCE_OPEN_RE = re.compile(r"^```[a-z]*\s*", re.IGNORECASE)
 _FENCE_CLOSE_RE = re.compile(r"\s*```$")
+_FENCE_BLOCK_RE = re.compile(r"```[a-z]*\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+_THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.DOTALL | re.IGNORECASE)
 
 
 def _strip_fences(raw: str) -> str:
@@ -142,6 +144,81 @@ def _strip_fences(raw: str) -> str:
     if text.startswith("```"):
         text = _FENCE_CLOSE_RE.sub("", _FENCE_OPEN_RE.sub("", text))
     return text
+
+
+def _json_spans(text: str) -> list:
+    """Every TOP-LEVEL ``{…}`` / ``[…]`` span in ``text``, last one first.
+
+    Last first because a model that restates its answer means the restatement,
+    and top-level only because a nested object is a fragment of an answer rather
+    than one: descending into ``{"people": [{"text": …}]}`` would find the inner
+    list and read a schema-drifted answer as a compliant one, which is the
+    vacuous pass the parse-failure counter exists to catch.
+
+    Brace counting is string-aware — a ``}`` inside a quoted name closes
+    nothing — and an unbalanced span (a truncated answer) is never emitted.
+    """
+    spans, depth, start, in_string, escaped = [], 0, None, False, False
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "{[":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char in "}]" and depth:
+            depth -= 1
+            if depth == 0 and start is not None:
+                spans.append(text[start:index + 1])
+                start = None
+    return spans[::-1]
+
+
+def _answer_candidates(raw: str):
+    """The strings that might BE the answer, most likely first.
+
+    Measured on nav-wiki 2026-09-12: seven of twenty windows came back
+    unreadable, and every one of them was carrying ``{"references": []}`` the
+    parser could not reach — six suffixed with a stray ``</think>`` (the
+    transport sets ``think:false``; qwen3.8 closes the tag anyway) and one
+    behind a paragraph of prose with the JSON fenced at the END rather than the
+    start. The same six documents were therefore re-asked and failed again every
+    night, because a document with an unread window is deliberately never
+    cached.
+
+    Reasoning blocks are REMOVED rather than searched: a draft the model then
+    talked itself out of is not its answer. A stray closing tag needs no
+    handling of its own — the span pass below reaches the answer in front of it.
+
+    The fence pass is not redundant with the span pass: an unbalanced brace in
+    the prose (``{`` in a sentence, a half-quoted snippet) swallows every span
+    that follows it, and a fenced answer is still delimited.
+    """
+    text = _THINK_BLOCK_RE.sub("", raw or "").strip()
+    seen = set()
+    for candidate in [_strip_fences(text),
+                      *reversed(_FENCE_BLOCK_RE.findall(text)),
+                      *_json_spans(text)]:
+        candidate = candidate.strip()
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            yield candidate
+
+
+def _references_of(payload):
+    """The reference items of one decoded answer, or ``None`` for schema drift."""
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict) and isinstance(payload.get("references"), list):
+        return payload["references"]
+    return None
 
 
 def parse_references(raw: str):
@@ -159,18 +236,23 @@ def parse_references(raw: str):
     scalar, ``null``, an object where the list should be) is a parse failure
     rather than a silent zero: the model was asked for one shape, and answering
     in another is exactly the failure mode the counter is watching for.
+
+    The answer is looked for in more places than the whole string (see
+    ``_answer_candidates``), because a local model wraps it in reasoning tags and
+    prose it was not asked for. What that tolerance never does is manufacture an
+    answer: prose with no JSON in it, a truncated object, and a reply that never
+    left its reasoning block all stay unreadable.
     """
-    if not raw:
-        return None
-    try:
-        payload = json.loads(_strip_fences(raw))
-    except ValueError:
-        return None
-    if isinstance(payload, list):
-        items = payload
-    elif isinstance(payload, dict) and isinstance(payload.get("references"), list):
-        items = payload["references"]
-    else:
+    items = None
+    for candidate in _answer_candidates(raw):
+        try:
+            payload = json.loads(candidate)
+        except ValueError:
+            continue
+        items = _references_of(payload)
+        if items is not None:
+            break
+    if items is None:
         return None
 
     references = []
