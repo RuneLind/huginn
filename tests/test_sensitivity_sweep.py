@@ -224,9 +224,12 @@ class TestParseReferences:
         removed) both fence-strip, so only an input that path 1 alone can read
         distinguishes it: a fenced answer QUOTING a reasoning tag, which path 2
         would truncate. Paths 3 and 4 are the embedded ones."""
-        # 1. the reply itself, fenced, quoting a tag that path 2 would cut at
+        # 1. the reply itself, fenced, quoting a tag that path 2 would cut at.
+        #    The leading space is load-bearing: `_strip_fences` strips before it
+        #    looks for the fence, and without that the fence is not recognised
+        #    here and path 2 truncates at the quoted tag.
         assert sweep.parse_references(
-            '```json\n{"references": [{"text": "<think>"}]}\n```') == [
+            ' ```json\n{"references": [{"text": "<think>"}]}\n```') == [
                 {"text": "<think>", "kind": "other"}]
         # 2. the reply with its reasoning removed — a fenced BARE LIST, which no
         #    embedded path accepts, so only the whole-reply contract can read it
@@ -322,6 +325,10 @@ class TestParseReferences:
         # candidate: an answer nobody can read is not a vote for the other one.
         assert sweep.parse_references(
             '{"references": ["   "]} then {"references": [{"text": "Kari Ukjent"}]}') is None
+        # Including beside an EMPTY answer, where the unreadable candidate is the
+        # only thing standing between the reply and a clean cached verdict.
+        assert sweep.parse_references(
+            'P.\n{"references": [0]}\n{"references": []}') is None
         assert sweep.parse_references('{"references": []}') == []
 
     @pytest.mark.parametrize("raw", [

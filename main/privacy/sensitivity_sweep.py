@@ -368,8 +368,10 @@ def parse_references(raw: str):
         # Fingerprint the SHAPED answer: two candidates that differ only in a
         # field this parser coerces away (an unknown `kind`) are one answer, and
         # refusing them as a disagreement costs a re-ask for nothing. A candidate
-        # that shapes to None needs no branch of its own — alone it leaves
-        # `answer` None, and beside another it is a disagreement.
+        # that shapes to None needs no branch of its own: it fingerprints as
+        # `null`, so beside a readable answer it is a disagreement, and with only
+        # its own kind for company it leaves `answer` None. Either way the reply
+        # is refused — which is what an answer nobody can read deserves.
         shaped = _shaped(items)
         seen.add(json.dumps(shaped, sort_keys=True, ensure_ascii=False))
         answer = shaped
