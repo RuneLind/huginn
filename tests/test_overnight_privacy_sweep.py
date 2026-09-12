@@ -332,13 +332,16 @@ def test_a_partial_night_keeps_its_schedule(run, tmp_path):
 
 
 @pytest.mark.parametrize("home,label,reason", [
-    ("", "com.huginn.test-sweep", "HOME is unset"),
+    ("", "com.huginn.test-sweep", "HOME is empty or unset"),
     (None, "../../../etc/passwd", "not a plain launchd label"),
+    (None, "ok\n../../../etc/passwd", "not a plain launchd label"),
 ])
 def test_the_disarm_refuses_a_path_it_cannot_aim(run, tmp_path, home, label, reason):
     """The `rm` is pointed at a path built from two env vars. An empty HOME aims
     it at /Library/LaunchAgents, and the label is interpolated into the path, so
-    a traversing one aims it anywhere at all."""
+    a traversing one aims it anywhere at all. The third case is why the guard is
+    a `case` and not a grep: grep matches any LINE, so a label carrying a newline
+    passed a `^…$` pattern and went into the path anyway."""
     real_home = tmp_path / "home"
     agents = real_home / "Library" / "LaunchAgents"
     agents.mkdir(parents=True)
@@ -351,6 +354,61 @@ def test_the_disarm_refuses_a_path_it_cannot_aim(run, tmp_path, home, label, rea
     assert plist.exists()
     assert completed.launchctl == []
     assert reason in completed.stdout
+
+
+def test_a_plist_that_cannot_be_removed_is_reported_as_such(run, tmp_path):
+    """The half of the disarm that decides whether the job comes back: if the
+    file survives, login re-arms it, and the log must say so rather than
+    reporting a clean one-shot."""
+    home = tmp_path / "home"
+    agents = home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    plist = agents / "com.huginn.test-sweep.plist"
+    plist.write_text("<plist/>", encoding="utf-8")
+    agents.chmod(0o500)          # removal denied, the file itself still readable
+    try:
+        completed, _, _ = run("--collection", "alpha", "--once",
+                              home=str(home), label="com.huginn.test-sweep")
+    finally:
+        agents.chmod(0o700)
+    assert plist.exists()
+    assert "will re-arm at the next login" in completed.stdout
+
+
+def test_a_collection_discovery_could_not_read_keeps_the_schedule(run, tmp_path):
+    """A skip is not a sweep. A deliberate one (a pre-alias copy) must not block
+    the disarm, but a collection nobody could read — or that is in scope with no
+    built index — was not swept either, and its reason may be as transient as a
+    file lock."""
+    bare = tmp_path / "bare"
+    collections = bare / "data" / "collections"
+    collections.mkdir(parents=True)
+    for path in ("scripts", "main", ".venv"):
+        os.symlink(os.path.join(REPO_ROOT, path), bare / path)
+
+    # One in-scope collection built and stamped, so the night HAS a verdict; the
+    # others in scope are unbuilt. Without the problem count the run would call
+    # itself complete on the one it managed to sweep.
+    import sys
+    sys.path.insert(0, REPO_ROOT)
+    from main.privacy.alias_registry import load_scope
+    names = sorted(load_scope()[0])
+    assert len(names) >= 2, "this test needs at least two collections in privacy scope"
+    (collections / names[0]).mkdir()
+    (collections / names[0] / "manifest.json").write_text(json.dumps(
+        {"numberOfDocuments": 1, "privacy": {"policy_version": 2}}), encoding="utf-8")
+
+    home = tmp_path / "home"
+    agents = home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    plist = agents / "com.huginn.test-sweep.plist"
+    plist.write_text("<plist/>", encoding="utf-8")
+
+    completed, called, _ = run("--once", script=str(bare / "scripts" / "overnight_privacy_sweep.sh"),
+                               home=str(home), label="com.huginn.test-sweep")
+    assert [call.split()[3] for call in called] == [names[0]], completed.stdout
+    assert "has no built index" in completed.stdout
+    assert plist.exists(), "a collection in scope that was never swept must keep the schedule"
 
 
 def test_a_hand_run_that_disarms_does_not_report_a_failure(run, tmp_path):

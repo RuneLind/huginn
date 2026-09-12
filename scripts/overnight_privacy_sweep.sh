@@ -89,9 +89,9 @@ LOG_FILE="${LOG_DIR}/overnight_privacy_sweep_$(date +%Y-%m-%d_%H%M%S).log"
 # night. Fall back to /dev/null and say so on stdout, which launchd captures.
 #
 # This check is a pre-flight, not a guarantee: a volume with room for one append
-# passes it and then fails on the next write (measured on a nearly-full ramdisk,
-# ENOSPC after 845 lines). That is why the `|| true` on the append below stays —
-# it is the only guard against a disk that fills during a five-hour run.
+# passes it and then fails on a later write with ENOSPC, no permission having
+# changed. That is why the `|| true` on the append below stays — it is the only
+# guard against a disk that fills during a five-hour run.
 if ! (: >> "$LOG_FILE") 2>/dev/null; then
     echo "Log directory ${LOG_DIR} is not writable — the run continues without a log file"
     LOG_FILE="/dev/null"
@@ -171,13 +171,13 @@ for directory in sorted(root.iterdir() if root.is_dir() else []):
     manifest_path = directory / "manifest.json"
     if not manifest_path.exists():
         if directory.name in names:
-            skipped.append((directory.name, "named in scope but has no built index"))
+            skipped.append(("problem", directory.name, "named in scope but has no built index"))
         continue
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         # Unreadable is not "not in scope": say so rather than dropping it.
-        skipped.append((directory.name, "unreadable manifest"))
+        skipped.append(("problem", directory.name, "unreadable manifest"))
         continue
     named = directory.name in names
     base = (manifest.get("reader") or {}).get("basePath")
@@ -185,20 +185,24 @@ for directory in sorted(root.iterdir() if root.is_dir() else []):
     if not armed:
         continue
     if not named and "privacy" not in manifest:
-        skipped.append((directory.name, "no privacy stamp (pre-alias copy)"))
+        skipped.append(("skip", directory.name, "no privacy stamp (pre-alias copy)"))
         continue
     documents = manifest.get("numberOfDocuments")
     swept.append((documents if isinstance(documents, int) else 0, directory.name))
 for name in sorted(names - built):
     # In scope by name with no directory at all — invisible to the loop above.
-    skipped.append((name, "named in scope but has no built index"))
+    skipped.append(("problem", name, "named in scope but has no built index"))
 for _, name in sorted(swept):
     print("sweep\t%s" % name)
-for name, reason in skipped:
-    print("skip\t%s\t%s" % (name, reason))
+for kind, name, reason in skipped:
+    # `problem` is a skip that should NOT let the night call itself complete: a
+    # collection in scope that nobody could read or nobody has built. `skip` is
+    # the deliberate kind — a pre-alias copy the sweep is right to leave alone.
+    print("%s\t%s\t%s" % (kind, name, reason))
 PY
 }
 
+PROBLEMS=0
 if [ "${#COLLECTIONS[@]}" -eq 0 ]; then
     log "Discovering collections in privacy scope"
     phase_begin discover 0; rc=0
@@ -207,8 +211,9 @@ if [ "${#COLLECTIONS[@]}" -eq 0 ]; then
     [ "$rc" -eq 0 ] || log "Discovery exited ${rc} — see the log"
     while IFS="$(printf '\t')" read -r kind name reason; do
         case "$kind" in
-            sweep) COLLECTIONS+=("$name") ;;
-            skip)  log "Not swept: ${name} — ${reason}" ;;
+            sweep)   COLLECTIONS+=("$name") ;;
+            skip)    log "Not swept: ${name} — ${reason}" ;;
+            problem) log "Not swept: ${name} — ${reason}"; PROBLEMS=$((PROBLEMS + 1)) ;;
         esac
     done <<EOF
 $discovery
@@ -271,15 +276,23 @@ log "=== Overnight privacy sweep finished (degraded=${FAILED}) ==="
 # verdict out of three is the dangerous case, not the safe one: discovery orders
 # smallest first, so the cheapest collection is exactly the one likeliest to
 # finish before a model dies — disarming on it would leave the expensive two
-# unswept with no schedule to retry them.
-if [ "$ONCE" = true ] && [ "$PRODUCED" -eq "${#COLLECTIONS[@]}" ] && [ "$PRODUCED" -gt 0 ]; then
+# unswept with no schedule to retry them. A collection discovery could not read,
+# or that is in scope with no built index, counts against the night too: it was
+# not swept either, and its reason may be as transient as a file lock.
+if [ "$ONCE" = true ] && [ "$PRODUCED" -eq "${#COLLECTIONS[@]}" ] && [ "$PRODUCED" -gt 0 ] \
+     && [ "$PROBLEMS" -eq 0 ]; then
     # Both guards are about aiming the `rm` below. An empty HOME would point it
     # at /Library/LaunchAgents (a system path), and the label is interpolated
     # into a path, so a traversing one would delete somewhere else entirely.
     if [ -z "${HOME:-}" ]; then
-        log "Not disarming: HOME is unset, so the plist path cannot be resolved"
-    elif ! printf '%s' "$LAUNCHD_LABEL" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
-        log "Not disarming: LAUNCHD_LABEL '${LAUNCHD_LABEL}' is not a plain launchd label"
+        log "Not disarming: HOME is empty or unset, so the plist path cannot be resolved"
+    elif ! case "$LAUNCHD_LABEL" in
+            ""|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) false ;;
+            *) true ;;
+         esac; then
+        # `case`, not grep: grep matches any LINE, so a label carrying a newline
+        # passed a `^…$` pattern and then went into a path.
+        log "Not disarming: LAUNCHD_LABEL is not a plain launchd label"
     else
         PLIST="${HOME}/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
         log "Disarming the one-shot schedule: ${LAUNCHD_LABEL}"
