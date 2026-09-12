@@ -623,6 +623,20 @@ the changed ones, `--limit N` = a priced sample).
   Cache `data/state/sensitivity/<collection>.json` keys on text + policy + model
   + map version + allow-list sha; unread window = uncached, cached unknowns keep
   their strings.
+- **An unreadable answer is not an empty one.** `parse_references` returns `[]`
+  only for an answer the model gave; anything it cannot read is `None`, which
+  counts as a parse failure, leaves the document uncached and — past
+  `MAX_PARSE_FAILURE_RATIO` (0.2) of the run's windows — makes the verdict
+  INCONCLUSIVE (exit stays 0; the ledger row and the packaging gate carry the
+  degradation). The parser reads an answer from four places: the reply itself,
+  the reply with its reasoning removed, a fenced block in it, a top-level object
+  in it. The embedded two must be an `{"references": …}` OBJECT — a bare list in
+  prose is a footnote or the prompt's own list of kinds — and drift or two
+  disagreeing answers fail the reply rather than being resolved by position.
+  Refusing costs one re-ask; reading "no one is named here" out of a reply that
+  did not say it is a clean, cached, wrong verdict. One limit is declared and
+  tested: a name that appears only in the model's PROSE, beside one
+  answer-shaped object, is not caught (huginn #132).
 - **Report** — gitignored, the only output with real strings:
   `sweep_<collection>_<date>_<mode>[-limitN].json` under a private sub-repo's
   `privacy/` else `data/privacy/`; stdout is counts and shapes. Exit `0` clean,
