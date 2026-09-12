@@ -335,8 +335,12 @@ def parse_references(raw: str):
     them. The sweep is a second opinion on top of a deterministic gate, and this
     is where its reading of a reply stops.
     """
+    # Four places an answer can come from, in this order, each pinned by a test:
+    # the reply itself; the reply with its reasoning removed; a fenced block in
+    # it; a top-level object in it. The first two may be any shape the contract
+    # allows, including a bare list. The last two must be an answer OBJECT.
     text = raw if isinstance(raw, str) else ""
-    payload, decoded = _decode(_strip_fences(text.strip()))
+    payload, decoded = _decode(_strip_fences(text))
     if not decoded:
         # Only a reply that is not itself JSON can have reasoning in it: the tags
         # are prose. Stripping first would truncate an answer that merely QUOTES
@@ -361,12 +365,12 @@ def parse_references(raw: str):
             # is well formed. Skipping it would let the model's ACTUAL answer be
             # discarded in favour of the example it echoed back.
             return None
-        shaped = _shaped(items)
-        if shaped is None:
-            return None
         # Fingerprint the SHAPED answer: two candidates that differ only in a
         # field this parser coerces away (an unknown `kind`) are one answer, and
-        # refusing them as a disagreement costs a re-ask for nothing.
+        # refusing them as a disagreement costs a re-ask for nothing. A candidate
+        # that shapes to None needs no branch of its own — alone it leaves
+        # `answer` None, and beside another it is a disagreement.
+        shaped = _shaped(items)
         seen.add(json.dumps(shaped, sort_keys=True, ensure_ascii=False))
         answer = shaped
     if answer is None or len(seen) > 1:

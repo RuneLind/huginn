@@ -217,6 +217,28 @@ class TestParseReferences:
                'no one I would return {"references": []}.')
         assert sweep.parse_references(raw) == []
 
+    def test_each_of_the_four_places_an_answer_can_come_from(self):
+        """One case per path, so that no path is masked by another.
+
+        Path 1 (the reply itself) and path 2 (the reply with its reasoning
+        removed) both fence-strip, so only an input that path 1 alone can read
+        distinguishes it: a fenced answer QUOTING a reasoning tag, which path 2
+        would truncate. Paths 3 and 4 are the embedded ones."""
+        # 1. the reply itself, fenced, quoting a tag that path 2 would cut at
+        assert sweep.parse_references(
+            '```json\n{"references": [{"text": "<think>"}]}\n```') == [
+                {"text": "<think>", "kind": "other"}]
+        # 2. the reply with its reasoning removed — a fenced BARE LIST, which no
+        #    embedded path accepts, so only the whole-reply contract can read it
+        assert sweep.parse_references(
+            '<think>Let me check.</think>\n```json\n["Kari Ukjent"]\n```') == [
+                {"text": "Kari Ukjent", "kind": "other"}]
+        # 3. a fenced block, where an unbalanced brace hides every span
+        assert sweep.parse_references(
+            'The snippet {"partial\n```json\n{"references": []}\n```') == []
+        # 4. a top-level object in prose, with no fence at all
+        assert sweep.parse_references('Analysis.\n{"references": []}') == []
+
     def test_a_reasoning_block_is_not_read_as_the_answer(self):
         """The answer is what the model said AFTER it stopped thinking. Reading
         inside the block would promote a draft it talked itself out of.
