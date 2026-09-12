@@ -11,8 +11,12 @@ the knowledge-graph entity extractor both route through it. Optional ``system``
 prepends a system message; optional ``options`` composes with ``temperature``
 (base ``{"temperature": temperature}`` shallow-merged under the caller's dict,
 so ``num_predict`` or a ``temperature`` override rides alongside without
-dropping the default). ``format:"json"`` + ``think:false`` keep a
-reasoning-capable local model (e.g. qwen3) terse and machine-parseable.
+dropping the default). ``format:"json"`` + ``think:false`` ASK a
+reasoning-capable local model (e.g. qwen3) to stay terse and machine-parseable,
+but do not guarantee it: measured on qwen3.8 in the privacy sweep, 2026-09-12,
+7 of 20 answers still arrived wrapped in a stray ``</think>`` or in prose with
+the JSON fenced inside it. A caller that parses the reply must tolerate that
+(see ``main/privacy/sensitivity_sweep.parse_references``) or count it as unread.
 
 Callers that need to swallow failure instead of propagating must wrap this in
 their own try/except: it raises ``RuntimeError`` on transport/JSON failure AND

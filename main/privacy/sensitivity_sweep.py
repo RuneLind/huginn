@@ -135,6 +135,9 @@ List the person references still in the clear in the text above."""
 
 _FENCE_OPEN_RE = re.compile(r"^```[a-z]*\s*", re.IGNORECASE)
 _FENCE_CLOSE_RE = re.compile(r"\s*```$")
+_FENCE_BLOCK_RE = re.compile(r"```[a-z]*\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+_THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.DOTALL | re.IGNORECASE)
+_THINK_OPEN_RE = re.compile(r"<think\b[^>]*>", re.IGNORECASE)
 
 
 def _strip_fences(raw: str) -> str:
@@ -142,6 +145,142 @@ def _strip_fences(raw: str) -> str:
     if text.startswith("```"):
         text = _FENCE_CLOSE_RE.sub("", _FENCE_OPEN_RE.sub("", text))
     return text
+
+
+def _answer_text(raw: str) -> str:
+    """A reply with the model's reasoning removed, leaving what it ANSWERED.
+
+    Three shapes. Two of them are what the nav-wiki sweep was stuck on
+    (2026-09-12): 7 unreadable windows spread over 6 documents — 6 of the 7
+    carrying a stray closing tag, the 7th a fenced answer behind prose. The two
+    sixes are a coincidence, not a ratio.
+
+    The third shape, an unclosed opener, was not in that sample; it is the one
+    a truncated reply produces, and reading a draft out of it is the same defect
+    in the other direction.
+
+    * a closed ``<think>…</think>`` block — removed, because a draft the model
+      then talked itself out of is not its answer;
+    * an UNCLOSED opener — everything from it on is reasoning the model never
+      finished, so the answer is what precedes it (``num_predict`` is capped at
+      1200, so a reply truncated mid-thought is a live failure mode, not a
+      hypothetical);
+    * a stray trailing ``</think>`` with no opener — the transport sets
+      ``think:false`` and qwen3.8 closes the tag anyway. Six of the seven stuck
+      windows were exactly this: ``{"references": []}`` the parser could not
+      reach because of two words after it. It needs no removal of its own: the
+      answer in front of it is found the same way an answer in front of prose
+      is.
+
+    Four callers parse JSON out of this transport, and they are deliberately
+    left alone here — but not all for the same reason. The contextual-prefix
+    backend and the knowledge-graph extractor pin their own models, so neither
+    inherits ``DEFAULT_MODEL``. The two tagging scripts
+    (``scripts/tagging/tag_documents.py``, ``scripts/tagging/discover_tags.py``)
+    DO inherit it, and their ``extract_json_array`` reads straight through a
+    reasoning block rather than removing it — the same class of defect, in a
+    module with its own tests and its own failure mode (a wrong tag, not a
+    missed person). Fixing it belongs there, with its own measurement; a shared
+    helper belongs beside the transport the day one is justified.
+
+    The closed-block pass is skipped when no closing tag is present at all: the
+    pattern scans to the end of the string for each opener, which is quadratic
+    on a reply that opens many blocks and closes none.
+    """
+    text = raw
+    if "</think" in text.lower():
+        text = _THINK_BLOCK_RE.sub("", text)
+    text = _THINK_OPEN_RE.split(text, 1)[0]
+    return text.strip()
+
+
+def _references_of(payload):
+    """The reference items of one decoded answer, or ``None`` for schema drift."""
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict) and isinstance(payload.get("references"), list):
+        return payload["references"]
+    return None
+
+
+_CLOSERS = {"}": "{", "]": "["}
+
+
+def _json_spans(text: str) -> list:
+    """Every TOP-LEVEL ``{…}`` / ``[…]`` span in ``text``, in order.
+
+    Top-level only: descending into ``{"people": [{"text": …}]}`` would find the
+    inner list and read a schema-drifted answer as a compliant one. Brace
+    counting is string- and escape-aware (a ``}`` inside a quoted name closes
+    nothing), openers must match their closers, and an unbalanced span — a
+    truncated answer — is never emitted.
+
+    What the caller does with these is the safety property, not this function:
+    only an answer-SHAPED span is an answer (see ``parse_references``).
+    """
+    spans, stack, start, in_string, escaped = [], [], None, False, False
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "{[":
+            if not stack:
+                start = index
+            stack.append(char)
+        elif char in _CLOSERS:
+            if not stack or stack.pop() != _CLOSERS[char]:
+                stack, start = [], None
+            elif not stack and start is not None:
+                spans.append(text[start:index + 1])
+                start = None
+    return spans
+
+
+def _shaped(items: list):
+    """One decoded references list normalised, or ``None`` if it read as none.
+
+    Bare strings become ``{"text": …}``, an unknown ``kind`` is coerced rather
+    than dropped (the model's label is a hint; the classification below is the
+    answer), and an item with no usable text is skipped without costing the rest
+    of the answer.
+
+    But a NON-EMPTY list that yields no usable reference at all is unreadable,
+    not empty: ``[0]``, ``[[…]]`` and ``["   "]`` are lists of something this
+    parser cannot name, and answering "no one is named here" for them is the
+    vacuous pass — it caches the document clean. Only a genuinely empty list is
+    an empty answer.
+    """
+    references = []
+    for item in items:
+        if isinstance(item, str):
+            item = {"text": item}
+        if not isinstance(item, dict):
+            continue
+        value = item.get("text") or item.get("name") or item.get("reference")
+        if not isinstance(value, str) or not value.strip():
+            continue
+        kind = item.get("kind") if item.get("kind") in KINDS else "other"
+        references.append({"text": normalise_whitespace(value), "kind": kind})
+    return references if references or not items else None
+
+
+def _decode(candidate: str):
+    """``(decoded, ok)`` — ``ok`` is False when the string is not JSON at all.
+
+    ``RecursionError`` is caught beside ``ValueError`` because ``json.loads``
+    raises it rather than a decode error on deeply nested input, and a model
+    stuck in a repetition loop is one unread window, not a dead sweep.
+    """
+    try:
+        return json.loads(candidate), True
+    except (ValueError, RecursionError):
+        return None, False
 
 
 def parse_references(raw: str):
@@ -159,32 +298,86 @@ def parse_references(raw: str):
     scalar, ``null``, an object where the list should be) is a parse failure
     rather than a silent zero: the model was asked for one shape, and answering
     in another is exactly the failure mode the counter is watching for.
-    """
-    if not raw:
-        return None
-    try:
-        payload = json.loads(_strip_fences(raw))
-    except ValueError:
-        return None
-    if isinstance(payload, list):
-        items = payload
-    elif isinstance(payload, dict) and isinstance(payload.get("references"), list):
-        items = payload["references"]
-    else:
-        return None
 
-    references = []
-    for item in items:
-        if isinstance(item, str):
-            item = {"text": item}
-        if not isinstance(item, dict):
+    The answer is the whole reply, or — when the reply is prose with the JSON
+    inside it, fenced or not — an ``{"references": …}`` OBJECT in that prose.
+    Both shapes are measured: 13 of 14 unreadable answers sampled across
+    jira-issues and melosys-confluence-v3 on 2026-09-12 were prose plus a
+    trailing object, fenced or bare.
+
+    Three rules keep that from becoming a way to invent an answer, because the
+    unsafe direction here is not refusing a reply — that costs one re-ask — but
+    reading "no one is named here" out of something the model did not say:
+
+    * only an OBJECT of the asked-for shape counts. A bare list in prose is a
+      footnote marker (``[1]``), a checkbox (``[ ]``) or the prompt's own list
+      of kinds, and reading one as an empty references list is a clean, cached
+      verdict nobody gave;
+    * an object that is NOT of that shape fails the whole reply. Drift is a
+      parse failure by contract, and the prompt hands the model a compliant
+      example to echo, so "ignore the drift and take the other one" reliably
+      picks the echo over the answer;
+    * two answers that DISAGREE fail the reply. Position cannot tell a
+      correction from that same echoed example, and guessing wrong drops a
+      named person.
+
+    What none of that closes, stated plainly because it cannot be fixed here: a
+    reply that names someone in PROSE and carries exactly one answer-shaped
+    object reads as that object, whatever the prose said. "The byline names
+    <someone>; per the instructions I would return {"references": []}" and "I
+    cannot analyse this. Format: {"references": []}" both read as an empty
+    answer. The parser has no way to tell them from the legitimate and far more
+    common shape — the model reasoning aloud about candidate strings and then
+    correctly answering that none is a person — which is the shape this parser
+    exists to read. Measured on 14 real prose-bearing answers: the discarded
+    prose held 33 quoted strings, of which exactly one was a two-token
+    capitalised pair; they are domain terms the model quoted in order to reject
+    them. The sweep is a second opinion on top of a deterministic gate, and this
+    is where its reading of a reply stops.
+    """
+    # Four places an answer can come from, in this order, each pinned by a test:
+    # the reply itself; the reply with its reasoning removed; a fenced block in
+    # it; a top-level object in it. The first two may be any shape the contract
+    # allows, including a bare list. The last two must be an answer OBJECT.
+    text = raw if isinstance(raw, str) else ""
+    payload, decoded = _decode(_strip_fences(text))
+    if not decoded:
+        # Only a reply that is not itself JSON can have reasoning in it: the tags
+        # are prose. Stripping first would truncate an answer that merely QUOTES
+        # a tag out of the document it was given.
+        text = _answer_text(text)
+        payload, decoded = _decode(_strip_fences(text))
+    if decoded:
+        items = _references_of(payload)
+        return None if items is None else _shaped(items)
+
+    answer, seen = None, set()
+    for candidate in [*_FENCE_BLOCK_RE.findall(text), *_json_spans(text)]:
+        payload, decoded = _decode(candidate.strip())
+        if not decoded or not isinstance(payload, dict):
+            # A bare list embedded in prose is a footnote marker, a checkbox or
+            # the prompt's own list of kinds — not an answer. Only the reply AS A
+            # WHOLE may be a bare list, which is the contract that predates this.
             continue
-        value = item.get("text") or item.get("name") or item.get("reference")
-        if not isinstance(value, str) or not value.strip():
-            continue
-        kind = item.get("kind") if item.get("kind") in KINDS else "other"
-        references.append({"text": normalise_whitespace(value), "kind": kind})
-    return references
+        items = _references_of(payload)
+        if items is None:
+            # An object that is not an answer is drift, wherever else the reply
+            # is well formed. Skipping it would let the model's ACTUAL answer be
+            # discarded in favour of the example it echoed back.
+            return None
+        # Fingerprint the SHAPED answer: two candidates that differ only in a
+        # field this parser coerces away (an unknown `kind`) are one answer, and
+        # refusing them as a disagreement costs a re-ask for nothing. A candidate
+        # that shapes to None needs no branch of its own: it fingerprints as
+        # `null`, so beside a readable answer it is a disagreement, and with only
+        # its own kind for company it leaves `answer` None. Either way the reply
+        # is refused — which is what an answer nobody can read deserves.
+        shaped = _shaped(items)
+        seen.add(json.dumps(shaped, sort_keys=True, ensure_ascii=False))
+        answer = shaped
+    if answer is None or len(seen) > 1:
+        return None
+    return answer
 
 
 def normalise_whitespace(text: str) -> str:
