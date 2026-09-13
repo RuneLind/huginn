@@ -1386,6 +1386,38 @@ def test_compound_with_an_unknown_part_still_blocks(run_classifier, candidate):
     assert run_classifier.classify(candidate, candidate) == sweep.UNKNOWN_PERSON
 
 
+@pytest.fixture
+def ampersand_label_classifier():
+    """`run_classifier` plus an exempt label spelled with an inner `&`."""
+    data = _map()
+    data["bare_given_name_residual"] = {"Ada": 12, "Zylphia": 8}
+    data["non_person_labels"] = [*data.get("non_person_labels", []), "M&A"]
+    return sweep.ReferenceClassifier(AliasRegistry(data), data)
+
+
+def test_ampersand_inside_a_label_does_not_split_it(ampersand_label_classifier):
+    """`Ada/M&A` (2026-09-13 triage): `&` between two letters is part of the
+    label, so the run is a residual name plus an exempt unit, not `M` and `A`."""
+    assert ampersand_label_classifier.classify("Ada/M&A", "Ada/M&A") == sweep.MAPPED_RESIDUAL
+
+
+def test_ampersand_between_letters_is_not_a_run_separator(run_classifier):
+    """Narrowing the separator fails toward reporting: an unspaced `Ada&Zylphia`
+    is one candidate nobody adjudicated."""
+    assert run_classifier.classify("Ada&Zylphia", "Ada&Zylphia") == sweep.UNKNOWN_PERSON
+
+
+@pytest.mark.parametrize("candidate", ["Ada& Zylphia", "Ada &Zylphia"])
+def test_ampersand_with_a_space_on_one_side_still_separates(run_classifier, candidate):
+    assert run_classifier.classify(candidate, candidate) == sweep.MAPPED_RESIDUAL
+
+
+def test_inner_ampersand_does_not_open_the_two_part_comma_form(ampersand_label_classifier):
+    """`Ada,M&A` is two parts joined only by a comma, and stays refused: the
+    label's `&` is not a second separator that would make it read as a list."""
+    assert ampersand_label_classifier.classify("Ada,M&A", "Ada,M&A") == sweep.UNKNOWN_PERSON
+
+
 def test_two_token_name_is_not_split_on_whitespace(run_classifier):
     """`Ada Zylphia` must not decompose just because both tokens are given names.
 

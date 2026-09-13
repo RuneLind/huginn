@@ -429,7 +429,13 @@ _SINGLE_TOKEN_RE = re.compile(r"^[^\W\d_]+(?:['’\-][^\W\d_]+)*$")
 # are both known given names decompose into two accounted parts and vanish — the
 # same failure the gazetteer's concatenation test exists to prevent. A run is
 # only a run when something explicitly joins it.
-_COMPOUND_SPLIT_RE = re.compile(r"\s*(?:[,/&+;|]|\bog\b)\s*", re.IGNORECASE)
+#
+# `&` between two letters is part of a label (`M&A`, a unit), not a separator:
+# splitting it left `M` and `A`, which no label can account for. An unspaced
+# `Ada&Bea` therefore stays one candidate, which fails toward reporting.
+_AMPERSAND_SEPARATOR = r"(?<![^\W\d_])&|&(?![^\W\d_])"
+_COMPOUND_SPLIT_RE = re.compile(rf"\s*(?:[,/+;|]|{_AMPERSAND_SEPARATOR}|\bog\b)\s*",
+                                re.IGNORECASE)
 _COMPOUND_STRIP = " \t?.,:;()[]{}<>\"'’"
 # A mention sigil, stripped ONLY in `classify` (see there) and deliberately not
 # added to _COMPOUND_STRIP: the compound machinery two review rounds hardened
@@ -438,7 +444,7 @@ _COMPOUND_STRIP = " \t?.,:;()[]{}<>\"'’"
 _MENTION_SIGIL_STRIP = _COMPOUND_STRIP + "@"
 # The separators actually PRESENT in a candidate, used to refuse the ambiguous
 # two-part comma form. Kept in step with _COMPOUND_SPLIT_RE.
-_COMPOUND_SEPARATORS_RE = re.compile(r"[,/&+;|]|\bog\b", re.IGNORECASE)
+_COMPOUND_SEPARATORS_RE = re.compile(rf"[,/+;|]|{_AMPERSAND_SEPARATOR}|\bog\b", re.IGNORECASE)
 
 
 def _boundaried(token: str) -> str:
