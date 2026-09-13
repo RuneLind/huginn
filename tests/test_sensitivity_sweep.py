@@ -1403,8 +1403,17 @@ def test_ampersand_inside_a_label_does_not_split_it(ampersand_label_classifier):
 
 def test_ampersand_between_letters_is_not_a_run_separator(run_classifier):
     """Narrowing the separator fails toward reporting: an unspaced `Ada&Zylphia`
-    is one candidate nobody adjudicated."""
+    is one candidate nobody adjudicated.
+
+    Pins the two patterns TOGETHER: reverting only the split pattern still
+    passes, because the separators pattern then refuses the two-part run."""
     assert run_classifier.classify("Ada&Zylphia", "Ada&Zylphia") == sweep.UNKNOWN_PERSON
+
+
+def test_ampersand_between_digits_still_separates_aliases(run_classifier):
+    """A digit is not a letter: `dev-01&dev-02` is two aliases, not one token."""
+    doc = "x dev-01&dev-02 x"
+    assert run_classifier.classify("dev-01&dev-02", doc) == sweep.ALIAS
 
 
 @pytest.mark.parametrize("candidate", ["Ada& Zylphia", "Ada &Zylphia"])

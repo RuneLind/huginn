@@ -432,7 +432,9 @@ _SINGLE_TOKEN_RE = re.compile(r"^[^\W\d_]+(?:['’\-][^\W\d_]+)*$")
 #
 # `&` between two letters is part of a label (`M&A`, a unit), not a separator:
 # splitting it left `M` and `A`, which no label can account for. An unspaced
-# `Ada&Bea` therefore stays one candidate, which fails toward reporting.
+# `Ada&Bea` therefore stays one candidate, which fails toward reporting — and so
+# does a list around it: `Berg, Ada&Bea` now reads as a two-part comma-only run
+# and is refused. A digit is not a letter here, so `dev-01&dev-02` still splits.
 _AMPERSAND_SEPARATOR = r"(?<![^\W\d_])&|&(?![^\W\d_])"
 _COMPOUND_SPLIT_RE = re.compile(rf"\s*(?:[,/+;|]|{_AMPERSAND_SEPARATOR}|\bog\b)\s*",
                                 re.IGNORECASE)
