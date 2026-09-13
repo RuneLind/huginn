@@ -671,12 +671,17 @@ Extract entities and relationships from a collection using a local Ollama model.
 
 - Requires Ollama running locally with `qwen3.6:35b-a3b-coding-nvfp4` (or pass `--model`)
 - Incremental: uses a `.cache.json` file, safe to stop and resume. It is written as
-  `{"policy_version": N, "entries": {...}}` — an envelope, not a sentinel key beside
-  the doc ids, because a doc id may itself start with `_`. For a collection the
-  privacy registry arms, a cache under a different (or absent) policy version is
-  discarded **in memory** rather than replaying pre-alias extractions; deleting the
-  file is `purge_prealias_caches.py`'s job. Out-of-scope collections load their
-  legacy flat cache unchanged.
+  `{"policy_version": N, "map_version": M, "entries": {...}}` — an envelope, not a
+  sentinel key beside the doc ids, because a doc id may itself start with `_`. For a
+  collection the privacy registry arms, a cache under a different (or absent) policy
+  or map version is discarded **in memory** rather than replaying extractions that
+  spell someone the documents no longer do; deleting the file is
+  `purge_prealias_caches.py`'s job. The map version is the manifest's
+  `privacy.map_version` — the map the documents were BUILT with — and the map on
+  disk only when the manifest has no stamp: a map bumped before the rebuild would
+  otherwise stamp extractions of not-yet-rebuilt documents with the new version and
+  replay them after it. Out-of-scope collections load their legacy flat cache
+  unchanged.
 - Output routing (no private collection names live in this public repo):
   1. `--output <path>` always wins.
   2. Else a `graph_routing.json` in one of the private sub-repo dirs (`huginn-*/scripts/knowledge_graph/`) or `./scripts/knowledge_graph/`. Each routing file either lists owned collections (`{"collections": [...]}`) or is the catch-all (`{"default": true}`). A listed collection writes into that file's dir; unlisted collections go to the `default` dir.

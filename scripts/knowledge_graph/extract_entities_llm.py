@@ -238,10 +238,18 @@ def build_source_stamp(collection: str, data_path: str, processed_doc_count: int
 
 
 CACHE_POLICY_KEY = "policy_version"
+CACHE_MAP_KEY = "map_version"
 CACHE_ENTRIES_KEY = ENTRIES_KEY
 
 
-def load_extraction_cache(cache_path: Path, aliased: bool) -> dict:
+def _cache_metadata(map_version) -> dict:
+    metadata = {CACHE_POLICY_KEY: PRIVACY_POLICY_VERSION}
+    if map_version is not None:
+        metadata[CACHE_MAP_KEY] = map_version
+    return metadata
+
+
+def load_extraction_cache(cache_path: Path, aliased: bool, map_version=None) -> dict:
     """Previously extracted documents, keyed by doc id.
 
     The cache is keyed by doc id alone, so an extraction made from PRE-alias
@@ -258,21 +266,26 @@ def load_extraction_cache(cache_path: Path, aliased: bool) -> dict:
     independently. A legacy flat file comes back with empty metadata, i.e. no
     policy version, which is exactly the pre-envelope case handled below.
 
-    Discarding here is in-memory only; the file keeps the pre-alias extractions
-    until scripts/audit/purge_prealias_caches.py deletes it.
+    The map version gates it too, as the sensitivity sweep's cache does: a map
+    bump leaves the policy version alone, and an extraction made before the bump
+    still spells a person the new map aliases out of the documents.
+
+    Discarding here is in-memory only; the file keeps the stale extractions
+    until a run that extracts at least one document rewrites it, or until
+    scripts/audit/purge_prealias_caches.py deletes it.
     """
     metadata, entries = load_envelope(cache_path)
-    version = metadata.get(CACHE_POLICY_KEY)
-    if not aliased or version == PRIVACY_POLICY_VERSION:
+    found = (metadata.get(CACHE_POLICY_KEY), metadata.get(CACHE_MAP_KEY))
+    if not aliased or found == (PRIVACY_POLICY_VERSION, map_version):
         return entries
     if entries:
-        print(f"Cache ignored: privacy policy version {version} != {PRIVACY_POLICY_VERSION} "
-              f"({len(entries)} stale entries)")
+        print(f"Cache ignored: policy/map version {found[0]}/{found[1]} "
+              f"!= {PRIVACY_POLICY_VERSION}/{map_version} ({len(entries)} stale entries)")
     return {}
 
 
-def write_extraction_cache(cache_path: Path, cache: dict) -> None:
-    write_envelope(cache_path, {CACHE_POLICY_KEY: PRIVACY_POLICY_VERSION}, cache)
+def write_extraction_cache(cache_path: Path, cache: dict, map_version=None) -> None:
+    write_envelope(cache_path, _cache_metadata(map_version), cache)
 
 
 def main():
@@ -310,16 +323,24 @@ def main():
         # drifted. Without it the extractor re-derives real names out of the
         # collection's own documents and writes them into the graph JSON, which
         # the API server loads at startup.
-        aliased = resolve_registry(
+        registry = resolve_registry(
             args.collection,
             (manifest.get("reader") or {}).get("basePath"),
-            armed_by_manifest=bool(manifest.get("privacy"))) is not None
+            armed_by_manifest=bool(manifest.get("privacy")))
     except PrivacyMapMissing as e:
         # One line, exit 2: a nightly wrapper reads a traceback as a crash, and
         # extracting without the map is the one outcome that must not happen.
         print(f"Error: refusing to extract {args.collection} without its alias map: {e}")
         sys.exit(2)
-    cache = load_extraction_cache(cache_path, aliased)
+    aliased = registry is not None
+    # The map the documents were BUILT with, not the one on disk: after a map
+    # bump and before the rebuild, the documents still spell the people the new
+    # map aliases, and extractions stamped with the new version would replay
+    # them once the rebuild makes that version current.
+    map_version = None
+    if aliased:
+        map_version = (manifest.get("privacy") or {}).get("map_version", registry.map_version)
+    cache = load_extraction_cache(cache_path, aliased, map_version)
 
     print(f"Collection: {args.collection}")
     print(f"Model: {args.model}")
@@ -380,14 +401,14 @@ def main():
             cache[doc_id] = extraction
             new_count += 1
             if new_count % 20 == 0:
-                write_extraction_cache(cache_path, cache)
+                write_extraction_cache(cache_path, cache, map_version)
         else:
             print("failed")
             errors += 1
 
     # Final cache write
     if new_count > 0:
-        write_extraction_cache(cache_path, cache)
+        write_extraction_cache(cache_path, cache, map_version)
 
     elapsed = time.time() - start_time
     cached_count = len(all_extractions) - new_count
