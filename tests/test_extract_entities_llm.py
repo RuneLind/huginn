@@ -9,6 +9,7 @@ and the swallow-and-parse contract (dict on success, None on any failure).
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -299,3 +300,56 @@ class TestPrivacyArming:
         out = capsys.readouterr().out
         assert "no alias map found" in out
         assert not (tmp_path / "graph.json").exists()
+
+
+class TestCacheMapVersion:
+    """A map bump changes the map version, not the policy version, so a cache
+    gated on policy alone replays extractions made under the previous map —
+    measured 2026-09-13: three jira-issues entries wrote a mapped full name
+    back into the graph after map v11 had aliased it out of the documents."""
+
+    arming = TestPrivacyArming()
+
+    def _seed(self, tmp_path, map_version):
+        self.arming._collection(tmp_path, {"reader": {"basePath": "./data/sources/demo"},
+                                           "privacy": {"policy_version": 2, "map_version": 11}})
+        stale = {"entities": [{"name": "STALE", "type": "Person"}], "relationships": []}
+        metadata = {"policy_version": extract_entities_llm.PRIVACY_POLICY_VERSION}
+        if map_version is not None:
+            metadata["map_version"] = map_version
+        (tmp_path / "graph.cache.json").write_text(
+            json.dumps({**metadata, "entries": {"doc0": stale}}), encoding="utf-8")
+
+    def _labels(self, tmp_path):
+        graph = json.loads((tmp_path / "graph.json").read_text(encoding="utf-8"))
+        return {node["label"] for node in graph["nodes"]}
+
+    def _registry(self, collection, base_path, **kwargs):
+        return SimpleNamespace(map_version=11)
+
+    def test_a_cache_from_an_older_map_is_re_extracted(self, tmp_path):
+        self._seed(tmp_path, map_version=10)
+        self.arming._run(tmp_path, self._registry)
+        assert "STALE" not in self._labels(tmp_path)
+        assert "FAISS" in self._labels(tmp_path)
+
+    def test_a_cache_with_no_map_version_is_re_extracted(self, tmp_path):
+        self._seed(tmp_path, map_version=None)
+        self.arming._run(tmp_path, self._registry)
+        assert "STALE" not in self._labels(tmp_path)
+
+    def test_a_cache_from_the_current_map_is_replayed(self, tmp_path):
+        self._seed(tmp_path, map_version=11)
+        self.arming._run(tmp_path, self._registry)
+        assert "STALE" in self._labels(tmp_path)
+
+    def test_the_rewritten_cache_records_the_map_version(self, tmp_path):
+        self._seed(tmp_path, map_version=10)
+        self.arming._run(tmp_path, self._registry)
+        written = json.loads((tmp_path / "graph.cache.json").read_text(encoding="utf-8"))
+        assert written["map_version"] == 11
+
+    def test_an_out_of_scope_collection_ignores_the_map_version(self, tmp_path):
+        self._seed(tmp_path, map_version=10)
+        self.arming._run(tmp_path, lambda collection, base_path, **kwargs: None)
+        assert "STALE" in self._labels(tmp_path)
