@@ -349,6 +349,51 @@ class TestCacheMapVersion:
         written = json.loads((tmp_path / "graph.cache.json").read_text(encoding="utf-8"))
         assert written["map_version"] == 11
 
+    def _newer_map_on_disk(self, collection, base_path, **kwargs):
+        return SimpleNamespace(map_version=12)
+
+    def test_a_map_bumped_before_the_rebuild_keeps_the_documents_version(self, tmp_path):
+        """The documents are still built with v11: stamping extractions from
+        them as v12 would replay their names after the v12 rebuild."""
+        self._seed(tmp_path, map_version=10)
+        self.arming._run(tmp_path, self._newer_map_on_disk)
+        written = json.loads((tmp_path / "graph.cache.json").read_text(encoding="utf-8"))
+        assert written["map_version"] == 11
+
+    def test_a_cache_matching_the_documents_map_is_replayed_before_the_rebuild(self, tmp_path):
+        self._seed(tmp_path, map_version=11)
+        self.arming._run(tmp_path, self._newer_map_on_disk)
+        assert "STALE" in self._labels(tmp_path)
+
+    def test_an_unstamped_manifest_falls_back_to_the_map_on_disk(self, tmp_path):
+        self._seed(tmp_path, map_version=10)
+        (tmp_path / "coll" / "manifest.json").write_text(
+            json.dumps({"reader": {"basePath": "./data/sources/demo"}}), encoding="utf-8")
+        self.arming._run(tmp_path, self._newer_map_on_disk)
+        written = json.loads((tmp_path / "graph.cache.json").read_text(encoding="utf-8"))
+        assert written["map_version"] == 12
+
+    def test_every_cache_write_records_the_map_version(self, tmp_path):
+        self._seed(tmp_path, map_version=10)
+        docs_dir = tmp_path / "coll" / "documents"
+        for i in range(1, 21):
+            (docs_dir / f"doc{i}.json").write_text(json.dumps({
+                "id": f"doc{i}", "text": "FAISS is a vector search library. " * 10,
+                "metadata": {"title": f"Doc {i}"}}), encoding="utf-8")
+        calls = []
+        real_write = extract_entities_llm.write_extraction_cache
+
+        def record(path, cache, map_version=None):
+            calls.append(map_version)
+            real_write(path, cache, map_version)
+
+        with patch.object(extract_entities_llm, "write_extraction_cache", record), \
+             patch.object(TestPrivacyArming, "_argv", lambda self, tmp: [
+                 "extract_entities_llm.py", "--collection", "coll",
+                 "--data-path", str(tmp), "--output", str(tmp / "graph.json")]):
+            self.arming._run(tmp_path, self._registry)
+        assert calls == [11, 11]
+
     def test_an_out_of_scope_collection_ignores_the_map_version(self, tmp_path):
         self._seed(tmp_path, map_version=10)
         self.arming._run(tmp_path, lambda collection, base_path, **kwargs: None)

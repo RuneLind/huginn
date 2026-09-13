@@ -271,7 +271,7 @@ def load_extraction_cache(cache_path: Path, aliased: bool, map_version=None) -> 
     still spells a person the new map aliases out of the documents.
 
     Discarding here is in-memory only; the file keeps the stale extractions
-    until the next extracted document rewrites it, or until
+    until a run that extracts at least one document rewrites it, or until
     scripts/audit/purge_prealias_caches.py deletes it.
     """
     metadata, entries = load_envelope(cache_path)
@@ -333,7 +333,13 @@ def main():
         print(f"Error: refusing to extract {args.collection} without its alias map: {e}")
         sys.exit(2)
     aliased = registry is not None
-    map_version = registry.map_version if aliased else None
+    # The map the documents were BUILT with, not the one on disk: after a map
+    # bump and before the rebuild, the documents still spell the people the new
+    # map aliases, and extractions stamped with the new version would replay
+    # them once the rebuild makes that version current.
+    map_version = None
+    if aliased:
+        map_version = (manifest.get("privacy") or {}).get("map_version", registry.map_version)
     cache = load_extraction_cache(cache_path, aliased, map_version)
 
     print(f"Collection: {args.collection}")

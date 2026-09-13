@@ -5,8 +5,8 @@ Two caches outlive a rebuild and would otherwise replay real names back into
 freshly aliased artifacts:
 
 * the LLM knowledge-graph extraction cache (`*_llm_graph.cache.json`), keyed by
-  doc_id alone. The extractor now mixes the privacy policy version into the file
-  so a stale cache misses on its own, but the file still *contains* extracted
+  doc_id alone. The extractor mixes the privacy policy and map versions into the
+  file so a stale cache misses on its own, but the file still *contains* extracted
   real names, so it is deleted rather than left lying around.
 * dormant contextual-prefix caches (`data/contextual_caches/<collection>.json`)
   for in-scope collections whose manifest has no `contextualPrefix` block. They
