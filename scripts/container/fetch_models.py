@@ -38,6 +38,10 @@ def fetch(lock_path):
         # never needs it, and the image check allows only the pinned files.
         shutil.rmtree(os.path.join(folder, "trees"), ignore_errors=True)
     shutil.rmtree(os.path.join(HF_HUB_CACHE, ".locks"), ignore_errors=True)
+    # A backup-tool marker the hub writes beside the model folders.
+    tag = os.path.join(HF_HUB_CACHE, "CACHEDIR.TAG")
+    if os.path.exists(tag):
+        os.remove(tag)
 
 
 def refresh_lock(lock_path):
