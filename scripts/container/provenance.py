@@ -179,7 +179,8 @@ def read_package(path) -> Package:
         raise Refused(f"{name}: no {manifest_key}")
     package.manifest = json.loads(small[manifest_key])
     count = stamp.get("numberOfDocuments")
-    if not isinstance(count, int) or package.manifest.get("numberOfDocuments") != count:
+    if (isinstance(count, bool) or not isinstance(count, int)
+            or package.manifest.get("numberOfDocuments") != count):
         raise Refused(f"{name}: stamp numberOfDocuments differs from the manifest's")
     return package
 

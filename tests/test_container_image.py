@@ -163,7 +163,8 @@ def _good_layers(package_path):
         collection = [(m.name, tar.extractfile(m).read()) for m in tar if m.isfile()]
     layers = [
         [("usr/local/lib/python3.12/site-packages/lib.py", b"x = 1\n")],
-        [(f"{MODEL}/blobs", None, {"directory": True}),
+        [("app/hf-cache", None, {"directory": True, "mode": 0o755}),
+         (f"{MODEL}/blobs", None, {"directory": True}),
          (f"{MODEL}/blobs/{CONFIG_ID}", CONFIG),
          (f"{MODEL}/blobs/{WEIGHTS_SHA}", WEIGHTS),
          (f"{MODEL}/snapshots/{REVISION}/config.json", None, {"symlink": f"../../blobs/{CONFIG_ID}"}),
@@ -171,7 +172,9 @@ def _good_layers(package_path):
          (f"{MODEL}/refs/main", REVISION.encode())],
         [("app/main/app.py", APP_SOURCE)],
     ]
-    collections_layer = []
+    collections_layer = [(f"app/{d}", None, {"directory": True, "mode": 0o755})
+                         for d in ("data", "data/collections", "data/collections/demo",
+                                   "data/collections/demo/documents")]
     for name, data in collection:
         if name == "PACKAGE-STAMP.json":
             stamp = data
@@ -242,12 +245,12 @@ class TestImageCheck:
 
     def test_blob_with_wrong_content_is_refused(self, tmp_path):
         def mutate(layers):
-            layers[1][2] = (f"{MODEL}/blobs/{WEIGHTS_SHA}", b"X" * 10)
+            layers[1][3] = (f"{MODEL}/blobs/{WEIGHTS_SHA}", b"X" * 10)
         assert [c for c, _ in _check(tmp_path, mutate)] == ["provenance"]
 
     def test_snapshot_symlink_to_another_blob_is_refused(self, tmp_path):
         def mutate(layers):
-            layers[1][3] = (f"{MODEL}/snapshots/{REVISION}/config.json", None,
+            layers[1][4] = (f"{MODEL}/snapshots/{REVISION}/config.json", None,
                             {"symlink": f"../../blobs/{WEIGHTS_SHA}"})
         assert [c for c, _ in _check(tmp_path, mutate)] == ["provenance"]
 
@@ -260,7 +263,7 @@ class TestImageCheck:
 
     def test_changed_collection_file_is_refused_without_its_name(self, tmp_path):
         def mutate(layers):
-            layers[3] = [(n, b"{}" if n.endswith("doc.json") else d) for n, d in layers[3]]
+            layers[3] = [(e[0], b"{}") if e[0].endswith("doc.json") else e for e in layers[3]]
         assert _check(tmp_path, mutate) == [("provenance", "layer 3: app/data/collections/demo/documents/"
                                                            "<document> (differs from the package member)")]
 
@@ -552,6 +555,88 @@ class TestFixRound1Pinning:
 
     def test_snapshot_entry_that_is_a_regular_file_is_refused(self, tmp_path):
         def mutate(layers):
-            layers[1][3] = (f"{MODEL}/snapshots/{REVISION}/config.json", CONFIG)
+            layers[1][4] = (f"{MODEL}/snapshots/{REVISION}/config.json", CONFIG)
         assert _check(tmp_path, mutate) == [("provenance", f"layer 1: {MODEL}/snapshots/{REVISION}/config.json "
                                                            f"(a snapshot entry that is not a symlink)")]
+
+
+# --- fix round 2: the verify pass's findings -----------------------------------
+
+
+class TestFixRound2:
+    def test_two_packages_for_one_collection_are_refused_by_the_check(self, tmp_path):
+        a = _package(tmp_path, name="a.tar.gz")
+        b = _package(tmp_path, name="b.tar.gz", document=b'{"text": "other synthetic"}')
+        layers = _good_layers(b)
+        for order in ([a, b], [b, a]):
+            report, _ = check_layers(_save(tmp_path, layers), TREE, [read_package(p) for p in order], LOCK)
+            assert ("name", "two packages name demo") in report.refusals
+
+    def test_executable_model_file_is_refused(self, tmp_path):
+        def mutate(layers):
+            layers[1][3] = (f"{MODEL}/blobs/{WEIGHTS_SHA}", WEIGHTS, {"mode": 0o755})
+        assert _check(tmp_path, mutate) == [
+            ("provenance", f"layer 1: {MODEL}/blobs/{WEIGHTS_SHA} (an executable model file)")]
+
+    def test_executable_collection_file_is_refused(self, tmp_path):
+        def mutate(layers):
+            layers[3] = [(e[0], e[1], {"mode": 0o755}) if e[0].endswith("manifest.json") else e
+                         for e in layers[3]]
+        assert _check(tmp_path, mutate) == [
+            ("provenance", "layer 3: app/data/collections/demo/manifest.json (an executable collection file)")]
+
+    def test_staged_modes_do_not_follow_the_umask(self, tmp_path):
+        import os
+        import stat
+        package = read_package(_package(tmp_path))
+        previous = os.umask(0o002)
+        try:
+            extract_package(package, tmp_path / "staged")
+        finally:
+            os.umask(previous)
+        root = tmp_path / "staged"
+        for path in root.rglob("*"):
+            want = 0o755 if path.is_dir() else 0o644
+            assert stat.S_IMODE(path.stat().st_mode) == want, path.relative_to(root)
+
+    @pytest.mark.parametrize("key", ["root/a.tbz", "root/a.tbz2", "root/a.txz", "root/a.tar.br", "root/a.TAR.LZMA"])
+    def test_more_archive_names_are_refused(self, key):
+        assert name_refusal(key, False)
+
+    @pytest.mark.parametrize("key", ["usr/lib/python3.12/site-packages/x/codec.tar.py", "usr/lib/x/a.tar.gz.bak"])
+    def test_tar_in_the_middle_of_a_name_is_not_a_compressed_tar(self, key):
+        assert name_refusal(key, False) is None
+
+    def test_symlink_from_outside_into_app_is_refused(self, tmp_path):
+        refusals = _check(tmp_path, lambda l: l[0].append(("usr/lib/probe-link", None, {"symlink": "/app/main"})))
+        assert [c for c, _ in refusals] == ["name"]
+
+    def test_relative_symlink_into_app_is_refused(self, tmp_path):
+        refusals = _check(tmp_path, lambda l: l[0].append(("probe", None, {"symlink": "app"})))
+        assert [c for c, _ in refusals] == ["name"]
+
+    def test_entry_below_a_symlinked_folder_is_refused(self, tmp_path):
+        def mutate(layers):
+            layers[0].append(("usr/lib/probe-link", None, {"symlink": "../share"}))
+            layers.append([("usr/lib/probe-link/evil_synthetic.py", b"x")])
+        refusals = _check(tmp_path, mutate)
+        assert ("name", "layer 4: usr/lib/probe-link/evil_synthetic.py (an entry below a symlink)") in refusals
+
+    def test_boolean_document_count_is_refused(self, tmp_path):
+        with pytest.raises(Refused, match="numberOfDocuments"):
+            read_package(_package(tmp_path, stamp=_stamp(numberOfDocuments=True)))
+
+    @pytest.mark.parametrize("manifest", [b'[{"NoLayers": []}]', b'{"not": "a list"}', b'[]'])
+    def test_malformed_docker_save_is_a_refusal(self, tmp_path, manifest):
+        path = tmp_path / "image.tar"
+        with tarfile.open(path, "w") as outer:
+            _add(outer, "manifest.json", manifest)
+        with pytest.raises(Refused):
+            check_layers(path, TREE, [read_package(_package(tmp_path))], LOCK)
+
+    def test_oci_layout_without_index_is_a_refusal(self, tmp_path):
+        path = tmp_path / "image.tar"
+        with tarfile.open(path, "w") as outer:
+            _add(outer, "oci-layout", b"{}")
+        with pytest.raises(Refused):
+            check_layers(path, TREE, [read_package(_package(tmp_path))], LOCK)

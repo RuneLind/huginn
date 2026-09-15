@@ -59,12 +59,13 @@ from scripts.container.provenance import (  # noqa: E402
     safe_display,
 )
 
-# Multi-file archive formats, plus any compressed tar (".tar.<anything>"). Bare
-# .gz/.bz2/.xz are single-file compression: 129 of them in a clean image (man
-# pages, apt logs, site-packages test data), none able to hold a tree without a
-# tar inside. Under /app, provenance refuses any file anyway.
+# A tripwire for archive NAMES, not a content check: a gzip of a tar named .gz,
+# a .whl or a .jar passes it. A clean image holds 129 bare .gz/.bz2/.xz files
+# (man pages, apt logs, site-packages test data), so single-file compression is
+# not refused. Under /app provenance refuses any file; elsewhere the Dockerfile
+# is the boundary (declared limit).
 ARCHIVE_SUFFIXES = (".zip", ".tar", ".tgz", ".tbz", ".tbz2", ".txz", ".tzst", ".7z", ".rar")
-_COMPRESSED_TAR = re.compile(r"\.tar\.[a-z0-9]+$")
+_COMPRESSED_TAR = re.compile(r"\.tar\.(gz|bz2|xz|zst|lz4|lzma|lz|z|br)$")
 _NVIDIA_DIST_INFO = re.compile(r"^nvidia_.*\.dist-info$", re.I)
 _TEXT_REPORT_MAX_BYTES = 20 * 1024 * 1024
 APP = "app/"
@@ -76,6 +77,7 @@ class Report:
     refusals: list[tuple[str, str]] = field(default_factory=list)
     verified: Counter = field(default_factory=Counter)
     layers: int = 0
+    symlinks: set[str] = field(default_factory=set)
 
     def refuse(self, check: str, detail: str) -> None:
         self.refusals.append((check, detail))
@@ -194,6 +196,10 @@ def check_layers(image_tar, tree: dict, packages: list[Package], lock: dict,
     needle_files: Counter = Counter()
     if not packages:
         report.refuse("name", "no packages to check the image against")
+    names = [p.collection for p in packages]
+    for name in sorted({n for n in names if names.count(n) > 1}):
+        # Members are keyed by path, so the last package would silently win.
+        report.refuse("name", f"two packages name {name}")
     expected = {}
     for package in packages:
         expected.update(package.members)
@@ -214,7 +220,7 @@ def check_layers(image_tar, tree: dict, packages: list[Package], lock: dict,
                         _check_member(index, member, layer, report, tree, expected, models, stamps,
                                       small, seen_collections, seen_members, allowed_dirs,
                                       extract_to, needle_scanner, needle_files)
-    except (tarfile.TarError, OSError, EOFError, ValueError) as exc:
+    except (tarfile.TarError, OSError, EOFError, ValueError, KeyError, TypeError, IndexError) as exc:
         # The type only: an OSError's message can carry the path it failed on.
         raise Refused(f"unreadable image at layer {index}: {type(exc).__name__}") from None
 
@@ -271,6 +277,19 @@ def _check_member(index, member, layer, report, tree, expected, models, stamps, 
     refusal = name_refusal(key, member.isdir())
     if refusal:
         report.refuse("name", f"{shown} ({refusal})")
+    parts = key.split("/")
+    if any("/".join(parts[:i]) in report.symlinks for i in range(1, len(parts))):
+        # The check reads paths as written; a runtime that follows the link
+        # would put this entry somewhere the rules for that path never saw.
+        report.refuse("name", f"{shown} (an entry below a symlink)")
+    if member.issym():
+        report.symlinks.add(key)
+        if member.linkname.startswith("/"):
+            target = posixpath.normpath(member.linkname).lstrip("/")
+        else:
+            target = posixpath.normpath(posixpath.join(posixpath.dirname(key), member.linkname))
+        if (target == "app" or target.startswith(APP)) and not key.startswith(APP):
+            report.refuse("name", f"{shown} (a symlink into /app from outside it)")
 
     cache = {}
     collection_prefix = APP + COLLECTIONS_PREFIX
