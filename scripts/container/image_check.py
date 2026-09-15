@@ -234,12 +234,23 @@ def _check_member(index, member, layer, report, tree, expected, models, stamps, 
         report.refuse("name", f"{shown} ({refusal})")
 
     cache = {}
+    collection_prefix = APP + COLLECTIONS_PREFIX
+    # A layer is read as a stream, so a member can be read once only: a large
+    # collection file is written out while it is hashed, never re-read.
+    spool = (extract_to / key[len(APP):]
+             if extract_to is not None and member.isfile() and key.startswith(collection_prefix)
+             else None)
 
     def read(hashes=False):
         if "data" not in cache and "hashes" not in cache:
             stream = layer.extractfile(member)
             if member.size <= _TEXT_REPORT_MAX_BYTES:
                 cache["data"] = stream.read()
+            elif spool is not None:
+                spool.parent.mkdir(parents=True, exist_ok=True)
+                with open(spool, "wb") as out:
+                    cache["hashes"] = hash_stream(_Tee(stream, out), member.size)
+                cache["spooled"] = True
             else:
                 cache["hashes"] = hash_stream(stream, member.size)
         if hashes:
@@ -260,24 +271,19 @@ def _check_member(index, member, layer, report, tree, expected, models, stamps, 
                 "collections" if key.startswith(APP + COLLECTIONS_PREFIX) else "app")
             report.verified[area] += 1
 
-    collection_prefix = APP + COLLECTIONS_PREFIX
     if key.startswith(collection_prefix) and member.isfile():
         name, _, inner = key[len(collection_prefix):].partition("/")
         seen_collections.add(name)
         if inner == STAMP:
             stamps[name] += 1
         if inner in (STAMP, "manifest.json"):
-            small[key] = read()
-        if extract_to is not None:
-            target = extract_to / key[len(APP):]
-            target.parent.mkdir(parents=True, exist_ok=True)
             data = read()
-            if data is None:
-                with layer.extractfile(member) as src, open(target, "wb") as dst:
-                    while chunk := src.read(1 << 20):
-                        dst.write(chunk)
-            else:
-                target.write_bytes(data)
+            small[key] = spool.read_bytes() if data is None and cache.get("spooled") else data
+        if spool is not None:
+            data = read()
+            if data is not None:
+                spool.parent.mkdir(parents=True, exist_ok=True)
+                spool.write_bytes(data)
 
     if needle_scanner is not None and member.isfile() and 0 < member.size <= _TEXT_REPORT_MAX_BYTES:
         data = read()
@@ -285,6 +291,18 @@ def _check_member(index, member, layer, report, tree, expected, models, stamps, 
             text = data.decode("utf-8", errors="ignore")
             if needle_scanner.search(text):
                 needle_files["/".join(key.split("/")[:2])] += 1
+
+
+class _Tee:
+    """A read-only stream that copies what is read into ``out``."""
+
+    def __init__(self, stream, out):
+        self._stream, self._out = stream, out
+
+    def read(self, size):
+        chunk = self._stream.read(size)
+        self._out.write(chunk)
+        return chunk
 
 
 def _app_refusal(key, member, read, tree, expected, models) -> str | None:

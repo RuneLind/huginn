@@ -691,6 +691,47 @@ Extract entities and relationships from a collection using a local Ollama model.
 - The API server auto-loads all `*_llm_graph.json` files from those paths at startup
 - See `docs/graph-enhanced-rag.html` for full architecture documentation
 
+## Building the serve image
+
+A serve-only image (search API, both models, packaged collections) is built
+from a **staging folder**, never from the repo root, because the root on a
+build machine can hold private sub-repos, raw sources and archives of `data/`.
+
+```sh
+.venv/bin/python scripts/container/image_build.py --commit <sha> \
+  --package data/packages/<a>.tar.gz [--package ...] \
+  --platform linux/arm64 --tag huginn-serve:<tag> [--no-cache]
+```
+
+- **Staging** (`$TMPDIR/huginn-image-<sha>-*`, deleted after the build):
+  `src/` is `git archive <sha>`, `collections/` the tarballs unpacked with each
+  `PACKAGE-STAMP.json` relocated into its collection. Every staged file must be
+  a blob of the commit or a tarball member with the same hash, or nothing
+  builds. A stamp passes when `sensitivitySweep.status` is `pass` and every
+  check with `ran: true` passed.
+- **`.dockerignore` is an allowlist that makes a hand-run build fail**: it
+  re-includes only `Dockerfile` and `requirements/`, so `docker build .` has no
+  `src/` or `collections/`. `.gitattributes` keeps it out of `git archive`.
+  Never re-include `scripts/` (gitignored graph JSON lives there) or `data/`.
+- **Dependencies** come from `requirements/serve.txt`, compiled with hashes from
+  `serve.in` (the public list minus `unstructured`, `playwright`, `yt-dlp`) and
+  `pins.txt`; one file serves x86_64 and aarch64. Recompile with
+  `uv pip compile requirements/serve.in -c requirements/pins.txt --python-version 3.12 --python-platform x86_64-manylinux_2_28 --torch-backend cpu --generate-hashes -o requirements/serve.txt`.
+  The build log must show only `torch` from `*.pytorch.org` (uv resolves at
+  `download.pytorch.org`, downloads from `download-r2.pytorch.org`); that check
+  needs `--no-cache`, since a cached install step logs nothing.
+- **Models** are the files `scripts/container/models.lock.json` lists, at its
+  revisions (`fetch_models.py lock` refills the hashes from the Hub). The fetch
+  writes `refs/main`, because a download by sha writes none and huginn loads
+  both models by name under `HF_HUB_OFFLINE=1`.
+- **`scripts/container/image_check.py`** runs after the build and before any
+  push: name rules and whiteout refusal over every layer of `docker save`,
+  provenance for `/app` (git tree, tarball member, or pinned model file — in
+  every layer, not only the final filesystem), then `scan_index.py` over the
+  collections read out of the image, then a non-blocking needle report.
+  `site-packages` and the OS get the name and whiteout checks only (declared
+  limit). Nothing it prints names a path under `documents/`.
+
 ## Development
 
 - Python venv at `.venv/` — always use `.venv/bin/python` for entry points

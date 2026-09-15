@@ -21,8 +21,10 @@ COPY src/ /app/
 COPY collections/ /app/
 
 WORKDIR /app
+# USER: UID 1069 has no passwd entry, and torch calls getpass.getuser() at import.
 ENV HF_HUB_OFFLINE=1 \
-    HUGINN_QUERY_LOG=off
+    HUGINN_QUERY_LOG=off \
+    USER=huginn
 USER 1069:1069
 EXPOSE 8321
 ENTRYPOINT ["python", "knowledge_api_server.py", "--host", "0.0.0.0", "--port", "8321"]

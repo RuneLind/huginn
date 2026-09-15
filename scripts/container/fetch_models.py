@@ -30,10 +30,13 @@ def fetch(lock_path):
             revision=model["revision"],
             allow_patterns=[f["path"] for f in model["files"]],
         )
-        refs = os.path.join(HF_HUB_CACHE, "models--" + model["repo"].replace("/", "--"), "refs")
-        os.makedirs(refs, exist_ok=True)
-        with open(os.path.join(refs, "main"), "w") as fh:
+        folder = os.path.join(HF_HUB_CACHE, "models--" + model["repo"].replace("/", "--"))
+        os.makedirs(os.path.join(folder, "refs"), exist_ok=True)
+        with open(os.path.join(folder, "refs", "main"), "w") as fh:
             fh.write(model["revision"])
+        # A repo-listing cache the download writes (mode 600); an offline load
+        # never needs it, and the image check allows only the pinned files.
+        shutil.rmtree(os.path.join(folder, "trees"), ignore_errors=True)
     shutil.rmtree(os.path.join(HF_HUB_CACHE, ".locks"), ignore_errors=True)
 
 

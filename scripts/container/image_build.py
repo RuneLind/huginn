@@ -50,7 +50,8 @@ from scripts.container.provenance import (  # noqa: E402
 )
 
 PYTORCH_OWN = {"torch"}
-_PYTORCH_WHEEL = re.compile(r"https://download\.pytorch\.org/\S*?/([A-Za-z0-9_.]+?)-\d[^/\s]*?\.whl")
+# uv resolves from download.pytorch.org and fetches wheels from download-r2.pytorch.org.
+_PYTORCH_WHEEL = re.compile(r"https://(?:[\w-]+\.)*pytorch\.org/\S*?/([A-Za-z0-9_.]+?)-\d[^/\s]*?\.whl")
 _INSTALL_STEP = re.compile(r"^#(\d+) \[[^\]]*\] RUN --mount=from=ghcr\.io/astral-sh/uv")
 
 

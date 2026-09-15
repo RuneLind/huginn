@@ -41,13 +41,14 @@ def _add(tar, name, data=None, *, symlink=None, directory=False):
         tar.addfile(info, io.BytesIO(data))
 
 
-def _package(tmp_path, *, stamp=None, extra=(), manifest_docs=1, name="demo.tar.gz"):
+def _package(tmp_path, *, stamp=None, extra=(), manifest_docs=1, name="demo.tar.gz",
+             document=b'{"text": "synthetic"}'):
     path = tmp_path / name
     with tarfile.open(path, "w:gz") as tar:
         _add(tar, "PACKAGE-STAMP.json", json.dumps(stamp or _stamp()).encode())
         _add(tar, "data/collections/demo/manifest.json",
              json.dumps({"numberOfDocuments": manifest_docs}).encode())
-        _add(tar, "data/collections/demo/documents/doc.json", b'{"text": "synthetic"}')
+        _add(tar, "data/collections/demo/documents/doc.json", document)
         for entry in extra:
             _add(tar, *entry[:2], **(entry[2] if len(entry) > 2 else {}))
     return path
@@ -272,6 +273,22 @@ class TestImageCheck:
         assert [c for c, _ in _check(tmp_path, mutate)] == ["name"]
 
 
+def test_large_collection_file_is_hashed_and_extracted_in_one_read(tmp_path, monkeypatch):
+    import scripts.container.image_check as image_check
+
+    # Above the limit: the document and the stamp. Below it: manifest and refs/main.
+    monkeypatch.setattr(image_check, "_TEXT_REPORT_MAX_BYTES", 60)
+    document = b'{"text": "' + b"s" * 88 + b'"}'
+    package_path = _package(tmp_path, document=document)
+    layers = _good_layers(package_path)
+    report, _ = check_layers(_save(tmp_path, layers), TREE, [read_package(package_path)], LOCK,
+                             extract_to=tmp_path / "out")
+    assert report.refusals == []
+    collection = tmp_path / "out/data/collections/demo"
+    assert (collection / "documents/doc.json").read_bytes() == document
+    assert json.loads((collection / "PACKAGE-STAMP.json").read_bytes())["collection"] == "demo"
+
+
 class TestNameRule:
     @pytest.mark.parametrize("key, is_dir", [
         ("app/huginn-private/x.txt", False),
@@ -295,6 +312,12 @@ class TestPytorchIndex:
 
     def test_torch_only(self):
         log = f"{self.STEP}\n#7 1.2 Downloading https://download.pytorch.org/whl/cpu/torch-2.10.0%2Bcpu-cp312-cp312-manylinux_2_28_aarch64.whl\n"
+        assert image_build.pytorch_index_packages(log)[0] == {"torch"}
+
+    def test_wheel_host_is_download_r2(self):
+        log = (f"{self.STEP}\n#10 0.131 DEBUG No cache entry for: https://download.pytorch.org/whl/cpu/torch/\n"
+               "#10 1.421 DEBUG No cache entry for: https://download-r2.pytorch.org/whl/cpu/"
+               "torch-2.10.0%2Bcpu-cp312-cp312-manylinux_2_28_aarch64.whl\n")
         assert image_build.pytorch_index_packages(log)[0] == {"torch"}
 
     def test_other_package_is_reported(self):
