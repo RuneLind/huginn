@@ -59,7 +59,12 @@ from scripts.container.provenance import (  # noqa: E402
     safe_display,
 )
 
-ARCHIVE_SUFFIXES = (".zip", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".zst", ".lz4", ".7z", ".rar")
+# Multi-file archive formats, plus any compressed tar (".tar.<anything>"). Bare
+# .gz/.bz2/.xz are single-file compression: 129 of them in a clean image (man
+# pages, apt logs, site-packages test data), none able to hold a tree without a
+# tar inside. Under /app, provenance refuses any file anyway.
+ARCHIVE_SUFFIXES = (".zip", ".tar", ".tgz", ".tbz", ".tbz2", ".txz", ".tzst", ".7z", ".rar")
+_COMPRESSED_TAR = re.compile(r"\.tar\.[a-z0-9]+$")
 _NVIDIA_DIST_INFO = re.compile(r"^nvidia_.*\.dist-info$", re.I)
 _TEXT_REPORT_MAX_BYTES = 20 * 1024 * 1024
 APP = "app/"
@@ -96,7 +101,7 @@ def name_refusal(key: str, is_dir: bool) -> str | None:
         return "a raw-source or pre-alias path"
     if not is_dir and base.endswith("_graph.json"):
         return "a knowledge graph file name"
-    if not is_dir and base.endswith(ARCHIVE_SUFFIXES):
+    if not is_dir and (base.endswith(ARCHIVE_SUFFIXES) or _COMPRESSED_TAR.search(base)):
         return "an archive"
     if any(_NVIDIA_DIST_INFO.match(p) for p in parts):
         return "an nvidia_* dist-info"

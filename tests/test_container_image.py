@@ -398,9 +398,16 @@ class TestFixRound1Gaps:
         assert [c for c, _ in _check(tmp_path, mutate)] == ["provenance"]
 
     @pytest.mark.parametrize("key", ["usr/share/Aliases.JSON", "root/data.tar.zst", "root/x.7z",
+                                     "root/x.RAR", "root/data.tgz", "root/data.tar.lz4", "root/data.tzst",
                                      "opt/HUGINN-private/x", "srv/Data/Sources/a.md", "a/B_GRAPH.json"])
     def test_name_rule_is_case_insensitive_and_knows_more_archives(self, key):
         assert name_refusal(key, False)
+
+    @pytest.mark.parametrize("key", ["etc/alternatives/awk.1.gz", "var/log/apt/eipp.log.xz",
+                                     "usr/local/lib/python3.12/site-packages/pkg/test/data/x.pkl.bz2",
+                                     "usr/share/doc/tarfile-notes.txt", "usr/lib/foo.tar_helper.py"])
+    def test_single_file_compression_is_not_an_archive(self, key):
+        assert name_refusal(key, False) is None
 
     def test_member_missing_from_the_image_is_refused(self, tmp_path):
         def mutate(layers):
