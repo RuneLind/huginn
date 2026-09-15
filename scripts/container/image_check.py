@@ -65,7 +65,9 @@ from scripts.container.provenance import (  # noqa: E402
 # not refused. Under /app provenance refuses any file; elsewhere the Dockerfile
 # is the boundary (declared limit).
 ARCHIVE_SUFFIXES = (".zip", ".tar", ".tgz", ".tbz", ".tbz2", ".txz", ".tzst", ".7z", ".rar")
-_COMPRESSED_TAR = re.compile(r"\.tar\.(gz|bz2|xz|zst|lz4|lzma|lz|z|br)$")
+_COMPRESSED_TAR = re.compile(r"\.tar\.([a-z0-9]+)$")
+# `.tar.<x>` is a compressed or split tar unless <x> is a source or text file.
+_NOT_ARCHIVE_AFTER_TAR = {"py", "pyi", "txt", "md", "rst", "json", "html", "h", "c"}
 _NVIDIA_DIST_INFO = re.compile(r"^nvidia_.*\.dist-info$", re.I)
 _TEXT_REPORT_MAX_BYTES = 20 * 1024 * 1024
 APP = "app/"
@@ -77,7 +79,9 @@ class Report:
     refusals: list[tuple[str, str]] = field(default_factory=list)
     verified: Counter = field(default_factory=Counter)
     layers: int = 0
-    symlinks: set[str] = field(default_factory=set)
+    # path -> ("sym", target as written) or ("hard", target path), as of the
+    # layers read so far; a later non-link entry at the same path removes it.
+    links: dict[str, tuple[str, str]] = field(default_factory=dict)
 
     def refuse(self, check: str, detail: str) -> None:
         self.refusals.append((check, detail))
@@ -85,6 +89,45 @@ class Report:
 
 def normalize(name: str) -> str:
     return "/".join(p for p in name.split("/") if p not in ("", "."))
+
+
+_MAX_LINK_HOPS = 40  # Linux's MAXSYMLINKS
+
+
+def resolve(path: str, links: dict) -> str | None:
+    """The path the kernel reaches, walked component by component from the root.
+
+    A symlink component is replaced by its target (absolute from the root,
+    relative from the link's folder); ``..`` stops at the root; a hardlink to a
+    symlink is that symlink. Returns None after too many hops (a loop).
+    """
+    pending = [p for p in path.split("/") if p]
+    resolved: list[str] = []
+    hops = 0
+    while pending:
+        part = pending.pop(0)
+        if part == ".":
+            continue
+        if part == "..":
+            if resolved:
+                resolved.pop()
+            continue
+        link = links.get("/".join([*resolved, part]))
+        while link and link[0] == "hard":
+            hops += 1
+            if hops > _MAX_LINK_HOPS:
+                return None
+            link = links.get(link[1])
+        if link is None:
+            resolved.append(part)
+            continue
+        hops += 1
+        if hops > _MAX_LINK_HOPS:
+            return None
+        if link[1].startswith("/"):
+            resolved = []
+        pending = [p for p in link[1].split("/") if p] + pending
+    return "/".join(resolved)
 
 
 def name_refusal(key: str, is_dir: bool) -> str | None:
@@ -103,7 +146,8 @@ def name_refusal(key: str, is_dir: bool) -> str | None:
         return "a raw-source or pre-alias path"
     if not is_dir and base.endswith("_graph.json"):
         return "a knowledge graph file name"
-    if not is_dir and (base.endswith(ARCHIVE_SUFFIXES) or _COMPRESSED_TAR.search(base)):
+    tar = _COMPRESSED_TAR.search(base)
+    if not is_dir and (base.endswith(ARCHIVE_SUFFIXES) or (tar and tar.group(1) not in _NOT_ARCHIVE_AFTER_TAR)):
         return "an archive"
     if any(_NVIDIA_DIST_INFO.match(p) for p in parts):
         return "an nvidia_* dist-info"
@@ -220,9 +264,11 @@ def check_layers(image_tar, tree: dict, packages: list[Package], lock: dict,
                         _check_member(index, member, layer, report, tree, expected, models, stamps,
                                       small, seen_collections, seen_members, allowed_dirs,
                                       extract_to, needle_scanner, needle_files)
-    except (tarfile.TarError, OSError, EOFError, ValueError, KeyError, TypeError, IndexError) as exc:
-        # The type only: an OSError's message can carry the path it failed on.
-        raise Refused(f"unreadable image at layer {index}: {type(exc).__name__}") from None
+    except (Refused, tarfile.TarError, OSError, EOFError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        # Added to the refusals found so far rather than raised, so those stay
+        # visible. The type only: an OSError's message can carry a path.
+        report.refuse("unreadable", f"unreadable image at layer {index}: {type(exc).__name__}")
+        return report, needle_files
 
     for package in packages:
         missing = len(set(package.members) - seen_members)
@@ -277,19 +323,19 @@ def _check_member(index, member, layer, report, tree, expected, models, stamps, 
     refusal = name_refusal(key, member.isdir())
     if refusal:
         report.refuse("name", f"{shown} ({refusal})")
-    parts = key.split("/")
-    if any("/".join(parts[:i]) in report.symlinks for i in range(1, len(parts))):
-        # The check reads paths as written; a runtime that follows the link
-        # would put this entry somewhere the rules for that path never saw.
+    # The rules read paths as written. An entry whose parent resolves elsewhere
+    # would land where those rules never looked, so it is refused outright.
+    parent = posixpath.dirname(key)
+    if parent and resolve(parent, report.links) != parent:
         report.refuse("name", f"{shown} (an entry below a symlink)")
-    if member.issym():
-        report.symlinks.add(key)
-        if member.linkname.startswith("/"):
-            target = posixpath.normpath(member.linkname).lstrip("/")
-        else:
-            target = posixpath.normpath(posixpath.join(posixpath.dirname(key), member.linkname))
-        if (target == "app" or target.startswith(APP)) and not key.startswith(APP):
-            report.refuse("name", f"{shown} (a symlink into /app from outside it)")
+    if member.issym() or member.islnk():
+        report.links[key] = ("sym", member.linkname) if member.issym() else ("hard", normalize(member.linkname))
+        if member.issym() and not key.startswith(APP):
+            target = resolve(key, report.links)
+            if target is None or target in ("", "app") or target.startswith(APP):
+                report.refuse("name", f"{shown} (a symlink into /app from outside it)")
+    else:
+        report.links.pop(key, None)
 
     cache = {}
     collection_prefix = APP + COLLECTIONS_PREFIX
