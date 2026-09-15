@@ -14,15 +14,16 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from main.routes.collections import router as collections_router
 from main.routes.graph import router as graph_router
 from main.routes.ingest import router as ingest_router
 from main.routes.notion import router as notion_router
 from main.routes.search import router as search_router
-from main.runtime.knowledge_store import get_store
+from main.runtime.knowledge_store import KnowledgeStore, get_store
 from main.runtime.server_config import ServerConfig
 from main.utils.logger import setup_root_logger
 
@@ -63,6 +64,25 @@ def health():
         "collections": store.collection_names(),
         "totalEmbeddings": store.total_embeddings(),
     }
+
+
+@app.get("/ready")
+def ready(store: KnowledgeStore = Depends(get_store)):
+    """503 unless every ``--collections`` entry is served with at least one chunk.
+
+    ``/health`` answers 200 even when a collection failed to load (the store
+    logs and skips it), so it cannot gate a readiness probe.
+    """
+    sizes = store.collection_sizes()
+    requested = app.state.config.collections
+    missing = [c for c in requested if c not in sizes]
+    empty = [c for c in requested if sizes.get(c) == 0]
+    ok = bool(requested) and not missing and not empty
+    return JSONResponse(
+        status_code=200 if ok else 503,
+        content={"status": "ready" if ok else "not_ready", "collections": sizes,
+                 "missing": missing, "empty": empty},
+    )
 
 
 app.include_router(search_router)

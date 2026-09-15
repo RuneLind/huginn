@@ -831,3 +831,13 @@ Local dev uses a personal `start.sh` (gitignored) that launches `knowledge_api_s
 ```sh
 uv run knowledge_api_server.py --collections <name> [<name> ...] --port 8321
 ```
+
+- **`GET /ready`** is the readiness probe for a container: 503 unless every
+  `--collections` entry is served with a non-zero chunk count. `/health` stays
+  200 when a collection fails to load (the store logs and skips it), so it
+  cannot gate a probe.
+- **`HUGINN_RERANK=off`** skips constructing the cross-encoder in
+  `KnowledgeStore.load_collections`, so its memory is never resident; a
+  caller's `rerank=false` only skips scoring. Read once at load, before any
+  model; an unrecognised value stops startup. The CLI search path
+  (`search_collection_factory.py`) does not read it.
