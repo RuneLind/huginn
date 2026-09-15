@@ -67,6 +67,20 @@ def pytorch_index_packages(log: str) -> tuple[set[str] | None, str]:
     return names, f"{len(names)} package(s) from download.pytorch.org"
 
 
+def pytorch_refusal(names: set[str] | None) -> str | None:
+    """None when the log cannot answer (cached step) or shows exactly PyTorch's own."""
+    if names is None or (names and names <= PYTORCH_OWN):
+        return None
+    return f"expected only {sorted(PYTORCH_OWN)} from *.pytorch.org, the log shows {sorted(names)}"
+
+
+def input_refusals(packages) -> list[str]:
+    if not packages:
+        return ["no package given"]
+    names = [p.collection for p in packages]
+    return [f"two packages name {n}" for n in sorted({n for n in names if names.count(n) > 1})]
+
+
 def _live_last_modified(collection: str) -> str:
     try:
         manifest = json.loads((REPO_ROOT / "data/collections" / collection / "manifest.json").read_text())
@@ -102,8 +116,9 @@ def main(argv=None) -> int:
     except Refused as exc:
         print(f"REFUSED before building: {exc}")
         return 2
-    if len({p.collection for p in packages}) != len(packages):
-        print("REFUSED before building: two packages name the same collection")
+    refusals = input_refusals(packages)
+    if refusals:
+        print("REFUSED before building: " + "; ".join(refusals))
         return 2
     for p in packages:
         print(f"package {p.collection}: documents {p.manifest.get('numberOfDocuments')}, "
@@ -118,8 +133,13 @@ def main(argv=None) -> int:
     log_path = Path(args.log or Path(tempfile.gettempdir()) / f"huginn-image-{commit[:12]}.build.log")
     staging = Path(tempfile.mkdtemp(prefix=f"huginn-image-{commit[:12]}-"))
     try:
-        stage(commit, packages, staging)
-        refusals = verify_staging(staging, tree, packages)
+        try:
+            stage(commit, packages, staging)
+            refusals = verify_staging(staging, tree, packages)
+        except (OSError, tarfile.TarError) as exc:
+            # The type and errno only: the message can name a document's path.
+            print(f"REFUSED [staging] {type(exc).__name__} errno {getattr(exc, 'errno', None)}")
+            return 2
         if refusals:
             for refusal in refusals:
                 print(f"REFUSED [staging] {refusal}")
@@ -143,8 +163,9 @@ def main(argv=None) -> int:
     names, note = pytorch_index_packages(log_path.read_text(errors="replace"))
     print(f"pytorch index: {note}{'' if names is None else ' ' + str(sorted(names))}")
     status = image_check.run(args.tag, commit, args.packages)
-    if names is not None and not (names and names <= PYTORCH_OWN):
-        print(f"REFUSED [pytorch-index] expected only {sorted(PYTORCH_OWN)} from download.pytorch.org")
+    refusal = pytorch_refusal(names)
+    if refusal:
+        print(f"REFUSED [pytorch-index] {refusal}")
         status = 1
     return status
 

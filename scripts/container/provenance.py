@@ -77,24 +77,34 @@ def safe_display(key: str) -> str:
 def stamp_refusals(stamp) -> list[str]:
     """Why a ``PACKAGE-STAMP.json`` fails; empty when it passes.
 
-    Passes when ``sensitivitySweep.status == "pass"`` and every ``scanChecks``
-    entry that ran has passed. Checks 3b and 5 report ``ran: false`` when a
-    package was made without ``--compare``, so requiring every check to have
-    run would refuse every real stamp.
+    Passes when ``sensitivitySweep.status == "pass"``, at least one
+    ``scanChecks`` entry ran, and every entry that ran has passed. Checks 3b
+    and 5 report ``ran: false`` when a package was made without ``--compare``,
+    so requiring every check to have run would refuse every real stamp. An
+    entry without ``ran`` counts as run. Anything malformed is a refusal.
     """
     if not isinstance(stamp, dict):
         return ["stamp is not a JSON object"]
     reasons = []
-    status = (stamp.get("sensitivitySweep") or {}).get("status")
+    sweep = stamp.get("sensitivitySweep")
+    status = sweep.get("status") if isinstance(sweep, dict) else None
     if status != "pass":
         reasons.append(f"sensitivitySweep.status is {status!r}, not 'pass'")
     checks = stamp.get("scanChecks")
     if not isinstance(checks, dict) or not checks:
-        reasons.append("scanChecks is missing or empty")
-    else:
-        for name, check in sorted(checks.items()):
-            if check.get("ran", True) is not False and check.get("passed") is not True:
-                reasons.append(f"check {name} ran and did not pass")
+        return reasons + ["scanChecks is missing or empty"]
+    ran = 0
+    for name, check in sorted(checks.items()):
+        if not isinstance(check, dict):
+            reasons.append(f"check {name} is not an object")
+            continue
+        if check.get("ran", True) is False:
+            continue
+        ran += 1
+        if check.get("passed") is not True:
+            reasons.append(f"check {name} ran and did not pass")
+    if ran == 0:
+        reasons.append("no check ran")
     return reasons
 
 
@@ -168,7 +178,8 @@ def read_package(path) -> Package:
     if manifest_key not in small:
         raise Refused(f"{name}: no {manifest_key}")
     package.manifest = json.loads(small[manifest_key])
-    if package.manifest.get("numberOfDocuments") != stamp.get("numberOfDocuments"):
+    count = stamp.get("numberOfDocuments")
+    if not isinstance(count, int) or package.manifest.get("numberOfDocuments") != count:
         raise Refused(f"{name}: stamp numberOfDocuments differs from the manifest's")
     return package
 
@@ -187,6 +198,10 @@ def extract_package(package: Package, root: Path) -> None:
             with tar.extractfile(member) as src, open(target, "xb") as dst:
                 while chunk := src.read(_CHUNK):
                     dst.write(chunk)
+            # Fixed modes, not the umask's: the image check refuses writable bits.
+            os.chmod(target, 0o644)
+            for parent in target.relative_to(root).parents:
+                os.chmod(root / parent, 0o755)
 
 
 def verify_staging(staging: Path, tree: dict, packages: list[Package]) -> list[str]:

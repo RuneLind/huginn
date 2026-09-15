@@ -27,8 +27,10 @@ def _stamp(**overrides):
     return stamp
 
 
-def _add(tar, name, data=None, *, symlink=None, directory=False):
+def _add(tar, name, data=None, *, symlink=None, directory=False, mode=None):
     info = tarfile.TarInfo(name)
+    if mode is not None:
+        info.mode = mode
     if directory:
         info.type = tarfile.DIRTYPE
         tar.addfile(info)
@@ -270,7 +272,7 @@ class TestImageCheck:
     def test_missing_collection_is_refused(self, tmp_path):
         def mutate(layers):
             layers.pop(3)
-        assert [c for c, _ in _check(tmp_path, mutate)] == ["name"]
+        assert sorted(c for c, _ in _check(tmp_path, mutate)) == ["name", "provenance"]
 
 
 def test_large_collection_file_is_hashed_and_extracted_in_one_read(tmp_path, monkeypatch):
@@ -327,3 +329,222 @@ class TestPytorchIndex:
 
     def test_cached_step_cannot_answer(self):
         assert image_build.pytorch_index_packages(f"{self.STEP}\n#7 CACHED\n")[0] is None
+
+
+# --- fix round 1: gaps the review found ---------------------------------------
+
+
+def _save_oci(tmp_path, layers):
+    """The OCI layout `docker save` writes when manifest.json is absent."""
+    path = tmp_path / "image-oci.tar"
+    digests = []
+    with tarfile.open(path, "w") as outer:
+        for index, entries in enumerate(layers):
+            buffer = io.BytesIO()
+            with tarfile.open(fileobj=buffer, mode="w") as layer:
+                for entry in entries:
+                    _add(layer, *entry[:2], **(entry[2] if len(entry) > 2 else {}))
+            digest = hashlib.sha256(buffer.getvalue()).hexdigest()
+            digests.append(digest)
+            _add(outer, f"blobs/sha256/{digest}", buffer.getvalue())
+        manifest = json.dumps({"layers": [{"digest": f"sha256:{d}"} for d in digests]}).encode()
+        manifest_digest = hashlib.sha256(manifest).hexdigest()
+        _add(outer, f"blobs/sha256/{manifest_digest}", manifest)
+        _add(outer, "index.json", json.dumps({"manifests": [{"digest": f"sha256:{manifest_digest}"}]}).encode())
+    return path
+
+
+def _hardlink(tar, name, target):
+    info = tarfile.TarInfo(name)
+    info.type = tarfile.LNKTYPE
+    info.linkname = target
+    tar.addfile(info)
+
+
+class TestFixRound1Gaps:
+    """Each of these passed a bad image before fix round 1."""
+
+    def test_dotdot_entry_landing_in_app_is_refused(self, tmp_path):
+        refusals = _check(tmp_path, lambda l: l[2].append(("usr/../app/main/evil.py", b"x")))
+        assert refusals and refusals[0][0] == "name"
+
+    def test_dotdot_entry_is_never_written_outside_the_extract_folder(self, tmp_path):
+        package_path = _package(tmp_path)
+        layers = _good_layers(package_path)
+        layers[3].append(("app/data/collections/demo/../../../../escaped.txt", b"x"))
+        out = tmp_path / "a" / "b" / "extracted"
+        report, _ = check_layers(_save(tmp_path, layers), TREE, [read_package(package_path)], LOCK,
+                                 extract_to=out)
+        assert report.refusals
+        assert not any(p.name == "escaped.txt" for p in tmp_path.rglob("*"))
+
+    def test_folder_under_app_nothing_implies_is_refused(self, tmp_path):
+        refusals = _check(tmp_path, lambda l: l[2].append(("app/Synthetic Probe Dir", None, {"directory": True})))
+        assert [c for c, _ in refusals] == ["provenance"]
+
+    def test_empty_collection_folder_is_refused(self, tmp_path):
+        refusals = _check(tmp_path, lambda l: l[3].append(
+            ("app/data/collections/probe-dir", None, {"directory": True})))
+        assert refusals
+
+    def test_world_writable_tracked_file_is_refused(self, tmp_path):
+        def mutate(layers):
+            layers[2] = [("app/main/app.py", APP_SOURCE, {"mode": 0o777})]
+        assert [c for c, _ in _check(tmp_path, mutate)] == ["provenance"]
+
+    def test_exec_bit_the_commit_does_not_have_is_refused(self, tmp_path):
+        def mutate(layers):
+            layers[2] = [("app/main/app.py", APP_SOURCE, {"mode": 0o755})]
+        assert [c for c, _ in _check(tmp_path, mutate)] == ["provenance"]
+
+    @pytest.mark.parametrize("key", ["usr/share/Aliases.JSON", "root/data.tar.zst", "root/x.7z",
+                                     "opt/HUGINN-private/x", "srv/Data/Sources/a.md", "a/B_GRAPH.json"])
+    def test_name_rule_is_case_insensitive_and_knows_more_archives(self, key):
+        assert name_refusal(key, False)
+
+    def test_member_missing_from_the_image_is_refused(self, tmp_path):
+        def mutate(layers):
+            layers[3] = [e for e in layers[3] if not e[0].endswith("doc.json")]
+        refusals = _check(tmp_path, mutate)
+        assert ("provenance", "demo: 1 package member(s) missing from the image") in refusals
+
+    def test_empty_package_set_is_refused(self, tmp_path):
+        layers = _good_layers(_package(tmp_path))[:3]
+        report, _ = check_layers(_save(tmp_path, layers), TREE, [], LOCK)
+        assert report.refusals
+
+    def test_unreadable_layer_is_a_refusal_not_a_traceback(self, tmp_path):
+        path = tmp_path / "image.tar"
+        with tarfile.open(path, "w") as outer:
+            _add(outer, "blobs/sha256/layer0", b"\x28\xb5\x2f\xfd" + b"not a tar" * 50)
+            _add(outer, "manifest.json", json.dumps([{"Layers": ["blobs/sha256/layer0"]}]).encode())
+        with pytest.raises(Refused, match="layer 0"):
+            check_layers(path, TREE, [read_package(_package(tmp_path))], LOCK)
+
+
+class TestFixRound1StampRule:
+    def test_no_check_that_ran_is_refused(self):
+        assert stamp_refusals(_stamp(scanChecks={"5": {"passed": False, "ran": False}}))
+
+    def test_non_dict_check_entry_is_refused_not_raised(self):
+        assert stamp_refusals(_stamp(scanChecks={"1": True}))
+
+    def test_sweep_that_is_not_an_object_is_refused_not_raised(self):
+        assert stamp_refusals(_stamp(sensitivitySweep="pass"))
+
+    def test_document_count_missing_on_both_sides_is_refused(self, tmp_path):
+        stamp = _stamp()
+        del stamp["numberOfDocuments"]
+        path = tmp_path / "nocount.tar.gz"
+        with tarfile.open(path, "w:gz") as tar:
+            _add(tar, "PACKAGE-STAMP.json", json.dumps(stamp).encode())
+            _add(tar, "data/collections/demo/manifest.json", b"{}")
+        with pytest.raises(Refused, match="numberOfDocuments"):
+            read_package(path)
+
+
+class TestFixRound1BuildInputs:
+    def test_duplicate_collection_is_refused(self, tmp_path):
+        a = read_package(_package(tmp_path, name="a.tar.gz"))
+        b = read_package(_package(tmp_path, name="b.tar.gz"))
+        assert image_build.input_refusals([a, b])
+
+    def test_no_package_is_refused(self):
+        assert image_build.input_refusals([])
+
+    def test_pytorch_gate(self):
+        assert image_build.pytorch_refusal({"torch"}) is None
+        assert image_build.pytorch_refusal(set())
+        assert image_build.pytorch_refusal({"torch", "numpy"})
+        assert image_build.pytorch_refusal(None) is None
+
+    def test_staging_oserror_prints_no_path(self, tmp_path, monkeypatch, capsys):
+        package_path = _package(tmp_path)
+
+        def boom(package, root):
+            raise OSError(28, "No space left on device", "/x/documents/secret-document-id.json")
+
+        monkeypatch.setattr(image_build, "extract_package", boom)
+        status = image_build.main(["--commit", "HEAD", "--package", str(package_path),
+                                   "--platform", "linux/arm64", "--tag", "t:t"])
+        out = capsys.readouterr().out
+        assert status == 2 and "secret-document-id" not in out and "REFUSED" in out
+
+
+class TestFixRound1Pinning:
+    """Branches that existed but no test could fail on (review mutants M1-M10, M16)."""
+
+    def test_hardlink_under_app_is_refused(self, tmp_path):
+        package_path = _package(tmp_path)
+        layers = _good_layers(package_path)
+        path = _save(tmp_path, layers)
+        # append a hardlink layer by hand
+        with tarfile.open(path) as outer:
+            members = {m.name: outer.extractfile(m).read() for m in outer if m.isfile()}
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w") as layer:
+            _hardlink(layer, "app/main/app.py", "app/main/app.py")
+        manifest = json.loads(members.pop("manifest.json"))
+        manifest[0]["Layers"].append("blobs/sha256/hardlink")
+        members["blobs/sha256/hardlink"] = buffer.getvalue()
+        members["manifest.json"] = json.dumps(manifest).encode()
+        with tarfile.open(path, "w") as outer:
+            for name, data in members.items():
+                _add(outer, name, data)
+        report, _ = check_layers(path, TREE, [read_package(package_path)], LOCK)
+        assert ("provenance", "layer 4: app/main/app.py (not a regular file or symlink)") in report.refusals
+
+    def test_refs_main_with_trailing_newline_is_refused(self, tmp_path):
+        def mutate(layers):
+            layers[1][-1] = (f"{MODEL}/refs/main", REVISION.encode() + b"\n")
+        assert [c for c, _ in _check(tmp_path, mutate)] == ["provenance"]
+
+    def test_check_without_ran_key_counts_as_ran(self):
+        assert stamp_refusals(_stamp(scanChecks={"1": {"passed": True, "ran": True}, "2": {"passed": False}}))
+
+    def test_foreign_folder_in_hf_cache_is_refused(self, tmp_path):
+        refusals = _check(tmp_path, lambda l: l[1].append((f"{MODEL}/.no_exist", None, {"directory": True})))
+        assert [c for c, _ in refusals] == ["provenance"]
+
+    def test_duplicate_package_member_is_refused(self, tmp_path):
+        with pytest.raises(Refused, match="duplicate"):
+            read_package(_package(tmp_path, extra=[("data/collections/demo/manifest.json", b"{}")]))
+
+    @pytest.mark.parametrize("name", ["../escape.json", "/etc/abs.json"])
+    def test_escaping_package_member_is_refused(self, tmp_path, name):
+        with pytest.raises(Refused, match="escapes"):
+            read_package(_package(tmp_path, extra=[(name, b"x")]))
+
+    def test_directory_symlink_in_staging_is_refused(self, tmp_path):
+        staging, tree, package = TestVerifyStaging()._staged(tmp_path)
+        (staging / "src" / "linked").symlink_to(staging / "src" / "main")
+        assert verify_staging(staging, tree, [package]) == ["src/linked: not in the pinned commit"]
+
+    def test_file_where_the_commit_has_a_symlink_is_refused(self, tmp_path):
+        staging, tree, package = TestVerifyStaging()._staged(tmp_path)
+        tree["main/link"] = ("120000", git_blob_id(b"app.py"))
+        (staging / "src" / "main" / "link").write_bytes(b"app.py")
+        assert verify_staging(staging, tree, [package]) == ["src/main/link: the commit has a symlink here"]
+
+    def test_oci_layout_is_read(self, tmp_path):
+        package_path = _package(tmp_path)
+        layers = _good_layers(package_path)
+        layers.append([("tmp/.wh.gone", b"")])
+        report, _ = check_layers(_save_oci(tmp_path, layers), TREE, [read_package(package_path)], LOCK)
+        assert [c for c, _ in report.refusals] == ["whiteout"]
+
+    def test_group_writable_file_without_exec_bit_is_refused(self, tmp_path):
+        def mutate(layers):
+            layers[2] = [("app/main/app.py", APP_SOURCE, {"mode": 0o664})]
+        assert _check(tmp_path, mutate) == [
+            ("provenance", "layer 2: app/main/app.py (a group- or world-writable file)")]
+
+    def test_world_writable_implied_folder_is_refused(self, tmp_path):
+        refusals = _check(tmp_path, lambda l: l[2].append(("app/main", None, {"directory": True, "mode": 0o777})))
+        assert refusals == [("provenance", "layer 2: app/main (a group- or world-writable folder)")]
+
+    def test_snapshot_entry_that_is_a_regular_file_is_refused(self, tmp_path):
+        def mutate(layers):
+            layers[1][3] = (f"{MODEL}/snapshots/{REVISION}/config.json", CONFIG)
+        assert _check(tmp_path, mutate) == [("provenance", f"layer 1: {MODEL}/snapshots/{REVISION}/config.json "
+                                                           f"(a snapshot entry that is not a symlink)")]

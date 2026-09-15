@@ -59,7 +59,7 @@ from scripts.container.provenance import (  # noqa: E402
     safe_display,
 )
 
-ARCHIVE_SUFFIXES = (".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz")
+ARCHIVE_SUFFIXES = (".zip", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".zst", ".lz4", ".7z", ".rar")
 _NVIDIA_DIST_INFO = re.compile(r"^nvidia_.*\.dist-info$", re.I)
 _TEXT_REPORT_MAX_BYTES = 20 * 1024 * 1024
 APP = "app/"
@@ -81,6 +81,9 @@ def normalize(name: str) -> str:
 
 
 def name_refusal(key: str, is_dir: bool) -> str | None:
+    """Case-insensitive: a case-insensitive filesystem or a copy by hand does not
+    keep the spelling the rule was written for."""
+    key = key.lower()
     parts = key.split("/")
     base = parts[-1]
     folders = parts if is_dir else parts[:-1]
@@ -93,7 +96,7 @@ def name_refusal(key: str, is_dir: bool) -> str | None:
         return "a raw-source or pre-alias path"
     if not is_dir and base.endswith("_graph.json"):
         return "a knowledge graph file name"
-    if not is_dir and base.lower().endswith(ARCHIVE_SUFFIXES):
+    if not is_dir and base.endswith(ARCHIVE_SUFFIXES):
         return "an archive"
     if any(_NVIDIA_DIST_INFO.match(p) for p in parts):
         return "an nvidia_* dist-info"
@@ -184,6 +187,8 @@ def check_layers(image_tar, tree: dict, packages: list[Package], lock: dict,
     """The name, whiteout and provenance checks over every layer of ``image_tar``."""
     report = Report()
     needle_files: Counter = Counter()
+    if not packages:
+        report.refuse("name", "no packages to check the image against")
     expected = {}
     for package in packages:
         expected.update(package.members)
@@ -191,15 +196,28 @@ def check_layers(image_tar, tree: dict, packages: list[Package], lock: dict,
     stamps: Counter = Counter()
     small: dict[str, bytes] = {}
     seen_collections: set[str] = set()
+    seen_members: set[str] = set()
+    allowed_dirs = _implied_dirs([*tree, *expected])
 
-    with tarfile.open(image_tar) as outer:
-        for index, layer_path in enumerate(_layer_paths(outer)):
-            report.layers += 1
-            with tarfile.open(fileobj=outer.extractfile(layer_path), mode="r|*") as layer:
-                for member in layer:
-                    _check_member(index, member, layer, report, tree, expected, models, stamps,
-                                  small, seen_collections, extract_to, needle_scanner, needle_files)
+    index = 0
+    try:
+        with tarfile.open(image_tar) as outer:
+            for index, layer_path in enumerate(_layer_paths(outer)):
+                report.layers += 1
+                with tarfile.open(fileobj=outer.extractfile(layer_path), mode="r|*") as layer:
+                    for member in layer:
+                        _check_member(index, member, layer, report, tree, expected, models, stamps,
+                                      small, seen_collections, seen_members, allowed_dirs,
+                                      extract_to, needle_scanner, needle_files)
+    except (tarfile.TarError, OSError, EOFError, ValueError) as exc:
+        # The type only: an OSError's message can carry the path it failed on.
+        raise Refused(f"unreadable image at layer {index}: {type(exc).__name__}") from None
 
+    for package in packages:
+        missing = len(set(package.members) - seen_members)
+        if missing:
+            report.refuse("provenance", f"{package.collection}: {missing} package member(s) "
+                                        f"missing from the image")
     wanted = {p.collection for p in packages}
     if seen_collections != wanted:
         report.refuse("name", f"collections in the image {sorted(seen_collections)} "
@@ -220,8 +238,24 @@ def check_layers(image_tar, tree: dict, packages: list[Package], lock: dict,
     return report, needle_files
 
 
+def _implied_dirs(paths) -> set[str]:
+    """Every folder under ``app/`` that a git path or package member lives in."""
+    dirs = {"app"}
+    for path in paths:
+        parts = path.split("/")[:-1]
+        for i in range(1, len(parts) + 1):
+            dirs.add(APP + "/".join(parts[:i]))
+    return dirs
+
+
 def _check_member(index, member, layer, report, tree, expected, models, stamps, small,
-                  seen_collections, extract_to, needle_scanner, needle_files):
+                  seen_collections, seen_members, allowed_dirs, extract_to, needle_scanner,
+                  needle_files):
+    if ".." in member.name.split("/"):
+        # Layer apply cleans the path, so `usr/../app/x` lands in /app while
+        # skipping every app/ rule, and an extract would write outside its folder.
+        report.refuse("name", f"layer {index}: an entry with a '..' path segment")
+        return
     key = normalize(member.name)
     if not key:
         return
@@ -263,7 +297,7 @@ def _check_member(index, member, layer, report, tree, expected, models, stamps, 
         return cache.get("data")
 
     if key.startswith(APP) or key == APP.rstrip("/"):
-        refusal = _app_refusal(key, member, read, tree, expected, models)
+        refusal = _app_refusal(key, member, read, tree, expected, models, allowed_dirs)
         if refusal:
             report.refuse("provenance", f"{shown} ({refusal})")
         elif member.isfile():
@@ -274,6 +308,7 @@ def _check_member(index, member, layer, report, tree, expected, models, stamps, 
     if key.startswith(collection_prefix) and member.isfile():
         name, _, inner = key[len(collection_prefix):].partition("/")
         seen_collections.add(name)
+        seen_members.add(key[len(APP):])
         if inner == STAMP:
             stamps[name] += 1
         if inner in (STAMP, "manifest.json"):
@@ -305,12 +340,21 @@ class _Tee:
         return chunk
 
 
-def _app_refusal(key, member, read, tree, expected, models) -> str | None:
+def _app_refusal(key, member, read, tree, expected, models, allowed_dirs) -> str | None:
+    in_hf_cache = key.startswith(HF_CACHE) or key == HF_CACHE.rstrip("/")
     if member.isdir():
-        return None
+        if member.mode & 0o022:
+            return "a group- or world-writable folder"
+        if in_hf_cache:
+            return _hf_refusal(key, member, read, models)
+        return None if key in allowed_dirs else "a folder no commit path or package member implies"
     if member.islnk() or not (member.isfile() or member.issym()):
         return "not a regular file or symlink"
-    if key.startswith(HF_CACHE):
+    if member.isfile() and member.mode & 0o022:
+        return "a group- or world-writable file"
+    if in_hf_cache:
+        if member.isfile() and member.mode & 0o111:
+            return "an executable model file"
         return _hf_refusal(key, member, read, models)
     rel = key[len(APP):]
     if rel.startswith(COLLECTIONS_PREFIX):
@@ -318,6 +362,8 @@ def _app_refusal(key, member, read, tree, expected, models) -> str | None:
             return "not a member of any package"
         if not member.isfile():
             return "not a regular file"
+        if member.mode & 0o111:
+            return "an executable collection file"
         return None if read(hashes=True)[1] == expected[rel] else "differs from the package member"
     if rel not in tree:
         return "not in the pinned commit"
@@ -328,6 +374,8 @@ def _app_refusal(key, member, read, tree, expected, models) -> str | None:
         return None if _blob_id(member.linkname.encode()) == oid else "symlink target differs"
     if not member.isfile():
         return "not a regular file"
+    if bool(member.mode & 0o111) != (mode == "100755"):
+        return "executable bit differs from the commit"
     return None if read(hashes=True)[0] == oid else "content differs from the commit"
 
 
