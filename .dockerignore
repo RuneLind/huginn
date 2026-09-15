@@ -1,0 +1,8 @@
+# An allowlist for a hand-run `docker build` from the repo root, which must fail.
+# The real build (scripts/container/image_build.py) stages its own context and
+# never reads this file; .gitattributes keeps it out of `git archive`.
+# Never re-include data/, huginn-*/, scripts/ (graph JSON lives there, gitignored)
+# or an archive.
+*
+!Dockerfile
+!requirements/

@@ -1,0 +1,101 @@
+{
+  "models": [
+    {
+      "repo": "intfloat/multilingual-e5-base",
+      "revision": "d128750597153bb5987e10b1c3493a34e5a4502a",
+      "files": [
+        {
+          "path": "1_Pooling/config.json",
+          "blobId": "2a824fa43c359360ecddb16808b539c6be892fef",
+          "lfsSha256": null
+        },
+        {
+          "path": "README.md",
+          "blobId": "cb9a717ebcd784123f8bc5ea79b4ba0db4cf2f1d",
+          "lfsSha256": null
+        },
+        {
+          "path": "config.json",
+          "blobId": "2b827c7eb80b3765ec6f465ab7cbfe173388c9dc",
+          "lfsSha256": null
+        },
+        {
+          "path": "model.safetensors",
+          "blobId": "fc3a0bc72076b64006848e410b2aef3fbbf9f761",
+          "lfsSha256": "a18a44fad1d0b46ded15928144138cff1135d5cc8233bdd90be5f18822de09a7"
+        },
+        {
+          "path": "modules.json",
+          "blobId": "ac2039abdf6ff023b27c919bb9675cfe378cb10f",
+          "lfsSha256": null
+        },
+        {
+          "path": "sentence_bert_config.json",
+          "blobId": "4eca68d85ecd3034cf4174d8a4033a75344ea62d",
+          "lfsSha256": null
+        },
+        {
+          "path": "sentencepiece.bpe.model",
+          "blobId": "7a3f40a75f870bc1f21700cd414dc2acc431583c",
+          "lfsSha256": "cfc8146abe2a0488e9e2a0c56de7952f7c11ab059eca145a0a727afce0db2865"
+        },
+        {
+          "path": "special_tokens_map.json",
+          "blobId": "d5698132694f4f1bcff08fa7d937b1701812598e",
+          "lfsSha256": null
+        },
+        {
+          "path": "tokenizer.json",
+          "blobId": "b77624b6c85b399b6d11c581617e579ce832af28",
+          "lfsSha256": "62c24cdc13d4c9952d63718d6c9fa4c287974249e16b7ade6d5a85e7bbb75626"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "blobId": "6de1940d16d38be9877bf7cc228c9377841b311f",
+          "lfsSha256": null
+        }
+      ]
+    },
+    {
+      "repo": "BAAI/bge-reranker-v2-m3",
+      "revision": "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+      "files": [
+        {
+          "path": "README.md",
+          "blobId": "553540879ec61aea21df00434c984c0f760a3fcc",
+          "lfsSha256": null
+        },
+        {
+          "path": "config.json",
+          "blobId": "9f62673cb00ec41dcec8947b9ed16f6f2eb23ba2",
+          "lfsSha256": null
+        },
+        {
+          "path": "model.safetensors",
+          "blobId": "773a0a7d7cc8a010835938a3a82a87eac8b21909",
+          "lfsSha256": "d9e3e081faff1eefb84019509b2f5558fd74c1a05a2c7db22f74174fcedb5286"
+        },
+        {
+          "path": "sentencepiece.bpe.model",
+          "blobId": "7a3f40a75f870bc1f21700cd414dc2acc431583c",
+          "lfsSha256": "cfc8146abe2a0488e9e2a0c56de7952f7c11ab059eca145a0a727afce0db2865"
+        },
+        {
+          "path": "special_tokens_map.json",
+          "blobId": "b1879d702821e753ffe4245048eee415d54a9385",
+          "lfsSha256": null
+        },
+        {
+          "path": "tokenizer.json",
+          "blobId": "1c98a28b19c084901b2622d8e8b15e85eed13bff",
+          "lfsSha256": "69564b696052886ed0ac63fa393e928384e0f8caada38c1f4864a9bfbf379c15"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "blobId": "328a00a9a560aadcf2a3064f917517359eb3cc26",
+          "lfsSha256": null
+        }
+      ]
+    }
+  ]
+}
