@@ -6,6 +6,7 @@ HTTP routers depend on, exposed via the ``get_store`` FastAPI dependency.
 """
 import json
 import logging
+import os
 import threading
 from datetime import datetime, timezone
 
@@ -26,6 +27,24 @@ from main.runtime.indexing_run_ledger import (
 from main.utils.frontmatter import parse_tags
 
 logger = logging.getLogger(__name__)
+
+_RERANK_ON = {"", "1", "true", "on"}
+_RERANK_OFF = {"0", "false", "off"}
+
+
+def rerank_enabled() -> bool:
+    """``HUGINN_RERANK``: unset or on loads the cross-encoder; off never constructs it.
+
+    Server-side because a caller's ``rerank=false`` skips scoring but leaves the
+    model resident. Any other value raises: silently falling back to either
+    mode would misreport what a latency measurement measured.
+    """
+    value = os.environ.get("HUGINN_RERANK", "").strip().lower()
+    if value in _RERANK_ON:
+        return True
+    if value in _RERANK_OFF:
+        return False
+    raise ValueError(f"HUGINN_RERANK must be one of 1/true/on or 0/false/off, got {value!r}")
 
 
 class KnowledgeStore:
@@ -82,6 +101,9 @@ class KnowledgeStore:
         self._extra_graph_paths = extra_graph_paths
         self._build_aux_indexes = build_aux_indexes
 
+        # Read before any model loads, so a mistyped value fails in seconds.
+        rerank = rerank_enabled()
+
         if faiss_index_name is None:
             faiss_index_name = self.__detect_shared_faiss_index(collection_names)
 
@@ -89,8 +111,12 @@ class KnowledgeStore:
         self.shared_embedder = create_embedder(faiss_index_name)
         logger.info(f"Embedding model loaded: {self.shared_embedder.model_name}")
 
-        self.shared_reranker = create_reranker()
-        logger.info(f"Reranker loaded: {self.shared_reranker.model_name}")
+        if rerank:
+            self.shared_reranker = create_reranker()
+            logger.info(f"Reranker loaded: {self.shared_reranker.model_name}")
+        else:
+            self.shared_reranker = None
+            logger.info("Reranker disabled by HUGINN_RERANK")
 
         for name in collection_names:
             logger.info(f"Loading collection: {name}")
@@ -315,6 +341,11 @@ class KnowledgeStore:
     def collection_names(self):
         with self._lock:
             return list(self.searchers.keys())
+
+    def collection_sizes(self):
+        """``{collection: chunk count}`` for every served collection."""
+        with self._lock:
+            return {name: s.indexer.get_size() for name, s in self.searchers.items()}
 
     def total_embeddings(self):
         with self._lock:
