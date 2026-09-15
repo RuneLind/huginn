@@ -117,7 +117,7 @@ Endpoints:
 - `GET /health` — Health check
 - `GET /ready` — Readiness probe: 200 with `{collection: chunkCount}` when every `--collections` entry is served with at least one chunk, else 503 naming the `missing` and `empty` ones
 
-Set `HUGINN_RERANK=off` (or `0`/`false`) to start the server without the cross-encoder: it is never loaded, so its memory is not resident, and every search reports `reranked: false`. Unset, `1`, `true` or `on` keeps reranking; any other value stops startup.
+Set `HUGINN_RERANK=off` (or `0`/`false`) to start the server without the cross-encoder: it is never loaded, so its memory is not resident, and every search reports `reranked: false`. Unset, empty (as a blank container env entry sets it), `1`, `true` or `on` keeps reranking; any other value stops startup.
 
 ## MCP Integration
 

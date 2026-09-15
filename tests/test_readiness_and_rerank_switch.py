@@ -83,6 +83,7 @@ class TestReadiness:
         body = response.json()
         assert body["status"] == "not_ready"
         assert body["missing"] == ["b"]
+        assert body["empty"] == []
         assert body["collections"] == {"a": 10}
 
     def test_empty_collection_is_503_and_named(self):

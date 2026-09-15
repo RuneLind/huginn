@@ -839,5 +839,6 @@ uv run knowledge_api_server.py --collections <name> [<name> ...] --port 8321
 - **`HUGINN_RERANK=off`** skips constructing the cross-encoder in
   `KnowledgeStore.load_collections`, so its memory is never resident; a
   caller's `rerank=false` only skips scoring. Read once at load, before any
-  model; an unrecognised value stops startup. The CLI search path
+  model; unset or empty keeps reranking, and an unrecognised value stops
+  startup. The CLI search path
   (`search_collection_factory.py`) does not read it.
