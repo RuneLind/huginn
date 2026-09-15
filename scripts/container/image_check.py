@@ -20,9 +20,11 @@ Reads every layer of ``docker save`` and refuses on any of:
 - **base**: the config's layer IDs must start with the pinned base image's
   (``base.lock.json``, per architecture) and match the save's layer count.
 - **links**: a symlink or hardlink is allowed only in a base layer, or as a
-  model snapshot symlink under ``/app/hf-cache``. An entry in a later layer
-  whose parent resolves through a base link elsewhere is refused. With no links
-  in the layers the build adds, the link map cannot change after the base.
+  symlink under ``/app/hf-cache`` (where provenance then accepts model snapshot
+  links only). An entry in a later layer whose parent resolves through a base
+  link elsewhere is refused. Links under ``/app/hf-cache`` are not added to the
+  link map, so the map cannot change after the base; entries below them are
+  left to provenance.
 - **scan_index**: ``scripts/audit/scan_index.py`` over the collections read
   out of the image.
 
@@ -361,10 +363,11 @@ def _check_member(index, member, layer, report, tree, expected, models, stamps, 
     refusal = name_refusal(key, member.isdir())
     if refusal:
         report.refuse("name", f"{shown} ({refusal})")
-    # Links come only from the digest-pinned base; the layers the build adds may
-    # hold none except model snapshot symlinks, whose targets _hf_refusal pins.
-    # So the link map is fixed once the base is read, and a path resolves the
-    # same way at every later layer: no link added later can redirect it.
+    # Links are recorded only from the base layers. The layers the build adds
+    # may hold no link except a symlink under app/hf-cache/, which this rule
+    # exempts and _hf_refusal then limits to model snapshot links. So the link
+    # map is fixed once the base is read: no link added later can redirect a
+    # path.
     is_link = member.issym() or member.islnk()
     if index < report.base_layers:
         if is_link:
