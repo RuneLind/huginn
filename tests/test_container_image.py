@@ -189,28 +189,44 @@ def _good_layers(package_path):
     return layers
 
 
-def _save(tmp_path, layers):
+def _layer_bytes(entries):
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as layer:
+        for entry in entries:
+            _add(layer, *entry[:2], **(entry[2] if len(entry) > 2 else {}))
+    return buffer.getvalue()
+
+
+def _diff_id(entries):
+    return "sha256:" + hashlib.sha256(_layer_bytes(entries)).hexdigest()
+
+
+def _config(layers, architecture="arm64"):
+    return json.dumps({"architecture": architecture,
+                       "rootfs": {"type": "layers", "diff_ids": [_diff_id(e) for e in layers]}}).encode()
+
+
+def _save(tmp_path, layers, architecture="arm64"):
     path = tmp_path / "image.tar"
     manifest = [{"Config": "blobs/sha256/config", "Layers": []}]
     with tarfile.open(path, "w") as outer:
         for index, entries in enumerate(layers):
-            buffer = io.BytesIO()
-            with tarfile.open(fileobj=buffer, mode="w") as layer:
-                for entry in entries:
-                    _add(layer, *entry[:2], **(entry[2] if len(entry) > 2 else {}))
             name = f"blobs/sha256/layer{index}"
             manifest[0]["Layers"].append(name)
-            _add(outer, name, buffer.getvalue())
+            _add(outer, name, _layer_bytes(entries))
+        _add(outer, "blobs/sha256/config", _config(layers, architecture))
         _add(outer, "manifest.json", json.dumps(manifest).encode())
     return path
 
 
-def _check(tmp_path, mutate=None):
+def _check(tmp_path, mutate=None, base_layers=0):
+    """``base_layers``: how many leading layers the base lock pins (0 = none)."""
     package_path = _package(tmp_path)
     layers = _good_layers(package_path)
     if mutate:
         mutate(layers)
-    report, _ = check_layers(_save(tmp_path, layers), TREE, [read_package(package_path)], LOCK)
+    base = {"diffIds": {"arm64": [_diff_id(e) for e in layers[:base_layers]]}} if base_layers else None
+    report, _ = check_layers(_save(tmp_path, layers), TREE, [read_package(package_path)], LOCK, base=base)
     return report.refusals
 
 
@@ -354,7 +370,11 @@ def _save_oci(tmp_path, layers):
             digest = hashlib.sha256(buffer.getvalue()).hexdigest()
             digests.append(digest)
             _add(outer, f"blobs/sha256/{digest}", buffer.getvalue())
-        manifest = json.dumps({"layers": [{"digest": f"sha256:{d}"} for d in digests]}).encode()
+        config = _config(layers)
+        config_digest = hashlib.sha256(config).hexdigest()
+        _add(outer, f"blobs/sha256/{config_digest}", config)
+        manifest = json.dumps({"config": {"digest": f"sha256:{config_digest}"},
+                               "layers": [{"digest": f"sha256:{d}"} for d in digests]}).encode()
         manifest_digest = hashlib.sha256(manifest).hexdigest()
         _add(outer, f"blobs/sha256/{manifest_digest}", manifest)
         _add(outer, "index.json", json.dumps({"manifests": [{"digest": f"sha256:{manifest_digest}"}]}).encode())
@@ -607,24 +627,9 @@ class TestFixRound2:
     def test_more_archive_names_are_refused(self, key):
         assert name_refusal(key, False)
 
-    @pytest.mark.parametrize("key", ["usr/lib/python3.12/site-packages/x/codec.tar.py", "usr/lib/x/a.tar.gz.bak"])
+    @pytest.mark.parametrize("key", ["usr/lib/python3.12/site-packages/x/codec.tar.py"])
     def test_tar_in_the_middle_of_a_name_is_not_a_compressed_tar(self, key):
         assert name_refusal(key, False) is None
-
-    def test_symlink_from_outside_into_app_is_refused(self, tmp_path):
-        refusals = _check(tmp_path, lambda l: l[0].append(("usr/lib/probe-link", None, {"symlink": "/app/main"})))
-        assert [c for c, _ in refusals] == ["name"]
-
-    def test_relative_symlink_into_app_is_refused(self, tmp_path):
-        refusals = _check(tmp_path, lambda l: l[0].append(("probe", None, {"symlink": "app"})))
-        assert [c for c, _ in refusals] == ["name"]
-
-    def test_entry_below_a_symlinked_folder_is_refused(self, tmp_path):
-        def mutate(layers):
-            layers[0].append(("usr/lib/probe-link", None, {"symlink": "../share"}))
-            layers.append([("usr/lib/probe-link/evil_synthetic.py", b"x")])
-        refusals = _check(tmp_path, mutate)
-        assert ("name", "layer 4: usr/lib/probe-link/evil_synthetic.py (an entry below a symlink)") in refusals
 
     def test_boolean_document_count_is_refused(self, tmp_path):
         with pytest.raises(Refused, match="numberOfDocuments"):
@@ -653,55 +658,13 @@ def _hardlink_entry(tar_entries_layer, name, target):
     tar_entries_layer.append((name, None, {"hardlink": target}))
 
 
-class TestFixRound3Resolver:
-    """The round-2 pattern rules missed these; the resolver walks paths like the kernel."""
-
-    @pytest.mark.parametrize("target", ["../../../app/main", "../../../../app", "/", "../../..", "../.."])
-    def test_link_that_climbs_past_root_into_app_is_refused(self, tmp_path, target):
-        refusals = _check(tmp_path, lambda l: l[0].append(("usr/lib/climb", None, {"symlink": target})))
-        assert [c for c, _ in refusals] == ["name"]
-
-    def test_chain_of_links_into_app_is_refused(self, tmp_path):
-        def mutate(layers):
-            layers[0].append(("usr/a", None, {"symlink": "b"}))
-            layers[0].append(("usr/b", None, {"symlink": "../../app"}))
-        assert "name" in [c for c, _ in _check(tmp_path, mutate)]
-
-    def test_relative_link_is_resolved_from_its_own_folder(self, tmp_path):
-        # From usr/lib, ../../app is /app; from the root it would climb and clamp at /.
-        refusals = _check(tmp_path, lambda l: l[0].append(("usr/lib/l", None, {"symlink": "../../app"})))
-        assert refusals == [("name", "layer 0: usr/lib/l (a symlink into /app from outside it)")]
-
-    def test_link_to_a_folder_outside_app_is_allowed(self, tmp_path):
-        assert _check(tmp_path, lambda l: l[0].append(("usr/lib/x", None, {"symlink": "../share"}))) == []
-
-    def test_entry_below_a_hardlink_to_a_symlink_is_refused(self, tmp_path):
-        def mutate(layers):
-            layers[0].append(("usr/lib/climb", None, {"symlink": "../share"}))
-            layers[0].append(("usr/lib/hl", None, {"hardlink": "usr/lib/climb"}))
-            layers.append([("usr/lib/hl/evil_synthetic.py", b"x")])
-        assert ("name", "layer 4: usr/lib/hl/evil_synthetic.py (an entry below a symlink)") in _check(tmp_path, mutate)
-
-    def test_entry_below_a_top_level_symlink_is_refused(self, tmp_path):
-        def mutate(layers):
-            layers[0].append(("bin", None, {"symlink": "usr/bin"}))
-            layers.append([("bin/tool", b"x")])
-        assert _check(tmp_path, mutate) == [("name", "layer 4: bin/tool (an entry below a symlink)")]
-
-    def test_folder_that_replaces_a_symlink_resets_it(self, tmp_path):
-        def mutate(layers):
-            layers[0].append(("usr/lib/x", None, {"symlink": "../share"}))
-            layers.append([("usr/lib/x", None, {"directory": True, "mode": 0o755}), ("usr/lib/x/ok.py", b"x")])
-        assert _check(tmp_path, mutate) == []
-
-
 class TestFixRound3Names:
     @pytest.mark.parametrize("key", ["root/a.tar.zstd", "root/a.tar.lzo", "root/a.tar.001", "root/a.tar.gz",
                                      "root/a.tar.bz2", "root/a.tar.Z", "root/a.tar.lz", "root/a.tar.gzip"])
     def test_any_compressed_or_split_tar_is_refused(self, key):
         assert name_refusal(key, False)
 
-    @pytest.mark.parametrize("key", ["usr/lib/x/codec.tar.py", "usr/share/doc/notes.tar.txt", "usr/lib/x/a.tar.gz.bak"])
+    @pytest.mark.parametrize("key", ["usr/lib/x/codec.tar.py", "usr/share/doc/notes.tar.txt"])
     def test_tar_before_a_source_extension_is_not_an_archive(self, key):
         assert name_refusal(key, False) is None
 
@@ -755,15 +718,170 @@ class TestFixRound3ResolveDirect:
         from scripts.container.image_check import resolve
         assert resolve("usr/a", {"usr/a": ("sym", "b"), "usr/b": ("sym", "a")}) is None
 
-    def test_symlink_loop_outside_app_is_refused(self, tmp_path):
-        def mutate(layers):
-            layers[0].append(("usr/a", None, {"symlink": "b"}))
-            layers[0].append(("usr/b", None, {"symlink": "a"}))
-        assert ("name", "layer 0: usr/b (a symlink into /app from outside it)") in _check(tmp_path, mutate)
 
-    def test_entry_below_a_hardlink_to_a_regular_file_is_not_a_symlink_parent(self, tmp_path):
+# --- fix round 4: links only in the pinned base image's layers ------------------
+
+
+def _base_link_layers(tmp_path, base_entries, added_entries):
+    """A base layer (pinned) of links, then the good layers, then an added layer."""
+    package_path = _package(tmp_path)
+    layers = [base_entries] + _good_layers(package_path)
+    if added_entries is not None:
+        layers.append(added_entries)
+    base = {"diffIds": {"arm64": [_diff_id(base_entries)]}}
+    report, _ = check_layers(_save(tmp_path, layers), TREE, [read_package(package_path)], LOCK, base=base)
+    return report.refusals
+
+
+class TestFixRound4AddedLayerLinks:
+    """Every link shape the round-2 and round-3 rules missed, now in an added layer."""
+
+    @pytest.mark.parametrize("target", ["../share", "../../../app/main", "/", "../../..", "/app"])
+    def test_symlink_in_an_added_layer_is_refused(self, tmp_path, target):
+        refusals = _check(tmp_path, lambda l: l[0].append(("usr/lib/x", None, {"symlink": target})))
+        assert refusals == [("name", "layer 0: usr/lib/x (a link in a layer the image build adds)")]
+
+    def test_hardlink_in_an_added_layer_is_refused(self, tmp_path):
+        refusals = _check(tmp_path, lambda l: l[0].append(
+            ("usr/hl", None, {"hardlink": "usr/local/lib/python3.12/site-packages/lib.py"})))
+        assert refusals == [("name", "layer 0: usr/hl (a link in a layer the image build adds)")]
+
+    def test_stale_resolution_shape_is_refused(self, tmp_path):
         def mutate(layers):
-            layers[0].append(("usr/lib/f", b"x"))
-            layers[0].append(("usr/lib/hl", None, {"hardlink": "usr/lib/f"}))
-            layers.append([("usr/lib/hl/child.py", b"x")])
-        assert _check(tmp_path, mutate) == []
+            layers[0].append(("usr/local/lib/stale", None, {"symlink": "/tmp/dprobe/L/../app/main"}))
+            layers.append([("tmp/dprobe/L", None, {"symlink": "/usr"})])
+        checks = _check(tmp_path, mutate)
+        assert checks == [("name", "layer 0: usr/local/lib/stale (a link in a layer the image build adds)"),
+                          ("name", "layer 4: tmp/dprobe/L (a link in a layer the image build adds)")]
+
+    def test_hardlink_to_a_relative_symlink_shape_is_refused(self, tmp_path):
+        def mutate(layers):
+            layers[0].append(("opt/qprobe/s", None, {"symlink": "../app"}))
+            layers[0].append(("usr/hard-probe", None, {"hardlink": "opt/qprobe/s"}))
+        assert [c for c, _ in _check(tmp_path, mutate)] == ["name", "name"]
+
+    def test_model_snapshot_symlinks_in_an_added_layer_are_allowed(self, tmp_path):
+        assert _check(tmp_path) == []
+
+
+class TestFixRound4BaseLayers:
+    def test_links_in_the_pinned_base_are_allowed(self, tmp_path):
+        base = [("bin", None, {"symlink": "usr/bin"}), ("etc/root", None, {"symlink": "/"}),
+                ("usr/lib/h", None, {"hardlink": "usr/lib/f"})]
+        assert _base_link_layers(tmp_path, base, None) == []
+
+    def test_entry_in_an_added_layer_below_a_base_symlink_is_refused(self, tmp_path):
+        refusals = _base_link_layers(tmp_path, [("bin", None, {"symlink": "usr/bin"})], [("bin/tool", b"x")])
+        assert refusals == [("name", "layer 5: bin/tool (an entry below a symlink)")]
+
+    def test_entry_below_a_base_hardlink_to_a_symlink_is_refused(self, tmp_path):
+        base = [("usr/lib/s", None, {"symlink": "../share"}), ("usr/lib/h", None, {"hardlink": "./usr/lib/s"})]
+        refusals = _base_link_layers(tmp_path, base, [("usr/lib/h/x.py", b"x")])
+        assert refusals == [("name", "layer 5: usr/lib/h/x.py (an entry below a symlink)")]
+
+    def test_folder_that_replaces_a_base_symlink_resets_it(self, tmp_path):
+        added = [("usr/lib/x", None, {"directory": True, "mode": 0o755}), ("usr/lib/x/ok.py", b"x")]
+        assert _base_link_layers(tmp_path, [("usr/lib/x", None, {"symlink": "../share"})], added) == []
+
+    def test_base_that_is_not_the_pinned_one_is_refused(self, tmp_path):
+        package_path = _package(tmp_path)
+        layers = _good_layers(package_path)
+        base = {"diffIds": {"arm64": ["sha256:" + "0" * 64]}}
+        report, _ = check_layers(_save(tmp_path, layers), TREE, [read_package(package_path)], LOCK, base=base)
+        assert ("base", "the first 1 layer(s) are not the pinned base image") in report.refusals
+
+    def test_architecture_without_a_pinned_base_is_refused(self, tmp_path):
+        package_path = _package(tmp_path)
+        layers = _good_layers(package_path)
+        base = {"diffIds": {"amd64": [_diff_id(layers[0])]}}
+        report, _ = check_layers(_save(tmp_path, layers), TREE, [read_package(package_path)], LOCK, base=base)
+        assert ("base", "no pinned base layers for architecture 'arm64'") in report.refusals
+
+    def test_config_layer_count_that_differs_from_the_save_is_refused(self, tmp_path):
+        package_path = _package(tmp_path)
+        layers = _good_layers(package_path)
+        path = _save(tmp_path, layers)
+        with tarfile.open(path) as outer:
+            members = {m.name: outer.extractfile(m).read() for m in outer if m.isfile()}
+        members["blobs/sha256/config"] = _config(layers[:2])
+        with tarfile.open(path, "w") as outer:
+            for name, data in members.items():
+                _add(outer, name, data)
+        report, _ = check_layers(path, TREE, [read_package(package_path)], LOCK)
+        assert ("base", "the config lists 2 layers, the save holds 4") in report.refusals
+
+    def test_oci_layout_reads_the_config(self, tmp_path):
+        package_path = _package(tmp_path)
+        layers = [[("bin", None, {"symlink": "usr/bin"})]] + _good_layers(package_path)
+        base = {"diffIds": {"arm64": [_diff_id(layers[0])]}}
+        report, _ = check_layers(_save_oci(tmp_path, layers), TREE, [read_package(package_path)], LOCK, base=base)
+        assert report.refusals == []
+
+
+class TestFixRound4Resolver:
+    def test_the_rest_of_the_path_is_kept_after_a_substitution(self):
+        from scripts.container.image_check import resolve
+        links = {"usr/x": ("sym", "/tmp/L/../../app"), "tmp/L": ("sym", "/usr/lib")}
+        assert resolve("usr/x", links) == "app"
+
+    def test_hardlink_chain_to_a_symlink_is_followed(self):
+        from scripts.container.image_check import resolve
+        links = {"a": ("hard", "b"), "b": ("hard", "c"), "c": ("sym", "usr/share")}
+        assert resolve("a/x", links) == "usr/share/x"
+
+    def test_hardlink_loop_resolves_to_none(self):
+        from scripts.container.image_check import resolve
+        assert resolve("usr/a/x", {"usr/a": ("hard", "usr/b"), "usr/b": ("hard", "usr/a")}) is None
+
+
+class TestFixRound4Names:
+    @pytest.mark.parametrize("key", ["root/a.tar.gz.001", "root/a.tar.zst.1", "root/a.tar.gz.part", "root/a.tar.gz.bak"])
+    def test_split_or_renamed_compressed_tar_is_refused(self, key):
+        assert name_refusal(key, False)
+
+    @pytest.mark.parametrize("ext", ["py", "pyi", "txt", "md", "rst", "json", "html", "h", "c"])
+    def test_every_source_extension_after_tar_is_allowed(self, ext):
+        assert name_refusal(f"usr/lib/x/codec.tar.{ext}", False) is None
+
+
+class TestFixRound4Unreadable:
+    def test_refused_message_is_kept(self, tmp_path):
+        path = tmp_path / "image.tar"
+        with tarfile.open(path, "w") as outer:
+            _add(outer, "manifest.json", b'[{"Layers": []}, {"Layers": []}]')
+        report, _ = check_layers(path, TREE, [read_package(_package(tmp_path))], LOCK)
+        assert ("unreadable", "unreadable image at layer 0: docker save holds 2 images, expected 1") in report.refusals
+
+
+class TestFixRound4Pinning:
+    def test_base_lock_with_an_empty_list_for_the_architecture_is_refused(self, tmp_path):
+        package_path = _package(tmp_path)
+        layers = _good_layers(package_path)
+        report, _ = check_layers(_save(tmp_path, layers), TREE, [read_package(package_path)], LOCK,
+                                 base={"diffIds": {"arm64": []}})
+        assert ("base", "no pinned base layers for architecture 'arm64'") in report.refusals
+
+    def test_first_layer_after_the_base_is_not_base(self, tmp_path):
+        package_path = _package(tmp_path)
+        base_entries = [("bin", None, {"symlink": "usr/bin"})]
+        layers = [base_entries] + _good_layers(package_path)
+        layers[1].append(("usr/lib/x", None, {"symlink": "../share"}))
+        base = {"diffIds": {"arm64": [_diff_id(base_entries)]}}
+        report, _ = check_layers(_save(tmp_path, layers), TREE, [read_package(package_path)], LOCK, base=base)
+        assert report.refusals == [("name", "layer 1: usr/lib/x (a link in a layer the image build adds)")]
+
+    def test_base_folder_that_replaces_a_base_symlink_resets_it(self, tmp_path):
+        package_path = _package(tmp_path)
+        base0 = [("usr/lib/x", None, {"symlink": "../share"})]
+        base1 = [("usr/lib/x", None, {"directory": True, "mode": 0o755})]
+        layers = [base0, base1] + _good_layers(package_path) + [[("usr/lib/x/ok.py", b"x")]]
+        base = {"diffIds": {"arm64": [_diff_id(base0), _diff_id(base1)]}}
+        report, _ = check_layers(_save(tmp_path, layers), TREE, [read_package(package_path)], LOCK, base=base)
+        assert report.refusals == []
+
+    def test_hardlink_under_hf_cache_in_an_added_layer_is_refused_by_the_link_rule(self, tmp_path):
+        refusals = _check(tmp_path, lambda l: l[1].append((f"{MODEL}/refs/other", None, {"hardlink": f"{MODEL}/refs/main"})))
+        assert ("name", f"layer 1: {MODEL}/refs/other (a link in a layer the image build adds)") in refusals
+
+    def test_only_the_final_extension_after_tar_decides(self):
+        assert name_refusal("usr/lib/x/codec.tar.v2.py", False) is None

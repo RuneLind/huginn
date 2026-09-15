@@ -17,6 +17,12 @@ Reads every layer of ``docker save`` and refuses on any of:
   it belongs to a pinned model revision in ``models.lock.json``, except one
   ``refs/main`` per model holding that revision. Checked in every layer, not
   only the final filesystem, for the reason whiteouts are refused.
+- **base**: the config's layer IDs must start with the pinned base image's
+  (``base.lock.json``, per architecture) and match the save's layer count.
+- **links**: a symlink or hardlink is allowed only in a base layer, or as a
+  model snapshot symlink under ``/app/hf-cache``. An entry in a later layer
+  whose parent resolves through a base link elsewhere is refused. With no links
+  in the layers the build adds, the link map cannot change after the base.
 - **scan_index**: ``scripts/audit/scan_index.py`` over the collections read
   out of the image.
 
@@ -65,8 +71,9 @@ from scripts.container.provenance import (  # noqa: E402
 # not refused. Under /app provenance refuses any file; elsewhere the Dockerfile
 # is the boundary (declared limit).
 ARCHIVE_SUFFIXES = (".zip", ".tar", ".tgz", ".tbz", ".tbz2", ".txz", ".tzst", ".7z", ".rar")
-_COMPRESSED_TAR = re.compile(r"\.tar\.([a-z0-9]+)$")
-# `.tar.<x>` is a compressed or split tar unless <x> is a source or text file.
+_COMPRESSED_TAR = re.compile(r"\.tar\.([a-z0-9.]+)$")
+# `.tar.<...>` is a compressed, split or renamed tar unless its final extension
+# is a source or text file (`codec.tar.py`).
 _NOT_ARCHIVE_AFTER_TAR = {"py", "pyi", "txt", "md", "rst", "json", "html", "h", "c"}
 _NVIDIA_DIST_INFO = re.compile(r"^nvidia_.*\.dist-info$", re.I)
 _TEXT_REPORT_MAX_BYTES = 20 * 1024 * 1024
@@ -79,9 +86,10 @@ class Report:
     refusals: list[tuple[str, str]] = field(default_factory=list)
     verified: Counter = field(default_factory=Counter)
     layers: int = 0
-    # path -> ("sym", target as written) or ("hard", target path), as of the
-    # layers read so far; a later non-link entry at the same path removes it.
+    # path -> ("sym", target as written) or ("hard", target path), recorded from
+    # the base layers only; any non-link entry at the same path removes it.
     links: dict[str, tuple[str, str]] = field(default_factory=dict)
+    base_layers: int = 0
 
     def refuse(self, check: str, detail: str) -> None:
         self.refusals.append((check, detail))
@@ -147,20 +155,21 @@ def name_refusal(key: str, is_dir: bool) -> str | None:
     if not is_dir and base.endswith("_graph.json"):
         return "a knowledge graph file name"
     tar = _COMPRESSED_TAR.search(base)
-    if not is_dir and (base.endswith(ARCHIVE_SUFFIXES) or (tar and tar.group(1) not in _NOT_ARCHIVE_AFTER_TAR)):
+    if not is_dir and (base.endswith(ARCHIVE_SUFFIXES) or (tar and tar.group(1).rsplit(".", 1)[-1] not in _NOT_ARCHIVE_AFTER_TAR)):
         return "an archive"
     if any(_NVIDIA_DIST_INFO.match(p) for p in parts):
         return "an nvidia_* dist-info"
     return None
 
 
-def _layer_paths(outer: tarfile.TarFile) -> list[str]:
+def _layer_paths(outer: tarfile.TarFile) -> tuple[list[str], str]:
+    """The layer blob paths, in order, and the config blob path."""
     names = set(outer.getnames())
     if "manifest.json" in names:
         manifest = json.load(outer.extractfile("manifest.json"))
         if len(manifest) != 1:
             raise Refused(f"docker save holds {len(manifest)} images, expected 1")
-        return list(manifest[0]["Layers"])
+        return list(manifest[0]["Layers"]), manifest[0]["Config"]
 
     def blob(digest):
         algo, value = digest.split(":", 1)
@@ -175,7 +184,26 @@ def _layer_paths(outer: tarfile.TarFile) -> list[str]:
         if "manifests" in doc:
             node = doc["manifests"]
             continue
-        return [blob(layer["digest"]) for layer in doc["layers"]]
+        return [blob(layer["digest"]) for layer in doc["layers"]], blob(doc["config"]["digest"])
+
+
+def _base_layer_count(config: dict, layer_count: int, base: dict | None, report: Report) -> int:
+    """How many leading layers are the pinned base image; 0 refuses every link."""
+    ids = config["rootfs"]["diff_ids"]
+    if len(ids) != layer_count:
+        report.refuse("base", f"the config lists {len(ids)} layers, the save holds {layer_count}")
+        return 0
+    if base is None:
+        return 0
+    architecture = config.get("architecture")
+    pinned = base["diffIds"].get(architecture)
+    if not pinned:
+        report.refuse("base", f"no pinned base layers for architecture {architecture!r}")
+        return 0
+    if ids[:len(pinned)] != pinned:
+        report.refuse("base", f"the first {len(pinned)} layer(s) are not the pinned base image")
+        return 0
+    return len(pinned)
 
 
 class _Models:
@@ -234,8 +262,13 @@ def _hf_refusal(key: str, member: tarfile.TarInfo, read, models: _Models) -> str
 
 
 def check_layers(image_tar, tree: dict, packages: list[Package], lock: dict,
-                 extract_to: Path | None = None, needle_scanner=None) -> tuple[Report, Counter]:
-    """The name, whiteout and provenance checks over every layer of ``image_tar``."""
+                 extract_to: Path | None = None, needle_scanner=None,
+                 base: dict | None = None) -> tuple[Report, Counter]:
+    """The name, whiteout, base, link and provenance checks over every layer.
+
+    ``base`` is ``base.lock.json``. Without it no layer counts as base, so any
+    link outside the model snapshots is refused (fails closed).
+    """
     report = Report()
     needle_files: Counter = Counter()
     if not packages:
@@ -257,7 +290,10 @@ def check_layers(image_tar, tree: dict, packages: list[Package], lock: dict,
     index = 0
     try:
         with tarfile.open(image_tar) as outer:
-            for index, layer_path in enumerate(_layer_paths(outer)):
+            layer_paths, config_path = _layer_paths(outer)
+            report.base_layers = _base_layer_count(json.load(outer.extractfile(config_path)),
+                                                   len(layer_paths), base, report)
+            for index, layer_path in enumerate(layer_paths):
                 report.layers += 1
                 with tarfile.open(fileobj=outer.extractfile(layer_path), mode="r|*") as layer:
                     for member in layer:
@@ -266,8 +302,10 @@ def check_layers(image_tar, tree: dict, packages: list[Package], lock: dict,
                                       extract_to, needle_scanner, needle_files)
     except (Refused, tarfile.TarError, OSError, EOFError, ValueError, KeyError, TypeError, AttributeError) as exc:
         # Added to the refusals found so far rather than raised, so those stay
-        # visible. The type only: an OSError's message can carry a path.
-        report.refuse("unreadable", f"unreadable image at layer {index}: {type(exc).__name__}")
+        # visible. Refused messages carry counts only; for anything else the
+        # type only, since an OSError's message can carry a path.
+        reason = str(exc) if isinstance(exc, Refused) else type(exc).__name__
+        report.refuse("unreadable", f"unreadable image at layer {index}: {reason}")
         return report, needle_files
 
     for package in packages:
@@ -323,19 +361,26 @@ def _check_member(index, member, layer, report, tree, expected, models, stamps, 
     refusal = name_refusal(key, member.isdir())
     if refusal:
         report.refuse("name", f"{shown} ({refusal})")
-    # The rules read paths as written. An entry whose parent resolves elsewhere
-    # would land where those rules never looked, so it is refused outright.
-    parent = posixpath.dirname(key)
-    if parent and resolve(parent, report.links) != parent:
-        report.refuse("name", f"{shown} (an entry below a symlink)")
-    if member.issym() or member.islnk():
-        report.links[key] = ("sym", member.linkname) if member.issym() else ("hard", normalize(member.linkname))
-        if member.issym() and not key.startswith(APP):
-            target = resolve(key, report.links)
-            if target is None or target in ("", "app") or target.startswith(APP):
-                report.refuse("name", f"{shown} (a symlink into /app from outside it)")
+    # Links come only from the digest-pinned base; the layers the build adds may
+    # hold none except model snapshot symlinks, whose targets _hf_refusal pins.
+    # So the link map is fixed once the base is read, and a path resolves the
+    # same way at every later layer: no link added later can redirect it.
+    is_link = member.issym() or member.islnk()
+    if index < report.base_layers:
+        if is_link:
+            report.links[key] = ("sym", member.linkname) if member.issym() else ("hard", normalize(member.linkname))
+        else:
+            report.links.pop(key, None)
     else:
-        report.links.pop(key, None)
+        # The rules read paths as written; an entry whose parent resolves
+        # through a base link would land where those rules never looked.
+        parent = posixpath.dirname(key)
+        if parent and resolve(parent, report.links) != parent:
+            report.refuse("name", f"{shown} (an entry below a symlink)")
+        if is_link and not (member.issym() and key.startswith(HF_CACHE)):
+            report.refuse("name", f"{shown} (a link in a layer the image build adds)")
+        elif not is_link:
+            report.links.pop(key, None)
 
     cache = {}
     collection_prefix = APP + COLLECTIONS_PREFIX
@@ -482,12 +527,21 @@ def _scan_index(collections_dir: Path, names, map_path) -> list[tuple[str, str]]
     return refusals
 
 
-def run(image, commit, package_paths, lock=None, map_path=None, save=None) -> int:
+def _at_commit(commit, path) -> dict | None:
+    result = subprocess.run(["git", "-C", str(REPO_ROOT), "show", f"{commit}:{path}"],
+                            capture_output=True, text=True)
+    return json.loads(result.stdout) if result.returncode == 0 else None
+
+
+def run(image, commit, package_paths, lock=None, map_path=None, save=None, base_lock=None) -> int:
     tree = git_tree(commit, str(REPO_ROOT))
     if lock is None:
-        lock = json.loads(subprocess.run(
-            ["git", "-C", str(REPO_ROOT), "show", f"{commit}:scripts/container/models.lock.json"],
-            capture_output=True, check=True, text=True).stdout)
+        lock = _at_commit(commit, "scripts/container/models.lock.json")
+    base = json.loads(Path(base_lock).read_text()) if base_lock else _at_commit(
+        commit, "scripts/container/base.lock.json")
+    if lock is None or base is None:
+        print(f"REFUSED (lock): {commit[:12]} has no models.lock.json or base.lock.json; pass --base-lock")
+        return 1
     try:
         packages = [read_package(p) for p in package_paths]
     except Refused as exc:
@@ -500,12 +554,8 @@ def run(image, commit, package_paths, lock=None, map_path=None, save=None) -> in
         if image_tar is None:
             image_tar = tmp / "image.tar"
             subprocess.run(["docker", "save", "-o", str(image_tar), image], check=True)
-        try:
-            report, needle_files = check_layers(image_tar, tree, packages, lock,
-                                                extract_to=tmp / "extracted", needle_scanner=scanner)
-        except Refused as exc:
-            print(f"REFUSED (image): {exc}")
-            return 1
+        report, needle_files = check_layers(image_tar, tree, packages, lock, extract_to=tmp / "extracted",
+                                            needle_scanner=scanner, base=base)
         print(f"image {image}: {report.layers} layers; verified files {dict(report.verified)}")
         if not report.refusals:
             report.refusals += _scan_index(tmp / "extracted" / COLLECTIONS_PREFIX.rstrip("/"),
@@ -526,8 +576,10 @@ def main(argv=None) -> int:
     ap.add_argument("--package", action="append", required=True, dest="packages")
     ap.add_argument("--map", help="Alias map for scan_index and the needle report (default: discovered)")
     ap.add_argument("--save", help="Read an existing `docker save` tar instead of saving --image")
+    ap.add_argument("--base-lock", help="base.lock.json path (default: the one in --commit)")
     args = ap.parse_args(argv)
-    return run(args.image, args.commit, args.packages, map_path=args.map, save=args.save)
+    return run(args.image, args.commit, args.packages, map_path=args.map, save=args.save,
+               base_lock=args.base_lock)
 
 
 if __name__ == "__main__":
