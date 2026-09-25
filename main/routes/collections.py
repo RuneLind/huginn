@@ -183,8 +183,8 @@ def _read_source_updated(base_dir: str, doc_id: str) -> str | None:
 
     The indexed document does not carry it (the converter's allowlist drops
     it), and its top-level ``modifiedTime`` is the source file's mtime, which a
-    bulk rewrite resets: in the Jira corpus measured 2026-09-25, 398 of 2,386
-    documents had an mtime that was not the issue's ``updated``.
+    bulk rewrite resets: in the Jira corpus measured 2026-09-25, 393 of the 2,381
+    documents carrying ``updated`` had an mtime that disagreed with it.
     """
     try:
         source_path = _resolve_source_file(base_dir, doc_id)
