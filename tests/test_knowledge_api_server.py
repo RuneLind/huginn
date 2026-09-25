@@ -734,7 +734,7 @@ class TestCollectionDocumentThumbnails(_CollectionDocumentsCase):
         assert len(calls) == 5, len(calls)  # the five resolvers
 
     def test_a_non_dict_metadata_document_never_500s_the_listing_whatever_is_asked_for(self):
-        # The four resolvers on the one-read pass share ONE metadata accessor;
+        # The five resolvers on the one-read pass share ONE metadata accessor;
         # this is the enumeration of the flags that reach it.
         client = self._client(self._store())
         for params in (
@@ -904,8 +904,14 @@ class TestCollectionDocumentSummaryKinds(_CollectionDocumentsCase):
 
 
 class TestCollectionDocumentIssueFields(_CollectionDocumentsCase):
-    """Opt-in ``include_issue_fields`` — a tracker document's status, title and
-    epic from its indexed metadata, and ``updated`` from its source file."""
+    """Opt-in ``include_issue_fields`` — a tracker document's status, title,
+    epic and ``updated``, all from its source file's frontmatter when that is
+    readable, else the first five from its indexed metadata."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_warn_once(self, monkeypatch):
+        from main.routes import collections
+        monkeypatch.setattr(collections, "_issue_warned", set(), raising=False)
 
     def _store(self, tmp_path, reader_type="localFiles") -> _FakeStore:
         mapping = {
@@ -936,7 +942,9 @@ class TestCollectionDocumentIssueFields(_CollectionDocumentsCase):
                               "status": "In review", "issue_type": "Story",
                               "epic_link": "DEMO-100", "epic_summary": "Demo epic"}}
             ),
-            # No epic → the epic keys are OMITTED (the converter stores None).
+            # No epic → the epic keys are OMITTED. The files converter drops an
+            # empty frontmatter value, so a real index has no key; a None, which
+            # no converter writes, is omitted the same way.
             "ji/documents/DEMO-102_No_epic.md.json": json.dumps(
                 {"metadata": {"title": "No epic", "status": "Done", "issue_type": "Bug",
                               "epic_link": None, "epic_summary": None}}
@@ -951,8 +959,9 @@ class TestCollectionDocumentIssueFields(_CollectionDocumentsCase):
             "ji/documents/DEMO-105_String_metadata.md.json": json.dumps({"metadata": "a string"}),
         }
         (tmp_path / "DEMO-101_Build_the_thing.md").write_text(
-            '---\ntitle: Build the thing\nstatus: In review\n'
-            'updated: "2024-12-03T16:14:21.000+0100"\n---\n\n# DEMO-101\n'
+            '---\ntitle: "Build the thing"\nissue_key: DEMO-101\nstatus: "In review"\n'
+            'issue_type: "Story"\nupdated: "2024-12-03T16:14:21.000+0100"\n'
+            'epic_link: "DEMO-100"\nepic_summary: "Demo epic"\n---\n\n# DEMO-101\n'
         )
         (tmp_path / "DEMO-102_No_epic.md").write_text("# No frontmatter at all\n")
         (tmp_path / "DEMO-103_Blank_fields.md").write_text('---\nupdated: ""\n---\nbody\n')
@@ -986,10 +995,12 @@ class TestCollectionDocumentIssueFields(_CollectionDocumentsCase):
             "url": "https://tracker.example.invalid/browse/DEMO-102",
             "status": "Done", "title": "No epic", "issue_type": "Bug",
         }
+        # Source with an empty frontmatter block → the indexed metadata. The
+        # title is free text and is served as stored, padding included.
         assert by_id["DEMO-103_Blank_fields.md"] == {
             "id": "DEMO-103_Blank_fields.md",
             "url": "https://tracker.example.invalid/browse/DEMO-103",
-            "title": "Padded title",
+            "title": "  Padded title  ",
         }
         # Source file missing → no `updated`, the metadata fields still list.
         assert by_id["DEMO-104_Source_gone.md"]["status"] == "To do"
@@ -1044,6 +1055,90 @@ class TestCollectionDocumentIssueFields(_CollectionDocumentsCase):
         self._docs(store, include_dates="1", include_issue_fields="1")
         assert reads.count("ji/documents/DEMO-101_Build_the_thing.md.json") == 1
         assert reads.count("ji/manifest.json") == 1
+
+
+    @pytest.mark.parametrize("manifest", [
+        [{"reader": {"type": "localFiles"}}],
+        {"reader": "localFiles"},
+        {"reader": {"type": "localFiles", "basePath": 7}},
+        {"reader": {"type": "localFiles", "basePath": ["a", "b"]}},
+    ], ids=["list", "reader-string", "basepath-int", "basepath-list"])
+    def test_a_wrong_shaped_manifest_degrades_to_the_indexed_fields(self, tmp_path, manifest):
+        store = self._store(tmp_path)
+        store._files["ji/manifest.json"] = json.dumps(manifest)
+        by_id = self._docs(store, include_issue_fields="1")
+        assert by_id["DEMO-101_Build_the_thing.md"]["status"] == "In review"
+        assert all("updated" not in d for d in by_id.values())
+
+    def test_a_non_string_document_id_degrades_to_the_indexed_fields(self, tmp_path):
+        store = self._store(tmp_path)
+        store._files["ji/indexes/index_document_mapping.json"] = json.dumps({
+            "1": {"documentId": 101, "documentUrl": "https://tracker.example.invalid/browse/DEMO-101",
+                  "documentPath": "ji/documents/DEMO-101_Build_the_thing.md.json"},
+        })
+        docs = self._client(store).get(
+            "/api/collection/ji/documents", params={"include_issue_fields": "1"}).json()["documents"]
+        assert docs == [{"id": 101, "url": "https://tracker.example.invalid/browse/DEMO-101",
+                         "status": "In review", "title": "Build the thing", "issue_type": "Story",
+                         "epic_link": "DEMO-100", "epic_summary": "Demo epic"}]
+
+    def test_a_source_rewritten_before_the_reindex_is_served_whole(self, tmp_path):
+        # The ingest writes the source first; until the reindex the index is
+        # stale. Every field comes from the source, none from the index.
+        store = self._store(tmp_path)
+        (tmp_path / "DEMO-101_Build_the_thing.md").write_text(
+            '---\ntitle: "Build the thing, renamed"\nstatus: "Done"\nissue_type: "Story"\n'
+            'updated: "2025-02-03T04:05:06.000+0100"\nepic_link: ""\n---\nbody\n'
+        )
+        by_id = self._docs(store, include_issue_fields="1")
+        assert by_id["DEMO-101_Build_the_thing.md"] == {
+            "id": "DEMO-101_Build_the_thing.md",
+            "url": "https://tracker.example.invalid/browse/DEMO-101",
+            "title": "Build the thing, renamed", "status": "Done", "issue_type": "Story",
+            "updated": "2025-02-03T04:05:06.000+0100",
+        }
+
+    def test_an_escaped_updated_is_served_as_iso_8601(self, tmp_path):
+        from datetime import datetime
+        store = self._store(tmp_path)
+        (tmp_path / "DEMO-101_Build_the_thing.md").write_text(
+            '---\nstatus: "In review"\nupdated: "2024-01-02T03\\:04\\:05.000+0100"\n---\n'
+        )
+        updated = self._docs(store, include_issue_fields="1")["DEMO-101_Build_the_thing.md"]["updated"]
+        assert updated == "2024-01-02T03:04:05.000+0100"
+        assert datetime.fromisoformat(updated).utcoffset().total_seconds() == 3600
+
+    def test_matched_fields_are_stripped_and_free_text_is_served_as_stored(self, tmp_path):
+        store = self._store(tmp_path)
+        (tmp_path / "DEMO-101_Build_the_thing.md").write_text(
+            '---\ntitle: "  Padded title  "\nstatus: "  Done  "\nissue_type: " Bug "\n'
+            'epic_link: " DEMO-100 "\nepic_summary: " Padded epic "\n'
+            'updated: " 2025-02-03T04:05:06.000+0100 "\n---\n'
+        )
+        doc = self._docs(store, include_issue_fields="1")["DEMO-101_Build_the_thing.md"]
+        assert doc["title"] == "  Padded title  "
+        assert doc["epic_summary"] == " Padded epic "
+        assert (doc["status"], doc["issue_type"], doc["epic_link"], doc["updated"]) == (
+            "Done", "Bug", "DEMO-100", "2025-02-03T04:05:06.000+0100")
+
+    @pytest.mark.parametrize("breakage", ["manifest-unreadable", "basepath-missing", "source-undecodable"])
+    def test_a_repeated_failure_warns_once_per_process(self, tmp_path, caplog, breakage):
+        import logging
+        store = self._store(tmp_path)
+        if breakage == "manifest-unreadable":
+            store._files["ji/manifest.json"] = "{not json"
+        elif breakage == "basepath-missing":
+            store._files["ji/manifest.json"] = json.dumps(
+                {"reader": {"type": "localFiles", "basePath": str(tmp_path / "gone")}})
+        else:
+            for name in ("DEMO-101_Build_the_thing.md", "DEMO-105_String_metadata.md"):
+                (tmp_path / name).write_bytes(b'---\ntitle: "caf\xe9"\n---\n')
+        with caplog.at_level(logging.DEBUG):
+            for _ in range(3):
+                self._docs(store, include_issue_fields="1")
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warnings) == 1, [r.getMessage() for r in warnings]
+        assert warnings[0].exc_info is None
 
 
 class TestCollectionDocumentScores(_CollectionDocumentsCase):

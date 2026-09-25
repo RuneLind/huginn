@@ -25,7 +25,7 @@ from main.runtime.knowledge_store import (
     maybe_enqueue_reindex,
     run_collection_update,
 )
-from main.utils.frontmatter import normalize_frontmatter_string, read_frontmatter_from_path
+from main.utils.frontmatter import normalize_frontmatter_string, read_frontmatter
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +102,7 @@ def _doc_metadata(doc: dict) -> dict:
     """The document's frontmatter metadata, or ``{}`` when it is not a dict.
 
     THE one accessor for every resolver on the listing's one-read pass (dates,
-    scores, thumbnails, summary kinds). A document whose ``metadata`` parsed to
+    scores, thumbnails, summary kinds, issue fields). A document whose ``metadata`` parsed to
     a string used to 500 the whole listing from whichever resolver touched it
     first — the class was closed one branch at a time until this, which is the
     enumeration:
@@ -152,47 +152,137 @@ def _resolve_doc_scores(doc: dict) -> dict[str, float]:
     return scores
 
 
-#: Tracker fields attached by ``include_issue_fields``, read from the indexed
-#: document's metadata. The files converter's frontmatter allowlist decides
-#: which of them a collection's documents can carry.
+#: Tracker fields attached by ``include_issue_fields`` besides ``updated``.
 ISSUE_FIELDS = ("status", "title", "issue_type", "epic_link", "epic_summary")
 
+#: The ISSUE_FIELDS a consumer matches or groups on, so they are served
+#: stripped (``normalize_frontmatter_string``). ``title`` and ``epic_summary``
+#: are free text and are served as stored.
+_MATCHED_ISSUE_FIELDS = frozenset({"status", "issue_type", "epic_link"})
 
-def _resolve_issue_fields(doc: dict) -> dict[str, str]:
-    """The ``ISSUE_FIELDS`` a document has, stripped. Absent, blank or
-    non-string values are omitted, the same omit rule as the kinds."""
-    metadata = _doc_metadata(doc)
+#: How much of a source file the issue-field read looks at, in characters: the
+#: same head ``read_frontmatter_from_path`` reads.
+_SOURCE_HEAD_CHARS = 8192
+
+#: ``(collection, reason)`` pairs already logged at WARNING by the issue-field
+#: read. Every flagged request repeats the same failure, so the first is a
+#: warning and the rest are debug, for the life of the process.
+_issue_warned: set[tuple[str, str]] = set()
+
+
+def _warn_once(collection: str, reason: str, message: str, *args) -> None:
+    key = (collection, reason)
+    if key in _issue_warned:
+        logger.debug(message, *args)
+        return
+    _issue_warned.add(key)
+    logger.warning(message + " (logged once per process)", *args)
+
+
+def _pick_issue_fields(values: dict) -> dict[str, str]:
+    """The ``ISSUE_FIELDS`` in ``values``. Absent, blank or non-string values
+    are omitted; see ``_MATCHED_ISSUE_FIELDS`` for which ones are stripped."""
     fields: dict[str, str] = {}
     for field in ISSUE_FIELDS:
-        value = normalize_frontmatter_string(metadata.get(field))
-        if value:
-            fields[field] = value
+        value = values.get(field)
+        if not normalize_frontmatter_string(value):
+            continue
+        fields[field] = value.strip() if field in _MATCHED_ISSUE_FIELDS else value
+    return fields
+
+
+def _source_updated(frontmatter: dict) -> str | None:
+    """The source frontmatter's ``updated``, stripped, with ``\\:`` read as ``:``.
+
+    Some Jira sources on disk carry a YAML-escaped timestamp
+    (``2024-01-02T03\\:04\\:05.000+0100``), which no ISO 8601 parser accepts.
+    """
+    value = normalize_frontmatter_string(frontmatter.get("updated"))
+    return value.replace("\\:", ":") if value else None
+
+
+def _resolve_issue_fields(doc: dict, source: dict | None) -> dict[str, str]:
+    """A document's issue fields, all from ONE snapshot.
+
+    ``source`` is the source file's frontmatter, or ``None`` when it could not
+    be read. With it, all six fields come from the source; without it, the five
+    ``ISSUE_FIELDS`` come from the indexed metadata and ``updated`` is omitted
+    (the indexed document does not keep it). The two are never mixed: between
+    a source rewrite and the reindex, the index is stale, and pairing its
+    ``status`` with the source's ``updated`` would present an old status as
+    current.
+    """
+    if source is None:
+        return _pick_issue_fields(_doc_metadata(doc))
+    fields = _pick_issue_fields(source)
+    updated = _source_updated(source)
+    if updated:
+        fields["updated"] = updated
     return fields
 
 
 def _issue_source_base_dir(store: KnowledgeStore, name: str) -> str | None:
-    """The collection's source tree, or ``None`` when it has none to read."""
-    try:
-        return _localfiles_base_path(store, name, operation="issue field reading")
-    except HTTPException:
-        return None
+    """The collection's source tree, or ``None`` when it has none to read.
 
-
-def _read_source_updated(base_dir: str, doc_id: str) -> str | None:
-    """The ``updated`` key of the source file's frontmatter, or ``None``.
-
-    The indexed document does not carry it (the converter's allowlist drops
-    it), and its top-level ``modifiedTime`` is the source file's mtime, which a
-    bulk rewrite resets: in the Jira corpus measured 2026-09-25, 393 of the 2,381
-    documents carrying ``updated`` had an mtime that disagreed with it.
+    Never raises: a missing, unparseable or wrong-shaped manifest, a reader
+    that is not localFiles, or a basePath that does not resolve all mean "no
+    source fields for this collection", not a failed listing. Separate from
+    ``_localfiles_base_path``, which answers the raw-source and delete routes
+    with a 4xx/5xx and logs on every call.
     """
     try:
+        manifest = json.loads(store.disk_persister.read_text_file(f"{name}/manifest.json"))
+    except Exception as e:
+        _warn_once(name, "manifest-unreadable",
+                   "Issue fields for %s: could not read the manifest (%s)", name, type(e).__name__)
+        return None
+    reader = (manifest.get("reader") or {}) if isinstance(manifest, dict) else None
+    if not isinstance(reader, dict):
+        _warn_once(name, "manifest-shape",
+                   "Issue fields for %s: the manifest or its reader is not an object", name)
+        return None
+    if reader.get("type") != "localFiles":
+        return None
+    base_path = reader.get("basePath")
+    if not isinstance(base_path, str) or not base_path:
+        _warn_once(name, "basepath-invalid",
+                   "Issue fields for %s: reader.basePath is missing or not a string", name)
+        return None
+    try:
+        resolved = os.path.realpath(base_path)
+    except (OSError, ValueError):
+        resolved = None
+    if not resolved or not os.path.isdir(resolved):
+        _warn_once(name, "basepath-missing",
+                   "Issue fields for %s: reader.basePath %r does not resolve to a directory",
+                   name, base_path)
+        return None
+    return resolved
+
+
+def _read_source_frontmatter(name: str, base_dir: str, doc_id) -> dict | None:
+    """The source file's frontmatter, or ``None`` when it cannot be read.
+
+    ``None`` covers a non-string or refused document id, a missing file, a file
+    that is not UTF-8, and a file with no frontmatter block in its first
+    ``_SOURCE_HEAD_CHARS`` characters. Never raises.
+    """
+    if not isinstance(doc_id, str):
+        return None
+    try:
         source_path = _resolve_source_file(base_dir, doc_id)
-    except HTTPException:
+    except (HTTPException, OSError, ValueError):
         return None
     if not os.path.isfile(source_path):
         return None
-    return normalize_frontmatter_string(read_frontmatter_from_path(source_path).get("updated"))
+    try:
+        with open(source_path, "r", encoding="utf-8") as f:
+            head = f.read(_SOURCE_HEAD_CHARS)
+    except (OSError, UnicodeDecodeError) as e:
+        _warn_once(name, "source-unreadable",
+                   "Issue fields for %s: could not read source %s (%s)", name, doc_id, type(e).__name__)
+        return None
+    return read_frontmatter(head) or None
 
 
 def _read_doc(store: KnowledgeStore, doc_path: str) -> dict | None:
@@ -272,15 +362,25 @@ def list_collection_documents(
 
     When ``include_issue_fields`` is set, each entry carries whichever of
     ``status`` / ``title`` / ``issue_type`` / ``epic_link`` / ``epic_summary``
-    its indexed metadata has, stripped, plus ``updated``: the ``updated`` key
-    of the SOURCE file's frontmatter (the Jira issue's last-updated time for a
-    Jira document), read from basePath because the indexed document does not
-    keep it. A field that is absent, blank or not a string is OMITTED, never
-    null — the same rule as the kinds. ``modifiedTime`` from ``include_dates``
-    is the source file's mtime, not ``updated``: a bulk rewrite resets it. The
-    flag is not tied to one collection; ``updated`` needs a localFiles reader,
-    and is omitted for any other. The issue key is the document id's prefix
-    before the first ``_`` for Jira documents, so it is not repeated here.
+    / ``updated`` it has, all from ONE snapshot per document. When the
+    collection has a localFiles reader and the document's source file has a
+    readable frontmatter block, all six come from that frontmatter (``updated``
+    is the Jira issue's last-updated time for a Jira document, with a
+    YAML-escaped ``\\:`` read as ``:``). Otherwise — any other reader, a
+    basePath that does not resolve, a missing, non-UTF-8 or frontmatter-less
+    source — the five come from the indexed metadata and ``updated`` is
+    omitted, since the indexed document does not keep it. The two are never
+    mixed: the Jira ingest writes the source before the reindex, so the index
+    can be stale, and a fresh ``updated`` beside a stale ``status`` would
+    present the old status as current. A failure to read either side is "no
+    fields from that side", never an error response. A field that is absent,
+    blank or not a string is OMITTED, never null — the same rule as the kinds.
+    ``status``, ``issue_type`` and ``epic_link`` are served stripped;
+    ``title`` and ``epic_summary`` are free text and are served as stored.
+    ``modifiedTime`` from ``include_dates`` is the source file's mtime, not
+    ``updated``: a bulk rewrite resets it. The flag is not tied to one
+    collection. The issue key is the document id's prefix before the first
+    ``_`` for Jira documents, so it is not repeated here.
 
     All five flags read every document file, so they are opt-in to keep the
     default listing (used by hot paths like duplicate checks) cheap. Setting
@@ -339,10 +439,9 @@ def list_collection_documents(
                 if summary_kind:
                     doc["summary_kind"] = summary_kind
             if include_issue_fields:
-                doc.update(_resolve_issue_fields(raw))
-                updated = _read_source_updated(issue_base_dir, doc_id) if issue_base_dir else None
-                if updated:
-                    doc["updated"] = updated
+                source = (_read_source_frontmatter(name, issue_base_dir, doc_id)
+                          if issue_base_dir else None)
+                doc.update(_resolve_issue_fields(raw, source))
         documents.append(doc)
 
     return {"documents": documents}
