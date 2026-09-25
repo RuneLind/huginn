@@ -25,7 +25,7 @@ from main.runtime.knowledge_store import (
     maybe_enqueue_reindex,
     run_collection_update,
 )
-from main.utils.frontmatter import normalize_frontmatter_string
+from main.utils.frontmatter import normalize_frontmatter_string, read_frontmatter_from_path
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +152,49 @@ def _resolve_doc_scores(doc: dict) -> dict[str, float]:
     return scores
 
 
+#: Tracker fields attached by ``include_issue_fields``, read from the indexed
+#: document's metadata. The files converter's frontmatter allowlist decides
+#: which of them a collection's documents can carry.
+ISSUE_FIELDS = ("status", "title", "issue_type", "epic_link", "epic_summary")
+
+
+def _resolve_issue_fields(doc: dict) -> dict[str, str]:
+    """The ``ISSUE_FIELDS`` a document has, stripped. Absent, blank or
+    non-string values are omitted, the same omit rule as the kinds."""
+    metadata = _doc_metadata(doc)
+    fields: dict[str, str] = {}
+    for field in ISSUE_FIELDS:
+        value = normalize_frontmatter_string(metadata.get(field))
+        if value:
+            fields[field] = value
+    return fields
+
+
+def _issue_source_base_dir(store: KnowledgeStore, name: str) -> str | None:
+    """The collection's source tree, or ``None`` when it has none to read."""
+    try:
+        return _localfiles_base_path(store, name, operation="issue field reading")
+    except HTTPException:
+        return None
+
+
+def _read_source_updated(base_dir: str, doc_id: str) -> str | None:
+    """The ``updated`` key of the source file's frontmatter, or ``None``.
+
+    The indexed document does not carry it (the converter's allowlist drops
+    it), and its top-level ``modifiedTime`` is the source file's mtime, which a
+    bulk rewrite resets: in the Jira corpus measured 2026-09-25, 398 of 2,386
+    documents had an mtime that was not the issue's ``updated``.
+    """
+    try:
+        source_path = _resolve_source_file(base_dir, doc_id)
+    except HTTPException:
+        return None
+    if not os.path.isfile(source_path):
+        return None
+    return normalize_frontmatter_string(read_frontmatter_from_path(source_path).get("updated"))
+
+
 def _read_doc(store: KnowledgeStore, doc_path: str) -> dict | None:
     """Read and parse a single document JSON, or return ``None`` on error.
 
@@ -187,6 +230,12 @@ def list_collection_documents(
         False,
         description="Attach each document's frontmatter summary_kind when it has one. Slower — reads every document file.",
     ),
+    include_issue_fields: bool = Query(
+        False,
+        description="Attach each document's tracker fields (status, title, issue_type, epic_link, "
+                    "epic_summary, updated) when it has them. Slower — reads every document file "
+                    "and its source file.",
+    ),
     store: KnowledgeStore = Depends(get_store),
 ):
     """List all documents in a collection with their IDs and URLs.
@@ -221,7 +270,19 @@ def list_collection_documents(
     treats a failed read as not-a-duplicate. The listing cannot tell the two
     apart.
 
-    All four flags read every document file, so they are opt-in to keep the
+    When ``include_issue_fields`` is set, each entry carries whichever of
+    ``status`` / ``title`` / ``issue_type`` / ``epic_link`` / ``epic_summary``
+    its indexed metadata has, stripped, plus ``updated``: the ``updated`` key
+    of the SOURCE file's frontmatter (the Jira issue's last-updated time for a
+    Jira document), read from basePath because the indexed document does not
+    keep it. A field that is absent, blank or not a string is OMITTED, never
+    null — the same rule as the kinds. ``modifiedTime`` from ``include_dates``
+    is the source file's mtime, not ``updated``: a bulk rewrite resets it. The
+    flag is not tied to one collection; ``updated`` needs a localFiles reader,
+    and is omitted for any other. The issue key is the document id's prefix
+    before the first ``_`` for Jira documents, so it is not repeated here.
+
+    All five flags read every document file, so they are opt-in to keep the
     default listing (used by hot paths like duplicate checks) cheap. Setting
     several still reads each file only once.
     """
@@ -236,6 +297,8 @@ def list_collection_documents(
     except Exception:
         return {"documents": []}
 
+    issue_base_dir = _issue_source_base_dir(store, name) if include_issue_fields else None
+
     seen_ids = set()
     documents = []
     for entry in mapping.values():
@@ -245,7 +308,8 @@ def list_collection_documents(
             continue
         seen_ids.add(doc_id)
         doc = {"id": doc_id, "url": doc_url}
-        if include_dates or include_scores or include_thumbnails or include_summary_kinds:
+        if (include_dates or include_scores or include_thumbnails or include_summary_kinds
+                or include_issue_fields):
             parsed = _read_doc(store, entry.get("documentPath", ""))
             # A document JSON that parses to a list/string is still "unreadable"
             # for our purposes — the resolvers below call ``.get``, so anything
@@ -274,6 +338,11 @@ def list_collection_documents(
                 summary_kind = normalize_frontmatter_string(_doc_metadata(raw).get("summary_kind"))
                 if summary_kind:
                     doc["summary_kind"] = summary_kind
+            if include_issue_fields:
+                doc.update(_resolve_issue_fields(raw))
+                updated = _read_source_updated(issue_base_dir, doc_id) if issue_base_dir else None
+                if updated:
+                    doc["updated"] = updated
         documents.append(doc)
 
     return {"documents": documents}
