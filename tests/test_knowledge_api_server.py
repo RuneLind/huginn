@@ -731,10 +731,10 @@ class TestCollectionDocumentThumbnails(_CollectionDocumentsCase):
                 reads.append(ast.unparse(node))
         assert reads == ['doc.get(\'metadata\')'], reads
         calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "_doc_metadata"]
-        assert len(calls) == 4, len(calls)  # the four resolvers
+        assert len(calls) == 5, len(calls)  # the five resolvers
 
     def test_a_non_dict_metadata_document_never_500s_the_listing_whatever_is_asked_for(self):
-        # The four resolvers on the one-read pass share ONE metadata accessor;
+        # The five resolvers on the one-read pass share ONE metadata accessor;
         # this is the enumeration of the flags that reach it.
         client = self._client(self._store())
         for params in (
@@ -742,8 +742,9 @@ class TestCollectionDocumentThumbnails(_CollectionDocumentsCase):
             {"include_scores": "1"},
             {"include_thumbnails": "1"},
             {"include_summary_kinds": "1"},
+            {"include_issue_fields": "1"},
             {"include_dates": "1", "include_scores": "1", "include_thumbnails": "1",
-             "include_summary_kinds": "1"},
+             "include_summary_kinds": "1", "include_issue_fields": "1"},
         ):
             res = client.get("/api/collection/vm/documents", params=params)
             assert res.status_code == 200, params
@@ -900,6 +901,244 @@ class TestCollectionDocumentSummaryKinds(_CollectionDocumentsCase):
         by_id = {d["id"]: d for d in docs}
         assert "summary_kind" not in by_id["ai/F.md"]
         assert by_id["ai/G.md"]["summary_kind"] == "deep"
+
+
+class TestCollectionDocumentIssueFields(_CollectionDocumentsCase):
+    """Opt-in ``include_issue_fields`` — a tracker document's status, title,
+    epic and ``updated``, all from its source file's frontmatter when that is
+    readable, else the first five from its indexed metadata."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_warn_once(self, monkeypatch):
+        from main.routes import collections
+        monkeypatch.setattr(collections, "_issue_warned", set(), raising=False)
+
+    def _store(self, tmp_path, reader_type="localFiles") -> _FakeStore:
+        mapping = {
+            "1": {"documentId": "DEMO-101_Build_the_thing.md",
+                  "documentUrl": "https://tracker.example.invalid/browse/DEMO-101",
+                  "documentPath": "ji/documents/DEMO-101_Build_the_thing.md.json"},
+            "2": {"documentId": "DEMO-102_No_epic.md",
+                  "documentUrl": "https://tracker.example.invalid/browse/DEMO-102",
+                  "documentPath": "ji/documents/DEMO-102_No_epic.md.json"},
+            "3": {"documentId": "DEMO-103_Blank_fields.md",
+                  "documentUrl": "https://tracker.example.invalid/browse/DEMO-103",
+                  "documentPath": "ji/documents/DEMO-103_Blank_fields.md.json"},
+            "4": {"documentId": "DEMO-104_Source_gone.md",
+                  "documentUrl": "https://tracker.example.invalid/browse/DEMO-104",
+                  "documentPath": "ji/documents/DEMO-104_Source_gone.md.json"},
+            "5": {"documentId": "DEMO-105_String_metadata.md",
+                  "documentUrl": "https://tracker.example.invalid/browse/DEMO-105",
+                  "documentPath": "ji/documents/DEMO-105_String_metadata.md.json"},
+        }
+        files = {
+            "ji/manifest.json": json.dumps(
+                {"reader": {"type": reader_type, "basePath": str(tmp_path)}}
+            ),
+            "ji/indexes/index_document_mapping.json": json.dumps(mapping),
+            "ji/documents/DEMO-101_Build_the_thing.md.json": json.dumps(
+                {"modifiedTime": "2026-03-08T21:09:25.000000",
+                 "metadata": {"title": "Build the thing", "issue_key": "DEMO-101",
+                              "status": "In review", "issue_type": "Story",
+                              "epic_link": "DEMO-100", "epic_summary": "Demo epic"}}
+            ),
+            # No epic → the epic keys are OMITTED. The files converter drops an
+            # empty frontmatter value, so a real index has no key; a None, which
+            # no converter writes, is omitted the same way.
+            "ji/documents/DEMO-102_No_epic.md.json": json.dumps(
+                {"metadata": {"title": "No epic", "status": "Done", "issue_type": "Bug",
+                              "epic_link": None, "epic_summary": None}}
+            ),
+            # Blank and non-string values are omitted too, never served.
+            "ji/documents/DEMO-103_Blank_fields.md.json": json.dumps(
+                {"metadata": {"title": "  Padded title  ", "status": "   ", "issue_type": 7}}
+            ),
+            "ji/documents/DEMO-104_Source_gone.md.json": json.dumps(
+                {"metadata": {"title": "Source gone", "status": "To do"}}
+            ),
+            "ji/documents/DEMO-105_String_metadata.md.json": json.dumps({"metadata": "a string"}),
+        }
+        (tmp_path / "DEMO-101_Build_the_thing.md").write_text(
+            '---\ntitle: "Build the thing"\nissue_key: DEMO-101\nstatus: "In review"\n'
+            'issue_type: "Story"\nupdated: "2024-12-03T16:14:21.000+0100"\n'
+            'epic_link: "DEMO-100"\nepic_summary: "Demo epic"\n---\n\n# DEMO-101\n'
+        )
+        (tmp_path / "DEMO-102_No_epic.md").write_text("# No frontmatter at all\n")
+        (tmp_path / "DEMO-103_Blank_fields.md").write_text('---\nupdated: ""\n---\nbody\n')
+        (tmp_path / "DEMO-105_String_metadata.md").write_text(
+            '---\nupdated: "2025-01-02T03:04:05.000+0100"\n---\nbody\n'
+        )
+        return _FakeStore(files, {"ji"})
+
+    def _docs(self, store, **params):
+        client = self._client(store)
+        res = client.get("/api/collection/ji/documents", params=params)
+        assert res.status_code == 200
+        return {d["id"]: d for d in res.json()["documents"]}
+
+    def test_default_listing_is_unchanged(self, tmp_path):
+        by_id = self._docs(self._store(tmp_path))
+        assert all(set(d) == {"id", "url"} for d in by_id.values())
+
+    def test_include_issue_fields_attaches_the_metadata_fields(self, tmp_path):
+        by_id = self._docs(self._store(tmp_path), include_issue_fields="1")
+        assert by_id["DEMO-101_Build_the_thing.md"] == {
+            "id": "DEMO-101_Build_the_thing.md",
+            "url": "https://tracker.example.invalid/browse/DEMO-101",
+            "status": "In review", "title": "Build the thing", "issue_type": "Story",
+            "epic_link": "DEMO-100", "epic_summary": "Demo epic",
+            # From the SOURCE frontmatter, not the indexed modifiedTime.
+            "updated": "2024-12-03T16:14:21.000+0100",
+        }
+        assert by_id["DEMO-102_No_epic.md"] == {
+            "id": "DEMO-102_No_epic.md",
+            "url": "https://tracker.example.invalid/browse/DEMO-102",
+            "status": "Done", "title": "No epic", "issue_type": "Bug",
+        }
+        # Source with an empty frontmatter block → the indexed metadata. The
+        # title is free text and is served as stored, padding included.
+        assert by_id["DEMO-103_Blank_fields.md"] == {
+            "id": "DEMO-103_Blank_fields.md",
+            "url": "https://tracker.example.invalid/browse/DEMO-103",
+            "title": "  Padded title  ",
+        }
+        # Source file missing → no `updated`, the metadata fields still list.
+        assert by_id["DEMO-104_Source_gone.md"]["status"] == "To do"
+        assert "updated" not in by_id["DEMO-104_Source_gone.md"]
+        # Non-dict metadata → no metadata fields, but the source still answers.
+        assert by_id["DEMO-105_String_metadata.md"] == {
+            "id": "DEMO-105_String_metadata.md",
+            "url": "https://tracker.example.invalid/browse/DEMO-105",
+            "updated": "2025-01-02T03:04:05.000+0100",
+        }
+
+    def test_modified_time_still_comes_only_from_include_dates(self, tmp_path):
+        by_id = self._docs(self._store(tmp_path), include_dates="1", include_issue_fields="1")
+        doc = by_id["DEMO-101_Build_the_thing.md"]
+        assert doc["modifiedTime"] == "2026-03-08T21:09:25.000000"
+        assert doc["updated"] == "2024-12-03T16:14:21.000+0100"
+        by_id = self._docs(self._store(tmp_path), include_issue_fields="1")
+        assert "modifiedTime" not in by_id["DEMO-101_Build_the_thing.md"]
+
+    def test_a_non_local_files_collection_gets_no_updated(self, tmp_path):
+        by_id = self._docs(self._store(tmp_path, reader_type="notion"), include_issue_fields="1")
+        assert by_id["DEMO-101_Build_the_thing.md"]["status"] == "In review"
+        assert all("updated" not in d for d in by_id.values())
+
+    def test_a_collection_without_a_manifest_still_lists(self, tmp_path):
+        store = self._store(tmp_path)
+        del store._files["ji/manifest.json"]
+        by_id = self._docs(store, include_issue_fields="1")
+        assert by_id["DEMO-101_Build_the_thing.md"]["status"] == "In review"
+        assert all("updated" not in d for d in by_id.values())
+
+    def test_a_traversing_id_is_never_read(self, tmp_path):
+        base = tmp_path / "src"
+        base.mkdir()
+        (tmp_path / "outside.md").write_text('---\nupdated: "leaked"\n---\n')
+        store = self._store(base)
+        store._files["ji/indexes/index_document_mapping.json"] = json.dumps({
+            "1": {"documentId": "../outside.md", "documentUrl": "https://tracker.example.invalid/x",
+                  "documentPath": "ji/documents/DEMO-101_Build_the_thing.md.json"},
+        })
+        by_id = self._docs(store, include_issue_fields="1")
+        assert "updated" not in by_id["../outside.md"]
+
+    def test_issue_fields_and_dates_share_one_document_read(self, tmp_path):
+        store = self._store(tmp_path)
+        reads = []
+        real = store.read_text_file
+        def counting(path):
+            reads.append(path)
+            return real(path)
+        store.read_text_file = counting
+        self._docs(store, include_dates="1", include_issue_fields="1")
+        assert reads.count("ji/documents/DEMO-101_Build_the_thing.md.json") == 1
+        assert reads.count("ji/manifest.json") == 1
+
+
+    @pytest.mark.parametrize("manifest", [
+        [{"reader": {"type": "localFiles"}}],
+        {"reader": "localFiles"},
+        {"reader": {"type": "localFiles", "basePath": 7}},
+        {"reader": {"type": "localFiles", "basePath": ["a", "b"]}},
+    ], ids=["list", "reader-string", "basepath-int", "basepath-list"])
+    def test_a_wrong_shaped_manifest_degrades_to_the_indexed_fields(self, tmp_path, manifest):
+        store = self._store(tmp_path)
+        store._files["ji/manifest.json"] = json.dumps(manifest)
+        by_id = self._docs(store, include_issue_fields="1")
+        assert by_id["DEMO-101_Build_the_thing.md"]["status"] == "In review"
+        assert all("updated" not in d for d in by_id.values())
+
+    def test_a_non_string_document_id_degrades_to_the_indexed_fields(self, tmp_path):
+        store = self._store(tmp_path)
+        store._files["ji/indexes/index_document_mapping.json"] = json.dumps({
+            "1": {"documentId": 101, "documentUrl": "https://tracker.example.invalid/browse/DEMO-101",
+                  "documentPath": "ji/documents/DEMO-101_Build_the_thing.md.json"},
+        })
+        docs = self._client(store).get(
+            "/api/collection/ji/documents", params={"include_issue_fields": "1"}).json()["documents"]
+        assert docs == [{"id": 101, "url": "https://tracker.example.invalid/browse/DEMO-101",
+                         "status": "In review", "title": "Build the thing", "issue_type": "Story",
+                         "epic_link": "DEMO-100", "epic_summary": "Demo epic"}]
+
+    def test_a_source_rewritten_before_the_reindex_is_served_whole(self, tmp_path):
+        # The ingest writes the source first; until the reindex the index is
+        # stale. Every field comes from the source, none from the index.
+        store = self._store(tmp_path)
+        (tmp_path / "DEMO-101_Build_the_thing.md").write_text(
+            '---\ntitle: "Build the thing, renamed"\nstatus: "Done"\nissue_type: "Story"\n'
+            'updated: "2025-02-03T04:05:06.000+0100"\nepic_link: ""\n---\nbody\n'
+        )
+        by_id = self._docs(store, include_issue_fields="1")
+        assert by_id["DEMO-101_Build_the_thing.md"] == {
+            "id": "DEMO-101_Build_the_thing.md",
+            "url": "https://tracker.example.invalid/browse/DEMO-101",
+            "title": "Build the thing, renamed", "status": "Done", "issue_type": "Story",
+            "updated": "2025-02-03T04:05:06.000+0100",
+        }
+
+    def test_an_escaped_updated_is_served_as_iso_8601(self, tmp_path):
+        from datetime import datetime
+        store = self._store(tmp_path)
+        (tmp_path / "DEMO-101_Build_the_thing.md").write_text(
+            '---\nstatus: "In review"\nupdated: "2024-01-02T03\\:04\\:05.000+0100"\n---\n'
+        )
+        updated = self._docs(store, include_issue_fields="1")["DEMO-101_Build_the_thing.md"]["updated"]
+        assert updated == "2024-01-02T03:04:05.000+0100"
+        assert datetime.fromisoformat(updated).utcoffset().total_seconds() == 3600
+
+    def test_matched_fields_are_stripped_and_free_text_is_served_as_stored(self, tmp_path):
+        store = self._store(tmp_path)
+        (tmp_path / "DEMO-101_Build_the_thing.md").write_text(
+            '---\ntitle: "  Padded title  "\nstatus: "  Done  "\nissue_type: " Bug "\n'
+            'epic_link: " DEMO-100 "\nepic_summary: " Padded epic "\n'
+            'updated: " 2025-02-03T04:05:06.000+0100 "\n---\n'
+        )
+        doc = self._docs(store, include_issue_fields="1")["DEMO-101_Build_the_thing.md"]
+        assert doc["title"] == "  Padded title  "
+        assert doc["epic_summary"] == " Padded epic "
+        assert (doc["status"], doc["issue_type"], doc["epic_link"], doc["updated"]) == (
+            "Done", "Bug", "DEMO-100", "2025-02-03T04:05:06.000+0100")
+
+    @pytest.mark.parametrize("breakage", ["manifest-unreadable", "basepath-missing", "source-undecodable"])
+    def test_a_repeated_failure_warns_once_per_process(self, tmp_path, caplog, breakage):
+        import logging
+        store = self._store(tmp_path)
+        if breakage == "manifest-unreadable":
+            store._files["ji/manifest.json"] = "{not json"
+        elif breakage == "basepath-missing":
+            store._files["ji/manifest.json"] = json.dumps(
+                {"reader": {"type": "localFiles", "basePath": str(tmp_path / "gone")}})
+        else:
+            for name in ("DEMO-101_Build_the_thing.md", "DEMO-105_String_metadata.md"):
+                (tmp_path / name).write_bytes(b'---\ntitle: "caf\xe9"\n---\n')
+        with caplog.at_level(logging.DEBUG):
+            for _ in range(3):
+                self._docs(store, include_issue_fields="1")
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warnings) == 1, [r.getMessage() for r in warnings]
+        assert warnings[0].exc_info is None
 
 
 class TestCollectionDocumentScores(_CollectionDocumentsCase):

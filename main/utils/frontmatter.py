@@ -63,7 +63,9 @@ def normalize_frontmatter_string(value) -> str | None:
     It lives here because the ingest writers are not the only writers, and the
     readers apply it to sets of their own: the ingest validator to every capped
     string field, the documents listing to ``summary_kind`` and
-    ``thumbnail_url``, the files converter to ``summary_kind`` and
+    ``thumbnail_url`` plus the tracker keys ``status``, ``issue_type``,
+    ``epic_link`` and ``updated`` (``include_issue_fields``; not ``title`` or
+    ``epic_summary``), the files converter to ``summary_kind`` and
     ``summary_lang`` only (see ``_FRONTMATTER_NORMALIZED_FIELDS`` there — a
     padded ``caption_lang`` or ``thumbnail_url`` on disk still reaches a chunk
     verbatim). Two of those readers read markdown FILES ON DISK — the documents
