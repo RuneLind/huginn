@@ -198,7 +198,7 @@ def _parse_claude_response(text: str) -> tuple[str, str]:
 def ingest_youtube(req: YouTubeIngestRequest, *, transcripts_path: str) -> dict:
     """Ingest a YouTube transcript: resolve title, fetch transcript, summarize via Claude, save markdown.
 
-    Returns: {file_path, category, summary, title, url}.
+    Returns: {file_path, category, summary, title, url, author}.
     """
     date = req.date or dt.date.today().isoformat()
 
