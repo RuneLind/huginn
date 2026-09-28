@@ -231,7 +231,7 @@ class VimeoIngestRequest(BaseModel):
         # The head itself is bounded in `write_summary`
         # (`FRONTMATTER_MAX_CHARS`, a 413), for every vertical. The check is
         # `_summary_ingest.check_frontmatter_field` — shared with the YouTube
-        # vertical, which caps a field of its own by the same rule.
+        # vertical, which caps its own fields by the same rule.
         return check_frontmatter_field(value)
 
     @field_validator("tags")

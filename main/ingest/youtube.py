@@ -53,8 +53,17 @@ class YouTubeIngestRequest(BaseModel):
     # is the contract and is deliberately not changed; a reader that must not
     # confuse the two has to look at the document's own date, not at this key.
     summary_kind: Optional[str] = None
+    # What the video's own page said about it, under the Vimeo vertical's keys
+    # so one converter allowlist and one reader vocabulary serve both: the
+    # channel that published it, its upload date (kept apart from `date`, the
+    # CAPTURE day), and its exact length in whole seconds. Each is omitted when
+    # absent, like `summary_kind`. `duration_sec` is an int as in Vimeo's model,
+    # so a fractional 12.5 is a 422 (`int_from_float`), not a truncation.
+    author: Optional[str] = None
+    upload_date: Optional[str] = None
+    duration_sec: Optional[int] = None
 
-    @field_validator("summary_kind")
+    @field_validator("summary_kind", "author", "upload_date")
     @classmethod
     def _cap_frontmatter_field(cls, value: Optional[str]) -> Optional[str]:
         # Written VERBATIM into the frontmatter, so it is capped where Vimeo
@@ -189,7 +198,7 @@ def _parse_claude_response(text: str) -> tuple[str, str]:
 def ingest_youtube(req: YouTubeIngestRequest, *, transcripts_path: str) -> dict:
     """Ingest a YouTube transcript: resolve title, fetch transcript, summarize via Claude, save markdown.
 
-    Returns: {file_path, category, summary, title, url}.
+    Returns: {file_path, category, summary, title, url, author}.
     """
     date = req.date or dt.date.today().isoformat()
 
@@ -237,6 +246,14 @@ def ingest_youtube(req: YouTubeIngestRequest, *, transcripts_path: str) -> dict:
     extra: dict[str, object] = {}
     if req.summary_kind:
         extra["summary_kind"] = req.summary_kind
+    if req.author:
+        extra["author"] = req.author
+    if req.upload_date:
+        extra["upload_date"] = req.upload_date
+    if req.duration_sec is not None:
+        # An int, so the writer emits a bare `duration_sec: 3220` the
+        # converter serves as a number — Vimeo's rule.
+        extra["duration_sec"] = req.duration_sec
 
     result = write_summary(
         root=transcripts_path,
@@ -251,6 +268,9 @@ def ingest_youtube(req: YouTubeIngestRequest, *, transcripts_path: str) -> dict:
 
     result["title"] = title
     result["url"] = req.url
+    # Echoed like every other author-bearing source (None when absent); it
+    # reaches the HTTP body because the registry's `response_fields` names it.
+    result["author"] = req.author
     return result
 
 

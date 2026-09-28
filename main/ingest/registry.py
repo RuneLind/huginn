@@ -83,7 +83,7 @@ INGEST_SOURCES: list[IngestSource] = [
         collection_help="Collection name for youtube transcripts",
         operation="YouTube ingest",
         not_configured_detail="YouTube transcripts path not configured",
-        response_fields=("file_path", "category", "summary"),
+        response_fields=("file_path", "author", "category", "summary"),
         similar_query=lambda req, result: result["summary"][:2000],
         exclude_match=lambda req, doc: doc.get("url", "") == req.url,
     ),

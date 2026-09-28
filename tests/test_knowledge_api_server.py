@@ -3391,6 +3391,45 @@ class TestYouTubeIngestUnit:
         from main.ingest._summary_ingest import FRONTMATTER_FIELD_MAX_BYTES
         assert FRONTMATTER_FIELD_MAX_BYTES == self._FIELD_CAP
 
+    def test_capture_fields_are_written_under_vimeos_keys(self, tmp_path):
+        from main.ingest.youtube import ingest_youtube
+        req = self._req(author="Some Channel", upload_date="2026-08-14", duration_sec=3220)
+        result = ingest_youtube(req, transcripts_path=str(tmp_path))
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert 'author: "Some Channel"' in written
+        assert 'upload_date: "2026-08-14"' in written
+        # Bare, not quoted: the converter serves it as a number.
+        assert "\nduration_sec: 3220\n" in written
+        assert result["author"] == "Some Channel"
+
+    def test_a_payload_without_capture_fields_writes_no_keys(self, tmp_path):
+        from main.ingest.youtube import ingest_youtube
+        result = ingest_youtube(self._req(author="  ", upload_date=""), transcripts_path=str(tmp_path))
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        for key in ("author", "upload_date", "duration_sec"):
+            assert f"{key}:" not in written
+
+    def test_a_zero_duration_is_written(self, tmp_path):
+        # `is not None`, not truthiness: 0 is a value, not an absence.
+        from main.ingest.youtube import ingest_youtube
+        result = ingest_youtube(self._req(duration_sec=0), transcripts_path=str(tmp_path))
+        written = (tmp_path / result["file_path"]).read_text(encoding="utf-8")
+        assert "\nduration_sec: 0\n" in written
+
+    def test_a_fractional_duration_is_rejected_not_truncated(self):
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError, match="fractional part") as exc:
+            self._req(duration_sec=12.5)
+        assert "duration_sec" in str(exc.value)
+
+    @pytest.mark.parametrize("field", ["author", "upload_date"])
+    def test_capture_strings_are_capped_like_summary_kind(self, field):
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError, match="exceeds") as exc:
+            self._req(**{field: "x" * (self._FIELD_CAP + 1)})
+        assert field in str(exc.value)
+        self._req(**{field: "x" * self._FIELD_CAP})
+
 
 class TestYouTubeDocumentThroughTheConverter:
     """What the INDEX ends up holding for a YouTube capture with slides.
@@ -3439,6 +3478,20 @@ class TestYouTubeDocumentThroughTheConverter:
         assert "summary_kind" not in converted["metadata"]
         for chunk in converted["chunks"]:
             assert "summary_kind" not in chunk["metadata"]
+
+    def test_capture_fields_reach_the_document_metadata_typed(self, tmp_path):
+        converted = self._convert(
+            tmp_path, author="Some Channel", upload_date="2026-08-14", duration_sec=3220
+        )
+        meta = converted["metadata"]
+        assert meta["author"] == "Some Channel"
+        assert meta["upload_date"] == "2026-08-14"
+        assert meta["duration_sec"] == 3220 and type(meta["duration_sec"]) is int
+
+    def test_a_capture_without_capture_fields_carries_none(self, tmp_path):
+        meta = self._convert(tmp_path)["metadata"]
+        for key in ("author", "upload_date", "duration_sec"):
+            assert key not in meta
 
     def test_a_quoted_slide_survives_into_the_document_text(self, tmp_path):
         # huginn #128: the document-level `text` keeps ordinary markdown
