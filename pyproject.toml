@@ -35,3 +35,12 @@ dependencies = [
 dev = [
     "pytest>=8.0.0",
 ]
+
+# uv.lock is gitignored, so security floors for transitive deps live here.
+# pip-audit 2026-10-27: pypdf (16 advisories), urllib3, setuptools.
+[tool.uv]
+constraint-dependencies = [
+    "pypdf>=6.21.2",
+    "urllib3>=2.8.0",
+    "setuptools>=84.1.0",
+]
