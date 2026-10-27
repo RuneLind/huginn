@@ -717,6 +717,11 @@ build machine can hold private sub-repos, raw sources and archives of `data/`.
   `serve.in` (the public list minus `unstructured`, `playwright`, `yt-dlp`) and
   `pins.txt`; one file serves x86_64 and aarch64. Recompile with
   `uv pip compile requirements/serve.in -c requirements/pins.txt --python-version 3.12 --python-platform x86_64-manylinux_2_28 --torch-backend cpu --generate-hashes -o requirements/serve.txt`.
+  Run it from the repo root: it also reads the `[tool.uv] constraint-dependencies`
+  floors in `pyproject.toml` (the `-c (workspace)` annotations), so recompile when
+  a floor changes. For the same reason, `uv pip install -r requirements/serve.txt`
+  from the repo root fails `--require-hashes` on those `>=` floors; install from
+  another directory, as the Dockerfile does.
   The build log must show only `torch` from `*.pytorch.org` (uv resolves at
   `download.pytorch.org`, downloads from `download-r2.pytorch.org`); that check
   needs `--no-cache`, since a cached install step logs nothing.
