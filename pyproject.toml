@@ -37,10 +37,15 @@ dev = [
 ]
 
 # uv.lock is gitignored, so security floors for transitive deps live here.
-# pip-audit 2026-10-27: pypdf (16 advisories), urllib3, setuptools.
+# pip-audit 2026-10-27. Not floored (fix needs a new major): pillow 13,
+# cryptography 50, filelock 4. No fix released: accelerate, one pyjwt advisory.
 [tool.uv]
 constraint-dependencies = [
     "pypdf>=6.21.2",
     "urllib3>=2.8.0",
     "setuptools>=84.1.0",
+    "certifi>=2026.10.19",
+    "langgraph-sdk>=0.4.4",
+    "mcp>=1.30.0",
+    "pyjwt>=2.15.0",
 ]
