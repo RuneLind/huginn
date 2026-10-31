@@ -4,6 +4,28 @@ from sentence_transformers import CrossEncoder
 
 logger = logging.getLogger(__name__)
 
+# Token lengths round up to a multiple of this, so a batch has one of 4 lengths
+# (128..512) instead of any length up to 512. PyTorch on the Mac GPU (MPS) keeps
+# memory for every input shape it sees and never frees it (empty_cache does not
+# help): unpadded, the server grew ~3 GB per new query until macOS killed it at
+# ~150 GB; padded, a probe of varied batches stopped growing at ~5.7 GB.
+PAD_TO_MULTIPLE_OF = 128
+
+
+class _BucketedTokenizer:
+    """Wraps a tokenizer so every call pads to a multiple of PAD_TO_MULTIPLE_OF."""
+
+    def __init__(self, tokenizer, multiple):
+        self._tokenizer = tokenizer
+        self._multiple = multiple
+
+    def __call__(self, *args, **kwargs):
+        kwargs["pad_to_multiple_of"] = self._multiple
+        return self._tokenizer(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._tokenizer, name)
+
 
 class CrossEncoderReranker:
     """Reranks search results using a cross-encoder model.
@@ -16,6 +38,7 @@ class CrossEncoderReranker:
         self._model_name = model_name
         logger.info(f"Loading cross-encoder reranker: {model_name}")
         self.model = CrossEncoder(model_name, max_length=512)
+        self.model.tokenizer = _BucketedTokenizer(self.model.tokenizer, PAD_TO_MULTIPLE_OF)
         logger.info(f"Cross-encoder reranker loaded: {model_name}")
 
     @property

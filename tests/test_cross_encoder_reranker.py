@@ -74,3 +74,46 @@ class TestCrossEncoderReranker:
     def test_model_name_property(self):
         reranker = _make_reranker([])
         assert reranker.model_name == "mock-reranker"
+
+
+class TestBucketedTokenizer:
+    """The reranker pads every batch to a multiple of PAD_TO_MULTIPLE_OF, so the
+    model sees a bounded set of input shapes (MPS keeps memory per shape)."""
+
+    def test_forces_pad_to_multiple_of_on_every_call(self):
+        from unittest.mock import MagicMock
+
+        from main.indexes.reranking.cross_encoder_reranker import (
+            PAD_TO_MULTIPLE_OF,
+            _BucketedTokenizer,
+        )
+
+        inner = MagicMock()
+        wrapped = _BucketedTokenizer(inner, PAD_TO_MULTIPLE_OF)
+        wrapped([("q", "doc")], padding=True, truncation=True, return_tensors="pt")
+
+        assert inner.call_args.kwargs["pad_to_multiple_of"] == PAD_TO_MULTIPLE_OF
+        assert inner.call_args.kwargs["padding"] is True
+
+    def test_delegates_attributes(self):
+        from unittest.mock import MagicMock
+
+        from main.indexes.reranking.cross_encoder_reranker import _BucketedTokenizer
+
+        inner = MagicMock()
+        inner.model_max_length = 512
+        assert _BucketedTokenizer(inner, 128).model_max_length == 512
+
+    def test_constructor_installs_wrapper(self):
+        from unittest.mock import MagicMock, patch
+
+        from main.indexes.reranking import cross_encoder_reranker as mod
+
+        fake_model = MagicMock()
+        original_tokenizer = fake_model.tokenizer
+        with patch.object(mod, "CrossEncoder", return_value=fake_model):
+            reranker = mod.CrossEncoderReranker("any-model")
+
+        assert isinstance(reranker.model.tokenizer, mod._BucketedTokenizer)
+        reranker.model.tokenizer(["x"], padding=True)
+        assert original_tokenizer.call_args.kwargs["pad_to_multiple_of"] == mod.PAD_TO_MULTIPLE_OF
