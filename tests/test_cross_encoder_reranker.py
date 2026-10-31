@@ -117,3 +117,77 @@ class TestBucketedTokenizer:
         assert isinstance(reranker.model.tokenizer, mod._BucketedTokenizer)
         reranker.model.tokenizer(["x"], padding=True)
         assert original_tokenizer.call_args.kwargs["pad_to_multiple_of"] == mod.PAD_TO_MULTIPLE_OF
+
+
+class _PlainTokenizer:
+    """Picklable stand-in: records the kwargs of its last call."""
+
+    def __init__(self):
+        self.model_max_length = 512
+        self.last_kwargs = None
+
+    def __call__(self, *args, **kwargs):
+        self.last_kwargs = kwargs
+        return kwargs
+
+    def __deepcopy__(self, memo):
+        # Real tokenizers can define this; the wrapper must not forward to it.
+        return _PlainTokenizer()
+
+
+class TestBucketedTokenizerAsAttributeHolder:
+    def test_attribute_writes_reach_the_inner_tokenizer(self):
+        # CrossEncoder.max_length's setter writes tokenizer.model_max_length.
+        from main.indexes.reranking.cross_encoder_reranker import _BucketedTokenizer
+
+        inner = _PlainTokenizer()
+        wrapped = _BucketedTokenizer(inner, 128)
+        wrapped.model_max_length = 256
+
+        assert inner.model_max_length == 256
+
+    def test_deepcopy_and_pickle_round_trip(self):
+        import copy
+        import pickle
+
+        from main.indexes.reranking.cross_encoder_reranker import _BucketedTokenizer
+
+        wrapped = _BucketedTokenizer(_PlainTokenizer(), 128)
+        for clone in (copy.deepcopy(wrapped), pickle.loads(pickle.dumps(wrapped))):
+            assert isinstance(clone, _BucketedTokenizer)
+            clone(["x"], padding=True)
+            assert clone._tokenizer.last_kwargs["pad_to_multiple_of"] == 128
+
+    def test_overrides_a_caller_supplied_multiple(self):
+        from main.indexes.reranking.cross_encoder_reranker import _BucketedTokenizer
+
+        inner = _PlainTokenizer()
+        _BucketedTokenizer(inner, 128)(["x"], padding=True, pad_to_multiple_of=8)
+
+        assert inner.last_kwargs["pad_to_multiple_of"] == 128
+
+
+def test_real_tokenizer_lands_every_batch_on_a_bucket():
+    """The property the wrapper exists for: token lengths are 128, 256, 384 or 512."""
+    import pytest
+
+    transformers = pytest.importorskip("transformers")
+    from main.indexes.reranking.cross_encoder_reranker import _BucketedTokenizer
+
+    try:
+        inner = transformers.AutoTokenizer.from_pretrained(
+            "BAAI/bge-reranker-v2-m3", local_files_only=True
+        )
+    except OSError:
+        pytest.skip("bge-reranker-v2-m3 tokenizer not in the local HF cache")
+    inner.model_max_length = 512
+    wrapped = _BucketedTokenizer(inner, 128)
+
+    lengths = set()
+    for words in (1, 40, 150, 300, 2000):
+        batch = [("query", "word " * words), ("query", "word")]
+        features = wrapped(batch, padding=True, truncation=True, return_tensors="pt")
+        lengths.add(features["input_ids"].shape[1])
+
+    assert lengths <= {128, 256, 384, 512}
+    assert len(lengths) > 1
