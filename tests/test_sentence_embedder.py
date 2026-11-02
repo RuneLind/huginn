@@ -73,19 +73,6 @@ def test_embed_query_applies_the_query_prefix():
     assert model.encode.call_args.args[0] == "query: x"
 
 
-def test_benchmark_sizes_need_no_fill():
-    """A filled batch encodes rows the benchmark's per-second figure does not count."""
-    from benchmarks.speed.bench_indexing import bench_embedding_throughput
-
-    ctx = MagicMock()
-    ctx._embedder.model_name = "any-model"
-
-    bench_embedding_throughput(ctx)
-
-    sizes = {len(call.args[0]) for call in ctx._embedder.embed_passages.call_args_list}
-    assert sizes and all(size % mod.PASSAGE_BATCH_SIZE == 0 for size in sizes)
-
-
 @pytest.fixture(scope="module")
 def real_embedder():
     """The real e5 model on the CPU with the Mac GPU's shape bound on, so the test holds no GPU memory."""

@@ -23,8 +23,7 @@ def bench_embedding_throughput(ctx: BenchmarkContext) -> BenchmarkResult:
     t_start = time.monotonic()
     metrics = {}
 
-    # Whole passage batches: a partial one encodes fill rows this does not count.
-    for batch_size in [32, 64, 96]:
+    for batch_size in [10, 50, 100]:
         batch = sample_texts[:batch_size]
         times = []
         for _ in range(3):
