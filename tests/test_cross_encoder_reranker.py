@@ -83,13 +83,10 @@ class TestBucketedTokenizer:
     def test_forces_pad_to_multiple_of_on_every_call(self):
         from unittest.mock import MagicMock
 
-        from main.indexes.reranking.cross_encoder_reranker import (
-            PAD_TO_MULTIPLE_OF,
-            _BucketedTokenizer,
-        )
+        from main.indexes.bucketed_tokenizer import PAD_TO_MULTIPLE_OF, BucketedTokenizer
 
         inner = MagicMock()
-        wrapped = _BucketedTokenizer(inner, PAD_TO_MULTIPLE_OF)
+        wrapped = BucketedTokenizer(inner, PAD_TO_MULTIPLE_OF)
         wrapped([("q", "doc")], padding=True, truncation=True, return_tensors="pt")
 
         assert inner.call_args.kwargs["pad_to_multiple_of"] == PAD_TO_MULTIPLE_OF
@@ -98,11 +95,11 @@ class TestBucketedTokenizer:
     def test_delegates_attributes(self):
         from unittest.mock import MagicMock
 
-        from main.indexes.reranking.cross_encoder_reranker import _BucketedTokenizer
+        from main.indexes.bucketed_tokenizer import BucketedTokenizer
 
         inner = MagicMock()
         inner.model_max_length = 512
-        assert _BucketedTokenizer(inner, 128).model_max_length == 512
+        assert BucketedTokenizer(inner, 128).model_max_length == 512
 
     def test_constructor_installs_wrapper(self):
         from unittest.mock import MagicMock, patch
@@ -114,7 +111,7 @@ class TestBucketedTokenizer:
         with patch.object(mod, "CrossEncoder", return_value=fake_model):
             reranker = mod.CrossEncoderReranker("any-model")
 
-        assert isinstance(reranker.model.tokenizer, mod._BucketedTokenizer)
+        assert isinstance(reranker.model.tokenizer, mod.BucketedTokenizer)
         reranker.model.tokenizer(["x"], padding=True)
         assert original_tokenizer.call_args.kwargs["pad_to_multiple_of"] == mod.PAD_TO_MULTIPLE_OF
 
@@ -138,10 +135,10 @@ class _PlainTokenizer:
 class TestBucketedTokenizerAsAttributeHolder:
     def test_attribute_writes_reach_the_inner_tokenizer(self):
         # CrossEncoder.max_length's setter writes tokenizer.model_max_length.
-        from main.indexes.reranking.cross_encoder_reranker import _BucketedTokenizer
+        from main.indexes.bucketed_tokenizer import BucketedTokenizer
 
         inner = _PlainTokenizer()
-        wrapped = _BucketedTokenizer(inner, 128)
+        wrapped = BucketedTokenizer(inner, 128)
         wrapped.model_max_length = 256
 
         assert inner.model_max_length == 256
@@ -150,19 +147,19 @@ class TestBucketedTokenizerAsAttributeHolder:
         import copy
         import pickle
 
-        from main.indexes.reranking.cross_encoder_reranker import _BucketedTokenizer
+        from main.indexes.bucketed_tokenizer import BucketedTokenizer
 
-        wrapped = _BucketedTokenizer(_PlainTokenizer(), 128)
+        wrapped = BucketedTokenizer(_PlainTokenizer(), 128)
         for clone in (copy.deepcopy(wrapped), pickle.loads(pickle.dumps(wrapped))):
-            assert isinstance(clone, _BucketedTokenizer)
+            assert isinstance(clone, BucketedTokenizer)
             clone(["x"], padding=True)
             assert clone._tokenizer.last_kwargs["pad_to_multiple_of"] == 128
 
     def test_overrides_a_caller_supplied_multiple(self):
-        from main.indexes.reranking.cross_encoder_reranker import _BucketedTokenizer
+        from main.indexes.bucketed_tokenizer import BucketedTokenizer
 
         inner = _PlainTokenizer()
-        _BucketedTokenizer(inner, 128)(["x"], padding=True, pad_to_multiple_of=8)
+        BucketedTokenizer(inner, 128)(["x"], padding=True, pad_to_multiple_of=8)
 
         assert inner.last_kwargs["pad_to_multiple_of"] == 128
 
@@ -172,7 +169,7 @@ def test_real_tokenizer_lands_every_batch_on_a_bucket():
     import pytest
 
     transformers = pytest.importorskip("transformers")
-    from main.indexes.reranking.cross_encoder_reranker import _BucketedTokenizer
+    from main.indexes.bucketed_tokenizer import BucketedTokenizer
 
     try:
         inner = transformers.AutoTokenizer.from_pretrained(
@@ -181,7 +178,7 @@ def test_real_tokenizer_lands_every_batch_on_a_bucket():
     except OSError:
         pytest.skip("bge-reranker-v2-m3 tokenizer not in the local HF cache")
     inner.model_max_length = 512
-    wrapped = _BucketedTokenizer(inner, 128)
+    wrapped = BucketedTokenizer(inner, 128)
 
     lengths = set()
     for words in (1, 40, 150, 300, 2000):
