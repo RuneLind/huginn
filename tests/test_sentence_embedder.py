@@ -113,6 +113,11 @@ def test_every_passage_batch_has_a_bounded_shape(real_embedder):
     assert {128, 256} <= {length for _, length in shapes}
 
 
+def test_a_real_cpu_model_reads_as_unbounded(real_embedder):
+    """Fakes set device.type by hand; this holds it against what sentence-transformers returns."""
+    assert mod._needs_bounded_shapes(real_embedder.model) is False
+
+
 def test_query_lengths_land_on_a_bucket(real_embedder):
     shapes, handle = _record_input_shapes(real_embedder)
     try:

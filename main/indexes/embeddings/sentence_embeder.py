@@ -15,8 +15,8 @@ PASSAGE_BATCH_SIZE = 32
 
 
 def _needs_bounded_shapes(model):
-    # Only the Mac GPU keeps memory per input shape. On the CPU, padding and fill
-    # only cost time: measured up to 10x slower on short passages.
+    # The Mac GPU keeps memory per input shape. Other devices skip the bound: on
+    # the CPU, padding and fill measured 7x to 20x slower on short passages.
     return model.device.type == "mps"
 
 
